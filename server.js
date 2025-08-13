@@ -6,6 +6,7 @@ import * as cheerio from "cheerio";
 /* ================== Config via env ================== */
 const RENDER_API_URL = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
 const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
+const MIN_IMG_PX = parseInt(process.env.MIN_IMG_PX || "200", 10); // min width/height inferred from URL hints
 
 /* ================== App setup ================== */
 const app = express();
@@ -184,97 +185,165 @@ function inferBrandFromName(name){
   return "";
 }
 
-/* === IMAGE EXTRACTION & SCORING (handles lazy + regex sweep + filters junk) === */
+/* === IMAGE EXTRACTION & SCORING (merged + min-pixel + cap 12) === */
 function extractImages($, jsonld, og, baseUrl, name, rawHtml){
   const set = new Set();
-  const push = (u)=> { if (u) set.add(abs(baseUrl,u)); };
+  const push = (u)=> { if (u) set.add(abs(baseUrl, u)); };
 
   // JSON-LD & OG
-  (jsonld.images||[]).forEach(push);
+  (jsonld.images || []).forEach(push);
   push(og.image);
 
-  // <img> attrs (src, data-src, data-zoom-image, srcset)
-  $("img").each((_, el)=>{
+  // <img> (src + common lazy attrs + srcset)
+  $("img").each((_, el) => {
     const $el = $(el);
     const cands = [
       $el.attr("src"),
       $el.attr("data-src"),
+      $el.attr("data-original"),
+      $el.attr("data-lazy"),
       $el.attr("data-zoom-image"),
-      pickFirstFromSrcset($el.attr("srcset")),
+      pickLargestFromSrcset($el.attr("srcset")),
     ];
     cands.forEach(push);
   });
 
   // <picture><source srcset>
-  $("picture source[srcset]").each((_, el)=>{
-    push(pickFirstFromSrcset($(el).attr("srcset")));
+  $("picture source[srcset]").each((_, el) => {
+    push(pickLargestFromSrcset($(el).attr("srcset")));
   });
 
-  // background-image in inline styles
-  $('[style*="background"]').each((_, el)=>{
+  // Inline background-image
+  $('[style*="background"]').each((_, el) => {
     const style = String($(el).attr("style") || "");
     const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
     if (m && m[2]) push(m[2]);
   });
 
-  // link rel=image_src (old pattern)
-  $('link[rel="image_src"]').each((_, el)=> push($(el).attr("href")));
+  // link rel=image_src
+  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href")));
 
-  // Regex sweep for compass-style asset paths in raw HTML
-  if (rawHtml && /\/media\/images\/items\//i.test(rawHtml)) {
-    const re = /(https?:\/\/[^\s"'<>]+\/media\/images\/items\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
+  // Regex sweep for asset paths in raw HTML (handles Compass & others)
+  if (rawHtml) {
+    const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
     let m;
     while ((m = re.exec(rawHtml))) push(m[1]);
   }
 
-  // Decode, filter junk
+  // Normalize + filter
   let arr = Array.from(set)
     .filter(Boolean)
     .map(u => decodeHtml(u));
 
-  const badRe = /(logo|badge|sprite|placeholder|loader|ajax-loader|spinner|icon|data:image|\/wcm\/connect|noimage)/i;
-  const okExt = /\.(jpe?g|png|webp)(\?|#|$)/i;
+  const okExt = /\.(jpe?g|png|webp)(?:[?#].*)?$/i;
+  const badRe = /(logo|brandmark|favicon|sprite|placeholder|no-?image|loader|ajax-loader|spinner|icon|data:image|\/wcm\/connect)/i;
 
+  // Min-pixel filter (based on URL hints only; we don't fetch image bytes)
   arr = arr
+    .filter(u => okExt.test(u))
     .filter(u => !badRe.test(u))
-    .filter(u => okExt.test(u));
+    .filter(u => {
+      const { w, h } = inferSizeFromUrl(u);
+      if (!w && !h) return true; // keep if unknown
+      const maxDim = Math.max(w || 0, h || 0);
+      return maxDim >= MIN_IMG_PX;
+    });
 
-  // Scoring: prefer product-like paths and matching tokens/codes
-  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(Boolean);
-  const codeGuess = guessProductCodeFromUrl(baseUrl); // e.g., BSCWB
+  // Scoring (path pref + code/title hits; de-weight thumbs)
+  const titleTokens = (name || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const codeCandidates = [];
+  const m1 = /\/item\/([^\/?#]+)/i.exec(baseUrl);           // /item/BSCWB/...
+  const m2 = /\/p\/([A-Za-z0-9._-]+)/i.exec(baseUrl);       // /p/278-1
+  const m3 = /\/product\/([A-Za-z0-9._-]+)/i.exec(baseUrl); // /product/4014-...
+  if (m1) codeCandidates.push(m1[1]);
+  if (m2) codeCandidates.push(m2[1]);
+  if (m3) codeCandidates.push(m3[1]);
 
-  const preferRe = /(\/media\/images\/items\/|\/products?\/|\/product\/|\/images\/products?\/)/i;
+  const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product)/i;
 
   const scored = arr.map(u => {
     const L = u.toLowerCase();
     let score = 0;
     if (preferRe.test(L)) score += 3;
-    if (codeGuess && L.includes(codeGuess.toLowerCase())) score += 3;
+    if (codeCandidates.some(c => c && L.includes(String(c).toLowerCase()))) score += 3;
     if (titleTokens.some(t => L.includes(t))) score += 1;
-    if (/thumb|small|tiny|icon|badge/.test(L)) score -= 1;
-    if (/(_\d{3,}x\d{3,}|-?1200x|\/large\/|\/hi(res)?\/)/.test(L)) score += 1;
+    if (/thumb|thumbnail|small|tiny|icon|badge|mini/.test(L)) score -= 1;
+    if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|\/large\/|\/hi(res)?\/|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
     return { url: u, score };
   });
 
-  scored.sort((a,b)=> b.score - a.score);
+  scored.sort((a, b) => b.score - a.score);
 
-  // Dedup by filename
+  // Dedup by filename; CAP = 12
   const seen = new Set();
   const out = [];
   for (const s of scored) {
-    const base = s.url.split('/').pop().split('?')[0];
+    const base = s.url.split("/").pop().split("?")[0];
     if (seen.has(base)) continue;
     seen.add(base);
     out.push({ url: s.url });
-    if (out.length >= 8) break;
+    if (out.length >= 12) break;
   }
+
   return out;
 }
 
-function pickFirstFromSrcset(srcset){
+function pickLargestFromSrcset(srcset) {
   if (!srcset) return "";
-  const parts = String(srcset).split(",").map(s=>s.trim().split(/\s+/)[0]).filter(Boolean);
-  return parts[0] || "";
+  try {
+    const parts = String(srcset)
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(s => {
+        const [u, d] = s.split(/\s+/);
+        const n = d && /\d+/.test(d) ? parseInt(d, 10) : 0; // treat "2x" or "800w" as numeric
+        return { u, n };
+      });
+    if (!parts.length) return "";
+    parts.sort((a, b) => b.n - a.n);
+    return parts[0].u || parts[0];
+  } catch {
+    return String(srcset).split(",").map(s => s.trim().split(/\s+/)[0]).filter(Boolean)[0] || "";
+  }
+}
+
+function inferSizeFromUrl(u) {
+  // Parses hints like ..._800x800..., -800x, 800x600, ?w=800&h=800, &width=1200, etc.
+  try {
+    const out = { w: 0, h: 0 };
+    const lower = u.toLowerCase();
+
+    // Filename patterns
+    const fn = lower.split("/").pop() || "";
+    let m = fn.match(/(?:_|-)(\d{2,5})x(\d{2,5})/); // _800x800 or -1200x628
+    if (m) { out.w = parseInt(m[1], 10); out.h = parseInt(m[2], 10); return out; }
+
+    m = fn.match(/(?:_|-)(\d{2,5})x/); // -800x (width only)
+    if (m) { out.w = parseInt(m[1], 10); return out; }
+
+    m = fn.match(/(\d{2,5})x(\d{2,5})/); // 800x600 (bare)
+    if (m) { out.w = parseInt(m[1], 10); out.h = parseInt(m[2], 10); return out; }
+
+    // Query params
+    const q = u.split("?")[1] || "";
+    if (q) {
+      const params = new URLSearchParams(q);
+      const widthKeys = ["w", "width", "maxwidth", "mw", "size"];
+      const heightKeys = ["h", "height", "maxheight", "mh"];
+      for (const k of widthKeys) {
+        const v = params.get(k);
+        if (v && /^\d{2,5}$/.test(v)) out.w = Math.max(out.w, parseInt(v, 10));
+      }
+      for (const k of heightKeys) {
+        const v = params.get(k);
+        if (v && /^\d{2,5}$/.test(v)) out.h = Math.max(out.h, parseInt(v, 10));
+      }
+    }
+    return out;
+  } catch {
+    return { w: 0, h: 0 };
+  }
 }
 
 function guessProductCodeFromUrl(url){
@@ -326,7 +395,7 @@ function extractFeatureList($){
   const areas = ['.features, .feature-list, ul.features, .bullet, .bullets', 'ul, ol', '.tab-content, .tabs-content'].join(', ');
   $(areas).each((_, el)=>{
     $(el).find('li').each((__, li)=>{
-      const txt=cleanup($(li).text());
+      const txt=cleanup($(li).text()));
       if (txt && txt.length>6 && txt.length<200) items.push(txt);
     });
   });
@@ -342,10 +411,7 @@ function extractFeatureList($){
 /* ================== Utils ================== */
 function safeDecodeOnce(s){
   try {
-    // If it's already raw, decodeURIComponent will return the same string (no %)
-    // If it's encoded, this will properly decode it (once).
     const decoded = decodeURIComponent(s);
-    // Guard: if decoding introduced illegal chars, fall back
     if (!decoded || /%[0-9A-Fa-f]{2}/.test(decoded)) return s;
     return decoded;
   } catch { return s; }
