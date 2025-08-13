@@ -395,7 +395,7 @@ function extractFeatureList($){
   const areas = ['.features, .feature-list, ul.features, .bullet, .bullets', 'ul, ol', '.tab-content, .tabs-content'].join(', ');
   $(areas).each((_, el)=>{
     $(el).find('li').each((__, li)=>{
-      const txt=cleanup($(li).text()));
+      const txt = cleanup($(li).text()); // <-- fixed extra ')'
       if (txt && txt.length>6 && txt.length<200) items.push(txt);
     });
   });
