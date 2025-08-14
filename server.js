@@ -22,7 +22,7 @@ app.get("/healthz", (_, res) => res.json({ ok: true }));
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
  *                  &minpx=200&excludepng=true&aggressive=true
  *                  &harvest=true&sanitize=true
- *                  &markdown=true       // optional: include *_md fields alongside existing fields
+ *                  &markdown=true
  */
 app.get("/ingest", async (req, res) => {
   try {
@@ -80,11 +80,11 @@ app.get("/ingest", async (req, res) => {
       norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
     }
 
-    // === Compass-only additive harvest (keeps your existing data intact) ===
+    /* === Compass-only additive harvest (append-only; no interference) === */
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
 
-      // (1) Overview: full paragraphs + bullets (merged once)
+      // Overview: bold opener + paragraphs + bullets
       const compassOverview = harvestCompassOverview($);
       if (compassOverview) {
         const seen = new Set(String(norm.description_raw || "").split(/\n+/).map(s=>s.trim().toLowerCase()).filter(Boolean));
@@ -97,13 +97,13 @@ app.get("/ingest", async (req, res) => {
         norm.description_raw = merged.join("\n");
       }
 
-      // (2) Technical Specifications (union-merge; existing keys win)
+      // Technical Specifications: tab-trigger → target panel (plus fallbacks)
       const compassSpecs = harvestCompassSpecs($);
       if (Object.keys(compassSpecs).length) {
         norm.specs = { ...(norm.specs || {}), ...compassSpecs };
       }
     }
-    // === end Compass-only additions ===
+    /* === end Compass-only additions === */
 
     if (wantMd) {
       const $ = cheerio.load(html);
@@ -226,7 +226,8 @@ function schemaPropsToSpecs(props){
   return out;
 }
 
-/* Prefer content blocks near product detail; also capture lead/strong/headings */
+/* Prefer copy blocks near product detail; include heading/strong/lead intro
+   — single additive change so bold opener isn't skipped */
 function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
@@ -236,8 +237,9 @@ function pickBestDescriptionBlock($){
 
   let text = "";
   $(candidates).each((_, el) => {
+    // ADDITIVE: include headings/strong/lead/intro + p + li, and ignore hidden dupes
     let t = $(el)
-      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p')
+      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p,li')
       .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
       .map((__, n)=>$(n).text())
       .get()
@@ -564,11 +566,11 @@ function extractSpecsSmart($){
     if (Object.keys(scoped).length) return scoped;
   }
 
-  // 2) Dense spec block heuristic (handles sites where panels lack IDs)
+  // 2) Dense spec block heuristic (handles panels without IDs)
   const dense = extractSpecsFromDensestBlock($);
   if (Object.keys(dense).length) return dense;
 
-  // 3) Fallback: legacy global parsing
+  // 3) Global fallback
   const out = {};
 
   $('table').each((_, tbl)=>{
@@ -607,7 +609,7 @@ function extractSpecsSmart($){
   return out;
 }
 
-/* — Find the container that most looks like a spec table/list and parse it — */
+/* — Find densest spec-like container and parse it — */
 function extractSpecsFromDensestBlock($){
   const candidates = [
     '[role="tabpanel"]', '.tab-pane', '.tabs-content > *', '.accordion-content',
@@ -663,11 +665,10 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features (FOCUSED; no paragraph mining) === */
+/* === Features (explicit areas only) === */
 function extractFeaturesSmart($){
   const items = [];
 
-  // Only explicit feature areas, not generic descriptions
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
     '.product-highlights','.key-features','.highlights'
@@ -696,7 +697,6 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  // Also from a dedicated "Features" tab if present
   const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
   if (featPane){
     const $c = $(featPane);
@@ -737,7 +737,7 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Resolve tabs === */
+/* === Tabs === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
@@ -827,7 +827,7 @@ function augmentFromTabs(norm, baseUrl, html, opts){
 
   let addDesc = "";
   for (const el of descPanes) {
-    const d = extractDescriptionFromContainer($, el); // paragraphs/heads only (no bullets here)
+    const d = extractDescriptionFromContainer($, el); // paragraphs/heads only
     if (d && d.length > addDesc.length) addDesc = d;
   }
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
@@ -952,7 +952,7 @@ function extractFeaturesFromContainer($, container){
   return out;
 }
 
-/* — Overview extractor (paragraphs only; bullets handled by Compass helper) — */
+/* — Overview extractor (paragraphs/heads only; bullets handled in Compass helper) — */
 function extractDescriptionFromContainer($, container){
   const $c = $(container);
   const parts = [];
@@ -964,7 +964,6 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
-  // headings + paragraphs (no <li> here to avoid cross-contamination)
   $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
   $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
 
@@ -988,7 +987,7 @@ function extractDescriptionMarkdown($){
   let bestEl = null, bestLen = 0;
 
   $(candidates).each((_, el)=>{
-    const text = cleanup($(el).text());
+    const text = cleanup($(el).text()));
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
 
@@ -1206,7 +1205,6 @@ function sanitizeIngestPayload(p) {
   let features = Array.isArray(out.features_raw) ? out.features_raw.filter(cleanFeature) : [];
   features = dedupeList(features);
 
-  // If not enough features, derive ONLY from specs (not from description).
   if (features.length < 3) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
@@ -1307,7 +1305,7 @@ function isCompass(u){
   try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); } catch { return false; }
 }
 
-/* Harvest full Overview (lead + all paragraphs + bullets) from Compass Overview tab */
+/* Harvest full Overview (bold opener + paragraphs + bullets) from Compass Overview */
 function harvestCompassOverview($){
   const candPanels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, #tabs, .product-details, .product-detail');
   let best = "";
@@ -1322,9 +1320,15 @@ function harvestCompassOverview($){
     const parts = [];
     const push = (t) => { t = cleanup(t); if (t) parts.push(t); };
 
-    // All paragraphs (entire text, not only bolded sentence)
+    // Bold opener / heading chunks (not inside <p>)
+    $p.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro')
+      .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
+      .each((__, el)=> push($(el).text()));
+
+    // All overview paragraphs
     $p.find('p').each((__, el)=> push($(el).text()));
-    // Bullets under the overview
+
+    // Bullets right under overview
     $p.find('ul li, ol li').each((__, el)=>{
       const t = cleanup($(el).text());
       if (t && t.length <= 220) parts.push(`• ${t}`);
@@ -1340,36 +1344,51 @@ function harvestCompassOverview($){
   return best;
 }
 
-/* Harvest Compass Technical Specifications (two-column table and key:value bullets) */
+/* Harvest Compass Technical Specifications via tab trigger → panel (plus fallbacks) */
 function harvestCompassSpecs($){
-  const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-details, .product-detail, section');
   const out = {};
+
+  // 1) Use the actual tab trigger labeled "Technical Specifications"
+  $('a,button,[role="tab"]').each((_, el)=>{
+    const label = cleanup($(el).text());
+    if (!/technical\s+specifications?/i.test(label)) return;
+
+    const href = $(el).attr('href') || '';
+    const controls = $(el).attr('aria-controls') || '';
+    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
+    let target = null;
+    if (href && href.startsWith('#')) target = $(href)[0];
+    if (!target && controls) target = documentQueryById($, controls);
+    if (!target && dataTarget && dataTarget.startsWith('#')) target = $(dataTarget)[0];
+
+    if (target) {
+      Object.assign(out, extractSpecsFromContainer($, target));
+      if (Object.keys(out).length) return false; // break .each
+    } else {
+      // If we can't resolve a target, try the nearest panel sibling under a tabs container
+      const $tabs = $(el).closest('.tabs, .tab, .product-tabs, .tab-wrap, .tab-container, .tab-content').parent();
+      if ($tabs.length) {
+        $tabs.find('[role="tabpanel"], .tab-pane, .accordion-content, .tab-content > *').each((__, panel)=>{
+          const local = extractSpecsFromContainer($, panel);
+          Object.assign(out, local);
+        });
+        if (Object.keys(out).length) return false;
+      }
+    }
+  });
+  if (Object.keys(out).length) return out;
+
+  // 2) Panels that have a heading "Technical Specifications"
+  const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-details, .product-detail, section');
   panels.each((_, panel)=>{
     const $p = $(panel);
     const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
     if (!/technical\s+specifications?/i.test(heading)) return;
-
-    // table rows
-    $p.find('tr').each((__, tr)=>{
-      const cells = $(tr).find('th,td');
-      if (cells.length >= 2){
-        const k = cleanup($(cells[0]).text()).replace(/:$/, '');
-        const v = cleanup($(cells[1]).text());
-        if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
-      }
-    });
-
-    // key:value bullets
-    $p.find('li').each((__, li)=>{
-      const t = cleanup($(li).text());
-      const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
-      if (m){
-        const k = m[1].toLowerCase().replace(/\s+/g,'_');
-        const v = m[2];
-        if (k && v) out[k] ||= v;
-      }
-    });
+    Object.assign(out, extractSpecsFromContainer($, panel));
   });
+  if (Object.keys(out).length) return out;
+
+  // 3) Nothing yet? fall back to existing dense/global logic (non-interfering)
   return out;
 }
 
