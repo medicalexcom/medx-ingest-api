@@ -4,8 +4,8 @@ import cors from "cors";
 import * as cheerio from "cheerio";
 
 /* ================== Config via env ================== */
-const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
-const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
+const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim();
+const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim();
 const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
 const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
 
@@ -18,12 +18,6 @@ app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
 
 /* ================== Ingest route ================== */
-/**
- * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
- *                  &minpx=200&excludepng=true&aggressive=true
- *                  &harvest=true&sanitize=true
- *                  &markdown=true       // optional: include *_md fields alongside existing fields
- */
 app.get("/ingest", async (req, res) => {
   try {
     const rawUrl = String(req.query.url || "");
@@ -201,7 +195,7 @@ function schemaPropsToSpecs(props){
   return out;
 }
 
-/* Prefer content blocks near product detail; also capture lead/strong/headings */
+/* Prefer copy blocks near product detail */
 function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
@@ -527,9 +521,9 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   return Array.from(out);
 }
 
-/* === Specs (SCOPED FIRST) === */
+/* === Specs (robust: scoped → dense block fallback → global) === */
 function extractSpecsSmart($){
-  // 1) Prefer a dedicated specs pane/tab
+  // 1) Try dedicated specs pane/tab
   let specPane = resolveTabPane($, [
     'technical specifications','technical specification',
     'tech specs','specifications','specification','details'
@@ -539,7 +533,11 @@ function extractSpecsSmart($){
     if (Object.keys(scoped).length) return scoped;
   }
 
-  // 2) Fallback: legacy global parsing
+  // 2) Dense spec block heuristic (handles sites where panels lack IDs)
+  const dense = extractSpecsFromDensestBlock($);
+  if (Object.keys(dense).length) return dense;
+
+  // 3) Fallback: legacy global parsing
   const out = {};
 
   $('table').each((_, tbl)=>{
@@ -578,6 +576,46 @@ function extractSpecsSmart($){
   return out;
 }
 
+/* — Find the container that most looks like a spec table/list and parse it — */
+function extractSpecsFromDensestBlock($){
+  const candidates = [
+    '[role="tabpanel"]', '.tab-pane', '.tabs-content > *', '.accordion-content',
+    '.product-tabs *', '.tab-content *', 'section', '.panel', '.panel-body', '.content'
+  ].join(', ');
+
+  let bestEl = null, bestScore = 0;
+
+  $(candidates).each((_, el)=>{
+    const $el = $(el);
+    let score = 0;
+
+    // table-like rows
+    $el.find('tr').each((__, tr)=>{
+      const cells=$(tr).find('th,td');
+      if (cells.length>=2){
+        const k = cleanup($(cells[0]).text());
+        const v = cleanup($(cells[1]).text());
+        if (k && v && /:|back|warranty|weight|capacity|handles|depth|height/i.test(k)) score++;
+      }
+    });
+
+    // definition lists
+    const dts = $el.find('dt').length;
+    const dds = $el.find('dd').length;
+    if (dts && dds && dts === dds) score += Math.min(dts, 12);
+
+    // key:value list items
+    $el.find('li').each((__, li)=>{
+      const t = cleanup($(li).text());
+      if (/^[^:]{2,60}:\s+.{2,300}$/.test(t)) score++;
+    });
+
+    if (score > bestScore) { bestScore = score; bestEl = el; }
+  });
+
+  return bestEl ? extractSpecsFromContainer($, bestEl) : {};
+}
+
 function deriveSpecsFromParagraphs($){
   const out = {};
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
@@ -594,11 +632,10 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features (FOCUSED; no paragraph mining) === */
+/* === Features (unchanged policy) === */
 function extractFeaturesSmart($){
   const items = [];
 
-  // Only explicit feature areas, not generic descriptions
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
     '.product-highlights','.key-features','.highlights'
@@ -627,7 +664,6 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  // Also from a dedicated "Features" tab if present
   const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
   if (featPane){
     const $c = $(featPane);
@@ -668,19 +704,21 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Resolve tabs === */
+/* === Tabs === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
 
-  $('a,button').each((_, el)=>{
+  $('a,button,[role="tab"]').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
+    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
     if (href && href.startsWith('#')) target = $(href)[0];
     if (!target && controls) target = documentQueryById($, controls);
+    if (!target && dataTarget && dataTarget.startsWith('#')) target = $(dataTarget)[0];
     if (target) { pane = target; return false; }
   });
 
@@ -709,8 +747,10 @@ function resolveAllPanes($, names){
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
+    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     if (href && href.startsWith('#')) { const t = $(href)[0]; if (t) out.add(t); }
     if (controls) { const t = documentQueryById($, controls); if (t) out.add(t); }
+    if (dataTarget && dataTarget.startsWith('#')) { const t = $(dataTarget)[0]; if (t) out.add(t); }
   });
 
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
@@ -752,9 +792,10 @@ function augmentFromTabs(norm, baseUrl, html, opts){
   const addFeatures = [];
   for (const el of featurePanes) addFeatures.push(...extractFeaturesFromContainer($, el));
 
+  // Overview paragraphs + bullets (for Overview only)
   let addDesc = "";
   for (const el of descPanes) {
-    const d = extractDescriptionFromContainer($, el);
+    const d = extractDescriptionFromContainer($, el, { includeBullets: true });
     if (d && d.length > addDesc.length) addDesc = d;
   }
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
@@ -767,13 +808,6 @@ function augmentFromTabs(norm, baseUrl, html, opts){
       const k = String(f).toLowerCase();
       if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
       if (norm.features_raw.length >= 20) break;
-    }
-  }
-
-  if (addManuals.size) {
-    const have = new Set(norm.manuals || []);
-    for (const u of addManuals) {
-      if (!have.has(u)) { (norm.manuals ||= []).push(u); have.add(u); }
     }
   }
 
@@ -848,46 +882,8 @@ function extractSpecsFromContainer($, container){
   return out;
 }
 
-function collectManualsFromContainer($, container, baseUrl, sinkSet){
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
-  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr('href') || "");
-    const full = abs(baseUrl, href);
-    if (!full) return;
-    const L = full.toLowerCase();
-    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
-  });
-}
-
-function extractFeaturesFromContainer($, container){
-  const items = [];
-  const $c = $(container);
-
-  const pushIfGood = (txt) => {
-    const t = cleanup(txt);
-    if (!t) return;
-    if (t.length < 7 || t.length > 220) return;
-    if (/>|›|»/.test(t)) return;
-    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
-    if (/(https?:\/\/|www\.)/i.test(t)) return;
-    items.push(t);
-  };
-
-  $c.find('li').each((_, li)=> pushIfGood($(li).text()));
-  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
-
-  const seen = new Set(); const out = [];
-  for (const t of items){
-    const k = t.toLowerCase();
-    if (!seen.has(k)) { seen.add(k); out.push(t); }
-    if (out.length >= 20) break;
-  }
-  return out;
-}
-
-/* ===== Description container → markdown (for optional *_md fields) ===== */
-function extractDescriptionFromContainer($, container){
+/* — Overview extractor (now can include bullets when asked) — */
+function extractDescriptionFromContainer($, container, opts = { includeBullets: false }){
   const $c = $(container);
   const parts = [];
 
@@ -898,9 +894,17 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
-  // HEADINGS + PARAGRAPHS ONLY (no <li> → avoids bullet bleed into description)
+  // headings + paragraphs
   $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
   $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
+
+  // optionally include bullets (used only for Overview panes via augmentFromTabs)
+  if (opts.includeBullets) {
+    $c.find('li').each((_, li)=>{
+      const t = cleanup($(li).text());
+      if (t && t.length >= 2 && t.length <= 220) parts.push(`• ${t}`);
+    });
+  }
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -912,7 +916,7 @@ function extractDescriptionFromContainer($, container){
   return out.join('\n');
 }
 
-/* ====== Markdown builders (additive) ====== */
+/* ====== Markdown builders ====== */
 function extractDescriptionMarkdown($){
   const candidates = [
     '[itemprop="description"]',
@@ -927,7 +931,7 @@ function extractDescriptionMarkdown($){
   });
 
   if (!bestEl) return "";
-  const raw = extractDescriptionFromContainer($, bestEl);
+  const raw = extractDescriptionFromContainer($, bestEl, { includeBullets: true });
   return containerTextToMarkdown(raw);
 }
 function containerTextToMarkdown(s){
@@ -1094,7 +1098,7 @@ function deepFindImagesFromJson(obj, out = []){
       else if (v) deepFindImagesFromJson(v, out);
     });
     ['images','gallery','media','assets','pictures','variants','slides'].forEach(k=>{
-      if (obj[k]) deepFindImagesFromJson(obj[k], out);
+      if (obj[k]) deepFindImagesFromJson(v, out);
     });
     Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
   }
@@ -1227,6 +1231,13 @@ function splitIntoSentences(text){
     .split(/(?<=[.!?])\s+(?=[A-Z(0-9])|[•·–\-]\s+|;\s+|·\s+/g)
     .map(s => s.trim())
     .filter(Boolean);
+}
+function mergeDescriptions(a, b){
+  const seen = new Set();
+  const lines = (String(a||"") + "\n" + String(b||"")).split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  const out = [];
+  for (const l of lines){ const k=l.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(l); } }
+  return out.join("\n");
 }
 
 /* ================== Listen ================== */
