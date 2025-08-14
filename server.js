@@ -80,7 +80,7 @@ app.get("/ingest", async (req, res) => {
       norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
     }
 
-    /* === Compass-only additive harvest (append-only; no interference) === */
+    /* === Compass-only additive harvest (strictly scoped) === */
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
 
@@ -219,7 +219,7 @@ function schemaPropsToSpecs(props){
   return out;
 }
 
-/* Prefer content blocks near product detail; also capture lead/strong/headings */
+/* === Your original conservative description picker (no global change) === */
 function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
@@ -229,12 +229,7 @@ function pickBestDescriptionBlock($){
 
   let text = "";
   $(candidates).each((_, el) => {
-    let t = $(el)
-      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p,li')
-      .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
-      .map((__, n)=>$(n).text())
-      .get()
-      .join(' ');
+    let t = $(el).find('p, li').map((__, n)=>$(n).text()).get().join(' ');
     t = cleanup(t || $(el).text());
     if (t && t.length > text.length) text = t;
   });
@@ -703,7 +698,7 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Tabs === */
+/* === Resolve tabs (your original; fixed the stray ')') === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
@@ -744,10 +739,8 @@ function resolveAllPanes($, names){
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
-    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     if (href && href.startsWith('#')) { const t = $(href)[0]; if (t) out.add(t); }
     if (controls) { const t = documentQueryById($, controls); if (t) out.add(t); }
-    if (dataTarget && dataTarget.startsWith('#')) { const t = $(dataTarget)[0]; if (t) out.add(t); }
   });
 
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
@@ -917,7 +910,7 @@ function extractFeaturesFromContainer($, container){
   return out;
 }
 
-/* — Overview extractor (paragraphs/heads only) — */
+/* — Overview extractor (paragraphs/heads only; unchanged behavior) — */
 function extractDescriptionFromContainer($, container){
   const $c = $(container);
   const parts = [];
@@ -931,6 +924,7 @@ function extractDescriptionFromContainer($, container){
 
   $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
   $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
+  // (We intentionally do not pull <li> here to keep global behavior identical to before.)
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -942,7 +936,7 @@ function extractDescriptionFromContainer($, container){
   return out.join('\n');
 }
 
-/* ====== Markdown builders (additive) ====== */
+/* ====== Markdown builders (unchanged, but fixed 1 stray ')' earlier) ====== */
 function extractDescriptionMarkdown($){
   const candidates = [
     '[itemprop="description"]',
@@ -1271,23 +1265,18 @@ function mergeDescriptions(a, b){
 function isCompass(u){
   try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); } catch { return false; }
 }
-
-/* Normalize a line for duplicate detection: strip bullets/punct/extra spaces */
 function normLineKeyForCompass(line){
   const t = String(line || "")
-    .replace(/^[•\-\*\u2022]\s*/, "")       // remove leading bullet glyphs
+    .replace(/^[•\-\*\u2022]\s*/, "")
     .replace(/\s+/g, " ")
-    .replace(/[.,;:]+$/,"")                 // strip trailing punctuation
+    .replace(/[.,;:]+$/,"")
     .toLowerCase()
     .trim();
   return t;
 }
-
-/* Merge with stronger dedupe (Compass only) to avoid doubled overview copy */
 function mergeDescriptionsCompass(a, b){
   const out = [];
   const seen = new Set();
-
   const add = (s) => {
     const key = normLineKeyForCompass(s);
     if (!key) return;
@@ -1295,16 +1284,11 @@ function mergeDescriptionsCompass(a, b){
     seen.add(key);
     out.push(s.trim());
   };
-
   String(a || "").split(/\n+/).map(s=>s.trim()).filter(Boolean).forEach(add);
   String(b || "").split(/\n+/).map(s=>s.trim()).filter(Boolean).forEach(add);
-
   return out.join("\n");
 }
-
-/* Harvest full Overview (bold opener + inline siblings + paragraphs + bullets) from Compass Overview */
 function harvestCompassOverview($){
-  // Pick the best "Overview" panel
   const candidates = resolveAllPanes($, ['overview','description','product details']);
   let bestEl = null, bestScore = 0;
 
@@ -1335,8 +1319,7 @@ function harvestCompassOverview($){
     .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
     .each((_, el)=> push($(el).text()));
 
-  // 2) Any **inline text nodes** directly under the panel or immediate blocks
-  //    (Compass sometimes puts the sentence right after <strong> as a text node)
+  // 2) Inline text nodes right under panel (Compass frequently appends sentence after <strong>)
   $panel.contents().each((_, n)=>{
     if (n.type === 'text') {
       const t = cleanup($(n).text());
@@ -1344,10 +1327,10 @@ function harvestCompassOverview($){
     }
   });
 
-  // 3) All overview paragraphs
+  // 3) Paragraphs
   $panel.find('p').each((_, p)=> push($(p).text()));
 
-  // 4) Bullets under overview
+  // 4) Bullets
   $panel.find('ul li, ol li').each((_, li)=>{
     const t = cleanup($(li).text());
     if (t && t.length <= 220) parts.push(`• ${t}`);
@@ -1357,7 +1340,6 @@ function harvestCompassOverview($){
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g,' ').trim())
     .filter(Boolean);
 
-  // De-dup inside overview itself
   const seen = new Set();
   const out = [];
   for (const s of merged){
@@ -1367,11 +1349,8 @@ function harvestCompassOverview($){
     seen.add(k);
     out.push(s);
   }
-
   return out.join('\n');
 }
-
-/* Harvest Compass Technical Specifications via tab trigger → panel (plus fallbacks) */
 function harvestCompassSpecs($){
   const out = {};
 
@@ -1382,11 +1361,9 @@ function harvestCompassSpecs($){
 
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
-    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
     if (href && href.startsWith('#')) target = $(href)[0];
     if (!target && controls) target = documentQueryById($, controls);
-    if (!target && dataTarget && dataTarget.startsWith('#')) target = $(dataTarget)[0];
 
     if (target) {
       Object.assign(out, extractSpecsFromContainer($, target));
