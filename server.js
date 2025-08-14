@@ -596,13 +596,13 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features (UNCHANGED) === */
+/* === Features (EXPANDED to include sentences/paragraphs) === */
 function extractFeaturesSmart($){
   const items = [];
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
     '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','.accordion-content',
-    '.product-highlights','.key-features'
+    '.product-highlights','.key-features','.overview','.description','.details','.product__description'
   ].join(', ');
   const excludeSel = [
     'nav','.breadcrumb','.breadcrumbs','[aria-label="breadcrumb"]',
@@ -610,60 +610,87 @@ function extractFeaturesSmart($){
     '.category','.collections','.filters'
   ].join(', ');
 
+  const pushIfGood = (txt) => {
+    const t = cleanup(txt);
+    if (!t) return;
+    if (t.length < 7 || t.length > 220) return;
+    if (/>|›|»/.test(t)) return;                 // breadcrumb-ish
+    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    if (/(https?:\/\/|www\.)/i.test(t)) return;
+    items.push(t);
+  };
+
+  // 1) Lists (keep existing behavior)
   $(scopeSel).each((_, el)=>{
     const $el = $(el);
     if ($el.closest(excludeSel).length) return;
     $el.find('li').each((__, li)=>{
-      const txt = cleanup($(li).text());
-      if (txt && txt.length>6 && txt.length<220) items.push(txt);
+      pushIfGood($(li).text());
     });
   });
 
+  // 2) Paragraphs inside the same scopes (NEW: always include, not only if bullet-y)
+  $(scopeSel).each((_, el)=>{
+    const $el = $(el);
+    if ($el.closest(excludeSel).length) return;
+
+    $el.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((__, p)=>{
+      const raw = cleanup($(p).text());
+      if (!raw) return;
+      // Split into sentences and short statements
+      splitIntoSentences(raw).forEach(pushIfGood);
+    });
+
+    // Headings sometimes hold concise benefits
+    $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
+  });
+
+  // 3) General product area paragraphs (kept, but broadened sentence split)
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
-      const t = cleanup($(p).text());
-      if (!t) return;
-      if (/[•·–-]\s+/.test(t)) {
-        t.split(/[•·–-]\s+/).map(s=>cleanup(s)).forEach(s=>{
-          if (s && s.length>6 && s.length<220) items.push(s);
-        });
-      }
+      const raw = cleanup($(p).text());
+      if (!raw) return;
+      splitIntoSentences(raw).forEach(pushIfGood);
     });
 
+  // 4) Feature tab (if present)
   const featPane = resolveTabPane($, ['feature','features','key features','highlights','benefits']);
   if (featPane){
-    $(featPane).find('li').each((_, li)=>{
-      const txt = cleanup($(li).text());
-      if (txt && txt.length>6 && txt.length<220) items.push(txt);
-    });
+    $(featPane).find('li').each((_, li)=> pushIfGood($(li).text()));
+    $(featPane).find('p').each((_, p)=> splitIntoSentences($(p).text()).forEach(pushIfGood));
+    $(featPane).find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
   }
 
+  // Dedupe & cap
   const seen = new Set(); const out=[];
   for (const t of items){
     const key = t.toLowerCase();
-    if (/^\s*(home|shop)\b/.test(key)) continue;
-    if (/>|›|»/.test(t)) continue;
     if (!seen.has(key)){ seen.add(key); out.push(t); }
     if (out.length>=20) break;
   }
   return out;
 }
 
-/* === Features fallback (UNCHANGED) — fixed stray ')' typo === */
+/* === Features fallback (kept, but sentence-aware) === */
 function deriveFeaturesFromParagraphs($){
   const out = [];
+  const pushIfGood = (txt) => {
+    const t = cleanup(txt);
+    if (!t) return;
+    if (t.length < 7 || t.length > 220) return;
+    if (/>|›|»/.test(t)) return;
+    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    if (/(https?:\/\/|www\.)/i.test(t)) return;
+    out.push(t);
+  };
+
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
-      const t = cleanup($(p).text());
-      if (!t) return;
-      const parts = t.split(/(?:\.|\u2022|;|\n)+/).map(s=>cleanup(s)).filter(s=>s.length>=7 && s.length<=220);
-      for (const s of parts) {
-        if (/^\s*(home|shop)\b/i.test(s)) continue;
-        if (/>|›|»/.test(s)) continue;
-        out.push(s);
-        if (out.length>=12) break;
-      }
+      const raw = cleanup($(p).text());
+      if (!raw) return;
+      splitIntoSentences(raw).forEach(pushIfGood);
     });
+
   const seen=new Set(); const uniq=[];
   for (const t of out){ const k=t.toLowerCase(); if (!seen.has(k)){ seen.add(k); uniq.push(t); if (uniq.length>=12) break; } }
   return uniq;
@@ -866,20 +893,25 @@ function extractFeaturesFromContainer($, container){
   const items = [];
   const $c = $(container);
 
+  const pushIfGood = (txt) => {
+    const t = cleanup(txt);
+    if (!t) return;
+    if (t.length < 7 || t.length > 220) return;
+    if (/>|›|»/.test(t)) return;
+    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    if (/(https?:\/\/|www\.)/i.test(t)) return;
+    items.push(t);
+  };
+
   $c.find('li').each((_, li)=>{
-    const txt = cleanup($(li).text());
-    if (txt && txt.length>6 && txt.length<220 && !/›|»|>/.test(txt)) items.push(txt);
+    pushIfGood($(li).text());
   });
 
   $c.find('p').each((_, p)=>{
-    const t = cleanup($(p).text());
-    if (!t) return;
-    if (/[•·–-]\s+/.test(t)) {
-      t.split(/[•·–-]\s+/).map(s=>cleanup(s)).forEach(s=>{
-        if (s && s.length>6 && s.length<220) items.push(s);
-      });
-    }
+    splitIntoSentences($(p).text()).forEach(pushIfGood);
   });
+
+  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
   // de-dup
   const seen = new Set(); const out = [];
@@ -1149,6 +1181,16 @@ function dedupeList(arr) {
     seen.add(k);
     return true;
   });
+}
+
+/* ======= Shared helpers for features ======= */
+function splitIntoSentences(text){
+  // Split on sentence-ish boundaries and bullet markers; keep compact
+  return String(text)
+    .replace(/\s*\n\s*/g, ' ')
+    .split(/(?<=[.!?])\s+(?=[A-Z(0-9])|[•·–\-]\s+|;\s+|·\s+/g)
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 /* ================== Listen ================== */
