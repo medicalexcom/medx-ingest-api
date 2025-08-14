@@ -740,7 +740,7 @@ function resolveAllPanes($, names){
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
 
   $('a,button,[role="tab"]').each((_, el)=>{
-    const label = cleanup($(el).text()));
+    const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
