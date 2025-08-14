@@ -77,7 +77,7 @@ app.get("/ingest", async (req, res) => {
       return res.status(422).json({ error: "No extractable product data (JSON-LD/DOM empty)." });
     }
 
-    // ---- NEW: optional tab/accordion harvesting (ADDITIVE, only if &harvest=true) ----
+    // Optional tab/accordion harvesting (ADDITIVE, only if &harvest=true)
     if (doHarvest) {
       norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
     }
@@ -633,11 +633,6 @@ function extractFeaturesSmart($){
   const featPane = resolveTabPane($, ['feature','features','key features','highlights','benefits']);
   if (featPane){
     $(featPane).find('li').each((_, li)=>{
-      const txt = cleanup($(li).text()));
-      // (no-op; line preserved to show prior location—do not change behavior)
-    });
-    // actual extraction:
-    $(featPane).find('li').each((_, li)=>{
       const txt = cleanup($(li).text());
       if (txt && txt.length>6 && txt.length<220) items.push(txt);
     });
@@ -654,17 +649,14 @@ function extractFeaturesSmart($){
   return out;
 }
 
-/* === Features fallback (FIXED SYNTAX) === */
+/* === Features fallback (UNCHANGED) — fixed stray ')' typo === */
 function deriveFeaturesFromParagraphs($){
   const out = [];
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
       const t = cleanup($(p).text());
       if (!t) return;
-      const parts = t
-        .split(/(?:\.|\u2022|;|\n)+/)
-        .map(s=>cleanup(s))
-        .filter(s=>s.length>=7 && s.length<=220);
+      const parts = t.split(/(?:\.|\u2022|;|\n)+/).map(s=>cleanup(s)).filter(s=>s.length>=7 && s.length<=220);
       for (const s of parts) {
         if (/^\s*(home|shop)\b/i.test(s)) continue;
         if (/>|›|»/.test(s)) continue;
@@ -673,10 +665,7 @@ function deriveFeaturesFromParagraphs($){
       }
     });
   const seen=new Set(); const uniq=[];
-  for (const t of out){
-    const k=t.toLowerCase();
-    if (!seen.has(k)){ seen.add(k); uniq.push(t); if (uniq.length>=12) break; }
-  }
+  for (const t of out){ const k=t.toLowerCase(); if (!seen.has(k)){ seen.add(k); uniq.push(t); if (uniq.length>=12) break; } }
   return uniq;
 }
 
@@ -716,6 +705,7 @@ function resolveTabPane($, names){
 function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
+  // 1) Collect panes by label / class / role
   const specPanes = resolveAllPanes($, [
     'specification','specifications','technical specifications','tech specs','details'
   ]);
@@ -726,8 +716,11 @@ function augmentFromTabs(norm, baseUrl, html, opts){
     'features','features/benefits','benefits','key features','highlights'
   ]);
 
+  // 2) Extract from panes
   const addSpecs = {};
-  for (const el of specPanes) mergeInto(addSpecs, extractSpecsFromContainer($, el));
+  for (const el of specPanes) {
+    Object.assign(addSpecs, extractSpecsFromContainer($, el)); // merge
+  }
 
   const addManuals = new Set();
   for (const el of manualPanes) collectManualsFromContainer($, el, baseUrl, addManuals);
@@ -735,6 +728,7 @@ function augmentFromTabs(norm, baseUrl, html, opts){
   const addFeatures = [];
   for (const el of featurePanes) addFeatures.push(...extractFeaturesFromContainer($, el));
 
+  // 3) Merge into norm (dedupe, keep caps)
   if (Object.keys(addSpecs).length) {
     norm.specs = { ...(norm.specs || {}), ...addSpecs };
   }
@@ -753,6 +747,7 @@ function augmentFromTabs(norm, baseUrl, html, opts){
     }
   }
 
+  // 4) Images inside panes (some sites lazy-load gallery in a tab)
   const paneImgs = new Set();
   const allPanes = [...specPanes, ...manualPanes, ...featurePanes];
   for (const el of allPanes) {
@@ -780,6 +775,7 @@ function resolveAllPanes($, names){
   const out = new Set();
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
 
+  // 1) Controls with href="#id" or aria-controls
   $('a,button,[role="tab"]').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
@@ -789,11 +785,13 @@ function resolveAllPanes($, names){
     if (controls) { const t = documentQueryById($, controls); if (t) out.add(t); }
   });
 
+  // 2) Panels with matching heading text
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
 
+  // 3) Sections/classes containing the name
   const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
   $('[class]').each((_, el)=>{
     if (classRe.test($(el).attr('class') || '')) out.add(el);
@@ -806,6 +804,7 @@ function extractSpecsFromContainer($, container){
   const out = {};
   const $c = $(container);
 
+  // Tables
   $c.find('table').each((_, tbl)=>{
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
@@ -817,6 +816,7 @@ function extractSpecsFromContainer($, container){
     });
   });
 
+  // dl
   $c.find('dl').each((_, dl)=>{
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
@@ -828,6 +828,7 @@ function extractSpecsFromContainer($, container){
     }
   });
 
+  // li "Key: Value"
   $c.find('li').each((_, li)=>{
     const t = cleanup($(li).text());
     if (!t || t.length < 3 || t.length > 250) return;
@@ -839,6 +840,7 @@ function extractSpecsFromContainer($, container){
     }
   });
 
+  // Grid-like label/value
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
     const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
@@ -879,6 +881,7 @@ function extractFeaturesFromContainer($, container){
     }
   });
 
+  // de-dup
   const seen = new Set(); const out = [];
   for (const t of items){
     const k = t.toLowerCase();
@@ -908,6 +911,7 @@ function filterAndRankExtraPaneImages(urls, baseUrl, opts){
       return Math.max(w||0,h||0) >= minPx;
     });
 
+  // Simple stable order
   return Array.from(new Set(arr)).slice(0, 6);
 }
 
