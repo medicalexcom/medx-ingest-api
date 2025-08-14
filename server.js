@@ -203,7 +203,12 @@ function pickBestDescriptionBlock($){
   let text = "";
   $(candidates).each((_, el) => {
     // concatenate paragraphs and bullets
-    let t = $(el).find('p, li').map((__, n)=>$(n).text()).get().join(' ');
+    let t = $(el)
+      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p,li')
+      .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
+      .map((__, n) => $(n).text())
+      .get()
+      .join(' ');
     t = cleanup(t || $(el).text());
     if (t && t.length > text.length) text = t;
   });
