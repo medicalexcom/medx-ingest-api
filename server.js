@@ -4,8 +4,8 @@ import cors from "cors";
 import * as cheerio from "cheerio";
 
 /* ================== Config via env ================== */
-const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim();
-const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim();
+const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
+const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
 const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
 const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
 
@@ -18,6 +18,12 @@ app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
 
 /* ================== Ingest route ================== */
+/**
+ * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
+ *                  &minpx=200&excludepng=true&aggressive=true
+ *                  &harvest=true&sanitize=true
+ *                  &markdown=true       // optional: include *_md fields alongside existing fields
+ */
 app.get("/ingest", async (req, res) => {
   try {
     const rawUrl = String(req.query.url || "");
@@ -73,6 +79,31 @@ app.get("/ingest", async (req, res) => {
     if (doHarvest) {
       norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
     }
+
+    // === Compass-only additive harvest (keeps your existing data intact) ===
+    if (isCompass(targetUrl)) {
+      const $ = cheerio.load(html);
+
+      // (1) Overview: full paragraphs + bullets (merged once)
+      const compassOverview = harvestCompassOverview($);
+      if (compassOverview) {
+        const seen = new Set(String(norm.description_raw || "").split(/\n+/).map(s=>s.trim().toLowerCase()).filter(Boolean));
+        const merged = [];
+        for (const l of String(norm.description_raw || "").split(/\n+/).map(s=>s.trim()).filter(Boolean)) merged.push(l);
+        for (const l of String(compassOverview).split(/\n+/).map(s=>s.trim()).filter(Boolean)) {
+          const k = l.toLowerCase();
+          if (!seen.has(k)) { merged.push(l); seen.add(k); }
+        }
+        norm.description_raw = merged.join("\n");
+      }
+
+      // (2) Technical Specifications (union-merge; existing keys win)
+      const compassSpecs = harvestCompassSpecs($);
+      if (Object.keys(compassSpecs).length) {
+        norm.specs = { ...(norm.specs || {}), ...compassSpecs };
+      }
+    }
+    // === end Compass-only additions ===
 
     if (wantMd) {
       const $ = cheerio.load(html);
@@ -195,7 +226,7 @@ function schemaPropsToSpecs(props){
   return out;
 }
 
-/* Prefer copy blocks near product detail */
+/* Prefer content blocks near product detail; also capture lead/strong/headings */
 function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
@@ -632,10 +663,11 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features (unchanged policy) === */
+/* === Features (FOCUSED; no paragraph mining) === */
 function extractFeaturesSmart($){
   const items = [];
 
+  // Only explicit feature areas, not generic descriptions
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
     '.product-highlights','.key-features','.highlights'
@@ -664,6 +696,7 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
+  // Also from a dedicated "Features" tab if present
   const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
   if (featPane){
     const $c = $(featPane);
@@ -704,7 +737,7 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Tabs === */
+/* === Resolve tabs === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
@@ -792,10 +825,9 @@ function augmentFromTabs(norm, baseUrl, html, opts){
   const addFeatures = [];
   for (const el of featurePanes) addFeatures.push(...extractFeaturesFromContainer($, el));
 
-  // Overview paragraphs + bullets (for Overview only)
   let addDesc = "";
   for (const el of descPanes) {
-    const d = extractDescriptionFromContainer($, el, { includeBullets: true });
+    const d = extractDescriptionFromContainer($, el); // paragraphs/heads only (no bullets here)
     if (d && d.length > addDesc.length) addDesc = d;
   }
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
@@ -882,8 +914,46 @@ function extractSpecsFromContainer($, container){
   return out;
 }
 
-/* — Overview extractor (now can include bullets when asked) — */
-function extractDescriptionFromContainer($, container, opts = { includeBullets: false }){
+function collectManualsFromContainer($, container, baseUrl, sinkSet){
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
+  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+    const href = String($(el).attr('href') || "");
+    const full = abs(baseUrl, href);
+    if (!full) return;
+    const L = full.toLowerCase();
+    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
+  });
+}
+
+function extractFeaturesFromContainer($, container){
+  const items = [];
+  const $c = $(container);
+
+  const pushIfGood = (txt) => {
+    const t = cleanup(txt);
+    if (!t) return;
+    if (t.length < 7 || t.length > 220) return;
+    if (/>|›|»/.test(t)) return;
+    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    if (/(https?:\/\/|www\.)/i.test(t)) return;
+    items.push(t);
+  };
+
+  $c.find('li').each((_, li)=> pushIfGood($(li).text()));
+  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
+
+  const seen = new Set(); const out = [];
+  for (const t of items){
+    const k = t.toLowerCase();
+    if (!seen.has(k)) { seen.add(k); out.push(t); }
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+/* — Overview extractor (paragraphs only; bullets handled by Compass helper) — */
+function extractDescriptionFromContainer($, container){
   const $c = $(container);
   const parts = [];
 
@@ -894,17 +964,9 @@ function extractDescriptionFromContainer($, container, opts = { includeBullets: 
     parts.push(t);
   };
 
-  // headings + paragraphs
+  // headings + paragraphs (no <li> here to avoid cross-contamination)
   $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
   $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
-
-  // optionally include bullets (used only for Overview panes via augmentFromTabs)
-  if (opts.includeBullets) {
-    $c.find('li').each((_, li)=>{
-      const t = cleanup($(li).text());
-      if (t && t.length >= 2 && t.length <= 220) parts.push(`• ${t}`);
-    });
-  }
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -916,7 +978,7 @@ function extractDescriptionFromContainer($, container, opts = { includeBullets: 
   return out.join('\n');
 }
 
-/* ====== Markdown builders ====== */
+/* ====== Markdown builders (additive) ====== */
 function extractDescriptionMarkdown($){
   const candidates = [
     '[itemprop="description"]',
@@ -931,7 +993,7 @@ function extractDescriptionMarkdown($){
   });
 
   if (!bestEl) return "";
-  const raw = extractDescriptionFromContainer($, bestEl, { includeBullets: true });
+  const raw = extractDescriptionFromContainer($, bestEl);
   return containerTextToMarkdown(raw);
 }
 function containerTextToMarkdown(s){
@@ -1098,7 +1160,7 @@ function deepFindImagesFromJson(obj, out = []){
       else if (v) deepFindImagesFromJson(v, out);
     });
     ['images','gallery','media','assets','pictures','variants','slides'].forEach(k=>{
-      if (obj[k]) deepFindImagesFromJson(v, out);
+      if (obj[k]) deepFindImagesFromJson(obj[k], out);
     });
     Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
   }
@@ -1238,6 +1300,77 @@ function mergeDescriptions(a, b){
   const out = [];
   for (const l of lines){ const k=l.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(l); } }
   return out.join("\n");
+}
+
+/* ================== Compass-only helpers (ADD-ONLY) ================== */
+function isCompass(u){
+  try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); } catch { return false; }
+}
+
+/* Harvest full Overview (lead + all paragraphs + bullets) from Compass Overview tab */
+function harvestCompassOverview($){
+  const candPanels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, #tabs, .product-details, .product-detail');
+  let best = "";
+  candPanels.each((_, panel)=>{
+    const $p = $(panel);
+    const hasOverviewHeading =
+      /\boverview\b/i.test(($p.find('h1,h2,h3,h4,h5').first().text() || "")) ||
+      /\boverview\b/i.test(($p.prev('a,button,[role="tab"]').text() || ""));
+    const looksLikeOverview = hasOverviewHeading || ($p.find('ul li').length >= 3 && $p.find('p').length >= 1);
+    if (!looksLikeOverview) return;
+
+    const parts = [];
+    const push = (t) => { t = cleanup(t); if (t) parts.push(t); };
+
+    // All paragraphs (entire text, not only bolded sentence)
+    $p.find('p').each((__, el)=> push($(el).text()));
+    // Bullets under the overview
+    $p.find('ul li, ol li').each((__, el)=>{
+      const t = cleanup($(el).text());
+      if (t && t.length <= 220) parts.push(`• ${t}`);
+    });
+
+    const merged = parts
+      .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g,' ').trim())
+      .filter(Boolean)
+      .join('\n');
+
+    if (merged.length > best.length) best = merged;
+  });
+  return best;
+}
+
+/* Harvest Compass Technical Specifications (two-column table and key:value bullets) */
+function harvestCompassSpecs($){
+  const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-details, .product-detail, section');
+  const out = {};
+  panels.each((_, panel)=>{
+    const $p = $(panel);
+    const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
+    if (!/technical\s+specifications?/i.test(heading)) return;
+
+    // table rows
+    $p.find('tr').each((__, tr)=>{
+      const cells = $(tr).find('th,td');
+      if (cells.length >= 2){
+        const k = cleanup($(cells[0]).text()).replace(/:$/, '');
+        const v = cleanup($(cells[1]).text());
+        if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
+      }
+    });
+
+    // key:value bullets
+    $p.find('li').each((__, li)=>{
+      const t = cleanup($(li).text());
+      const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
+      if (m){
+        const k = m[1].toLowerCase().replace(/\s+/g,'_');
+        const v = m[2];
+        if (k && v) out[k] ||= v;
+      }
+    });
+  });
+  return out;
 }
 
 /* ================== Listen ================== */
