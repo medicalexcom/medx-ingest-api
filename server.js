@@ -19,7 +19,7 @@ app.get("/healthz", (_, res) => res.json({ ok: true }));
 
 /* ================== Ingest route ================== */
 /**
- * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full&minpx=200&excludepng=true
+ * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full&minpx=200&excludepng=true&aggressive=true
  */
 app.get("/ingest", async (req, res) => {
   try {
@@ -43,9 +43,10 @@ app.get("/ingest", async (req, res) => {
     const excludePng = typeof req.query.excludepng !== "undefined"
       ? String(req.query.excludepng).toLowerCase() === "true"
       : EXCLUDE_PNG_ENV;
+    const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
-    const headers = { "User-Agent": "MedicalExIngest/1.4" };
+    const headers  = { "User-Agent": "MedicalExIngest/1.5" };
     if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
 
     // Retry renderer 3x (handles cold starts & flaky nav)
@@ -65,7 +66,8 @@ app.get("/ingest", async (req, res) => {
     }
     if (!html) return res.status(502).json({ error: "Render API failed", body: `status=${lastStatus} body=${lastBody.slice(0,280)}` });
 
-    const norm = extractNormalized(targetUrl, html, { minImgPx, excludePng });
+    const norm = extractNormalized(targetUrl, html, { minImgPx, excludePng, aggressive });
+    // Always include keys; error only if truly nothing meaningful
     if (!norm.name_raw && (!norm.description_raw || norm.description_raw.length < 10)) {
       return res.status(422).json({ error: "No extractable product data (JSON-LD/DOM empty)." });
     }
@@ -97,7 +99,7 @@ function extractNormalized(baseUrl, html, opts) {
   if (!brand) brand = inferBrandFromName(name);
 
   // Description (mine tab panes too)
-  const description_raw = cleanup(
+  let description_raw = cleanup(
     jsonld.description ||
     pickBestDescriptionBlock($) ||
     og.description ||
@@ -105,10 +107,35 @@ function extractNormalized(baseUrl, html, opts) {
     ""
   );
 
-  const images   = extractImages($, jsonld, og, baseUrl, name, html, opts);
-  const manuals  = extractManuals($, baseUrl, name, html);
-  const specs    = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($);
-  const features = (jsonld.features && jsonld.features.length) ? jsonld.features : extractFeaturesSmart($);
+  // Images / Manuals / Specs / Features
+  let images   = extractImages($, jsonld, og, baseUrl, name, html, opts);
+  let manuals  = extractManuals($, baseUrl, name, html, opts);
+  let specs    = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($, opts);
+  let features = (jsonld.features && jsonld.features.length) ? jsonld.features : extractFeaturesSmart($, opts);
+
+  // ===== Fallbacks to "always include" useful data =====
+  // Images: if none, try from main area or OG as last resort (still respects filters where possible)
+  if (!images.length) {
+    const extra = fallbackImagesFromMain($, baseUrl, og, opts);
+    if (extra.length) images = extra;
+  }
+  // Manuals: if none, broaden search to any same-host PDFs in common doc paths (still blocks certs)
+  if (!manuals.length) {
+    const extra = fallbackManualsFromPaths($, baseUrl, name, html);
+    if (extra.length) manuals = extra;
+  }
+  // Features: if none, derive bullet-like lines from product scope paragraphs
+  if (!features.length) {
+    features = deriveFeaturesFromParagraphs($);
+  }
+  // Specs: if empty, pull key:value from product scope paragraphs
+  if (!Object.keys(specs).length) {
+    specs = deriveSpecsFromParagraphs($);
+  }
+  // Description: if still empty, make a succinct paragraph from first product paragraph
+  if (!description_raw) {
+    description_raw = firstGoodParagraph($);
+  }
 
   return {
     source: baseUrl,
@@ -138,7 +165,6 @@ function extractJsonLd($){
     } catch {}
   });
   const p = nodes[0] || {};
-  // Images may be string, array of strings, or array of ImageObject
   const images = (() => {
     const img = p.image;
     if (!img) return [];
@@ -210,6 +236,7 @@ function inferBrandFromName(name){
 function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   const minPx = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
   const excludePng = (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
+  const aggressive = !!(opts && opts.aggressive);
 
   const set = new Set();
   const imgWeights = new Map(); // boost gallery/media finds
@@ -302,22 +329,34 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   // Normalize + filter
   let arr = Array.from(set).filter(Boolean).map(u => decodeHtml(u));
 
-  // extension rules
+  // Extension rules
   const allowWebExt = excludePng
     ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i
     : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
 
-  // drop non-product assets (social/icons/sprites/placeholders)
-  const badRe = new RegExp([
+  // Hostname-aware allow/deny hints
+  const host = safeHostname(baseUrl);
+  const allowHostRe = new RegExp([
+    host.includes("drivemedical") ? "/medias|/products|/pdp|/images/products|/product-images|/commerce/products|/uploads" : "",
+    host.includes("mckesson")     ? "/product|/images|/product-images|/assets/product" : "",
+    host.includes("compasshealthbrands") ? "/media/images/items|/product|/images" : "",
+    host.includes("motifmedical") ? "/wp-content/uploads|/product|/images" : ""
+  ].filter(Boolean).join("|"), "i");
+
+  // Drop non-product assets (social/icons/sprites/placeholders/themes)
+  const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader','ajax-loader',
     'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
-    '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/'
-  ].join('|'), 'i');
+    '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/'
+  ];
+  if (!aggressive) badReBase.push('/search/','/category/','/collections/','/filters?'); // stricter when not aggressive
+  const badRe = new RegExp(badReBase.join('|'), 'i');
 
   // Minimum pixel hint (inferred from filename or query params)
   arr = arr
     .filter(u => allowWebExt.test(u))
     .filter(u => !badRe.test(u))
+    .filter(u => !allowHostRe.source.length || allowHostRe.test(u) || aggressive)
     .filter(u => {
       const { w, h } = inferSizeFromUrl(u);
       if (!w && !h) return true; // keep if unknown
@@ -329,12 +368,13 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   const titleTokens = (name || "").toLowerCase().split(/\s+/).filter(Boolean);
   const codeCandidates = collectCodesFromUrl(baseUrl);
 
-  const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/|\/zoom\/|\/large\/|\/hi-res?\/)/i;
+  const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/uploads\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/|\/zoom\/|\/large\/|\/hi-res?\/|\/wp-content\/uploads\/)/i;
 
   const scored = arr.map(u => {
     const L = u.toLowerCase();
     let score = imgWeights.get(u) || 0;
     if (preferRe.test(L)) score += 3;
+    if (allowHostRe.source.length && allowHostRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 3;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
     if (/thumb|thumbnail|small|tiny|badge|mini|icon/.test(L)) score -= 2;
@@ -357,34 +397,56 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   return out;
 }
 
-function deepFindImagesFromJson(obj, out = []){
-  if (!obj) return out;
-  if (typeof obj === 'string') {
-    if (/\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(obj)) out.push(obj);
-    return out;
-  }
-  if (Array.isArray(obj)) { obj.forEach(v => deepFindImagesFromJson(v, out)); return out; }
-  if (typeof obj === 'object') {
-    const keys = ['url','src','image','imageUrl','imageURL','contentUrl','thumbnail','full','large','zoom','original','href'];
-    keys.forEach(k => {
-      const v = obj[k];
-      if (typeof v === 'string' && /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(v)) out.push(v);
-      else if (v) deepFindImagesFromJson(v, out);
+/* === Image fallbacks === */
+function fallbackImagesFromMain($, baseUrl, og, opts){
+  const minPx = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
+  const excludePng = (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
+  const allowWebExt = excludePng
+    ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i
+    : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
+
+  const badRe = /(logo|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
+
+  const set = new Set();
+  const push = u => { if (u) set.add(abs(baseUrl, u)); };
+
+  $('main, #main, .main, article, .product, .product-detail, .product-details').first().find('img').each((_, el)=>{
+    push($(el).attr('src'));
+    push($(el).attr('data-src'));
+    push(pickLargestFromSrcset($(el).attr('srcset')));
+  });
+
+  // OG as absolute last resort
+  if (og && og.image) push(og.image);
+
+  let arr = Array.from(set).filter(Boolean).map(decodeHtml)
+    .filter(u => allowWebExt.test(u))
+    .filter(u => !badRe.test(u))
+    .filter(u => {
+      const { w,h } = inferSizeFromUrl(u);
+      if (!w && !h) return true;
+      return Math.max(w||0,h||0) >= minPx;
     });
-    ['images','gallery','media','assets','pictures','variants','slides'].forEach(k=>{
-      if (obj[k]) deepFindImagesFromJson(obj[k], out);
-    });
-    Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
+
+  // pick top 3
+  const out = [];
+  const seen = new Set();
+  for (const u of arr) {
+    const base = u.split('/').pop().split('?')[0];
+    if (seen.has(base)) continue;
+    seen.add(base);
+    out.push({ url: u });
+    if (out.length >= 3) break;
   }
   return out;
 }
 
 /* === Manuals (IFU) — allowlist real manuals, block certifications; includes scripts === */
-function extractManuals($, baseUrl, name, rawHtml){
+function extractManuals($, baseUrl, name, rawHtml, opts){
   const urls = new Set();
 
   // Allow actual use docs; Block certifications & quality docs
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide)/i;
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
 
   const scopeSel = [
@@ -455,19 +517,40 @@ function extractManuals($, baseUrl, name, rawHtml){
   return arr;
 }
 
-function deepFindPdfsFromJson(obj, out = []){
-  if (!obj) return out;
-  if (typeof obj === 'string') {
-    if (/\.pdf(?:[?#].*)?$/i.test(obj)) out.push(obj);
-    return out;
+/* === Manuals fallback — broader, still blocks certs === */
+function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
+  const out = new Set();
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
+  const pathHint = /(manual|ifu|document|documents|download|downloads|resources|instructions?|user[- ]?guide|datasheet|spec|sheet|brochure)/i;
+  const host = safeHostname(baseUrl);
+
+  // Any PDF anchors with path hints and same host
+  $('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+    const href=String($(el).attr("href")||"");
+    const full=abs(baseUrl, href);
+    if (!full) return;
+    if (new URL(full).hostname !== host) return;
+    const L = full.toLowerCase();
+    if (!blockRe.test(L) && pathHint.test(L)) out.add(full);
+  });
+
+  // PDFs found via regex sweep in HTML
+  const html = $.root().html() || "";
+  const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
+  let m; while ((m = re.exec(html))) {
+    try {
+      const u = new URL(m[1]);
+      if (u.hostname !== host) continue;
+      const L = m[1].toLowerCase();
+      if (!blockRe.test(L) && pathHint.test(L)) out.add(m[1]);
+    } catch {}
   }
-  if (Array.isArray(obj)) { obj.forEach(v => deepFindPdfsFromJson(v, out)); return out; }
-  if (typeof obj === 'object') { Object.values(obj).forEach(v => deepFindPdfsFromJson(v, out)); }
-  return out;
+
+  return Array.from(out);
 }
 
 /* === Specs — tables + dl + key:value inside "Specifications/Details" tab === */
-function extractSpecsSmart($){
+function extractSpecsSmart($, opts){
   const out = {};
 
   // 1) Tables (favor th/td, but also td/td)
@@ -522,16 +605,35 @@ function extractSpecsSmart($){
   return out;
 }
 
-/* === Features — from features containers/tabs; also split bullet paragraphs === */
-function extractFeaturesSmart($){
+/* === Specs fallback — key:value in product paragraphs === */
+function deriveSpecsFromParagraphs($){
+  const out = {};
+  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
+    .find('p, li').each((_, el)=>{
+      const t = cleanup($(el).text());
+      if (!t) return;
+      const m = t.match(/^([^:]{2,60}):\s*(.{2,300})$/); // Key: Value
+      if (m){
+        const k = m[1].toLowerCase().replace(/\s+/g,'_');
+        const v = m[2];
+        if (k && v && !out[k]) out[k]=v;
+      }
+    });
+  return out;
+}
+
+/* === Features — from features containers/tabs; exclude nav/breadcrumbs/etc. === */
+function extractFeaturesSmart($, opts){
   const items = [];
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','.accordion-content'
+    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','.accordion-content',
+    '.product-highlights','.key-features'
   ].join(', ');
   const excludeSel = [
     'nav','.breadcrumb','.breadcrumbs','[aria-label="breadcrumb"]',
-    '.related','.upsell','.cross-sell','.menu','.footer','.header','.sidebar'
+    '.related','.upsell','.cross-sell','.menu','.footer','.header','.sidebar',
+    '.category','.collections','.filters'
   ].join(', ');
 
   // Lists
@@ -544,16 +646,17 @@ function extractFeaturesSmart($){
     });
   });
 
-  // Bullet-like paragraphs (•, ·, –)
-  $(scopeSel).find('p').each((_, p)=>{
-    const t = cleanup($(p).text());
-    if (!t) return;
-    if (/[•·–-]\s+/.test(t)) {
-      t.split(/[•·–-]\s+/).map(s=>cleanup(s)).forEach(s=>{
-        if (s && s.length>6 && s.length<220) items.push(s);
-      });
-    }
-  });
+  // Bullet-like paragraphs (•, ·, –, -) within product scope
+  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
+    .find('p').each((_, p)=>{
+      const t = cleanup($(p).text());
+      if (!t) return;
+      if (/[•·–-]\s+/.test(t)) {
+        t.split(/[•·–-]\s+/).map(s=>cleanup(s)).forEach(s=>{
+          if (s && s.length>6 && s.length<220) items.push(s);
+        });
+      }
+    });
 
   // Named "Features" pane
   const featPane = resolveTabPane($, ['feature','features','key features','highlights','benefits']);
@@ -564,14 +667,38 @@ function extractFeaturesSmart($){
     });
   }
 
-  // de-dup & cap
+  // De-dup, filter likely breadcrumbs: if item contains 'home' or 'category' or '>' separators, drop
   const seen = new Set(); const out=[];
   for (const t of items){
-    const key=t.toLowerCase();
-    if (!seen.has(key)){ seen.add(key); out.push(t); }
-    if (out.length>=20) break; // allow a bit more if genuine features
+    const key = t.toLowerCase();
+    if (/^\s*(home|shop)\b/.test(key)) continue;
+    if (/>|›|»/.test(t)) continue;
+    if (!seen.has(key)) { seen.add(key); out.push(t); }
+    if (out.length>=20) break;
   }
   return out;
+}
+
+/* === Features fallback — derive from paragraphs if still empty === */
+function deriveFeaturesFromParagraphs($){
+  const out = [];
+  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
+    .find('p').each((_, p)=>{
+      const t = cleanup($(p).text());
+      if (!t) return;
+      // heuristic: split into short benefit-style sentences
+      const parts = t.split(/(?:\.|\u2022|;|\n)+/).map(s=>cleanup(s)).filter(s=>s.length>=7 && s.length<=220);
+      for (const s of parts) {
+        if (/^\s*(home|shop)\b/i.test(s)) continue;
+        if (/>|›|»/.test(s)) continue;
+        out.push(s);
+        if (out.length>=12) break;
+      }
+    });
+  // de-dup
+  const seen=new Set(); const uniq=[];
+  for (const t of out){ const k=t.toLowerCase(); if (!seen.has(k)){ seen.add(k); uniq.push(t); if (uniq.length>=12) break; } }
+  return uniq;
 }
 
 /* === Resolve a tab button to its pane by text (Specifications, Features, Documents, etc.) === */
@@ -612,11 +739,13 @@ function resolveTabPane($, names){
 /* ================== Utils ================== */
 function collectCodesFromUrl(url){
   const out = [];
-  const u = url.toLowerCase();
-  const m1 = /\/item\/([^\/?#]+)/i.exec(u);
-  const m2 = /\/p\/([a-z0-9._-]+)/i.exec(u);
-  const m3 = /\/product\/([a-z0-9._-]+)/i.exec(u);
-  [m1, m2, m3].forEach(m => { if (m && m[1]) out.push(m[1]); });
+  try {
+    const u = url.toLowerCase();
+    const m1 = /\/item\/([^\/?#]+)/i.exec(u);
+    const m2 = /\/p\/([a-z0-9._-]+)/i.exec(u);
+    const m3 = /\/product\/([a-z0-9._-]+)/i.exec(u);
+    [m1, m2, m3].forEach(m => { if (m && m[1]) out.push(m[1]); });
+  } catch {}
   return out;
 }
 
@@ -631,6 +760,9 @@ function safeDecodeOnce(s){
     if (!decoded || /%[0-9A-Fa-f]{2}/.test(decoded)) return s;
     return decoded;
   } catch { return s; }
+}
+function safeHostname(u){
+  try { return new URL(u).hostname; } catch { return ""; }
 }
 
 function decodeHtml(s){ return s ? s.replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>') : s; }
@@ -685,6 +817,48 @@ function inferSizeFromUrl(u) {
     }
     return out;
   } catch { return { w: 0, h: 0 }; }
+}
+
+function deepFindImagesFromJson(obj, out = []){
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (/\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) { obj.forEach(v => deepFindImagesFromJson(v, out)); return out; }
+  if (typeof obj === 'object') {
+    const keys = ['url','src','image','imageUrl','imageURL','contentUrl','thumbnail','full','large','zoom','original','href'];
+    keys.forEach(k => {
+      const v = obj[k];
+      if (typeof v === 'string' && /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(v)) out.push(v);
+      else if (v) deepFindImagesFromJson(v, out);
+    });
+    ['images','gallery','media','assets','pictures','variants','slides'].forEach(k=>{
+      if (obj[k]) deepFindImagesFromJson(obj[k], out);
+    });
+    Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
+  }
+  return out;
+}
+
+function deepFindPdfsFromJson(obj, out = []){
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (/\.pdf(?:[?#].*)?$/i.test(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) { obj.forEach(v => deepFindPdfsFromJson(v, out)); return out; }
+  if (typeof obj === 'object') { Object.values(obj).forEach(v => deepFindPdfsFromJson(v, out)); }
+  return out;
+}
+
+function firstGoodParagraph($){
+  let best = "";
+  $('main, #main, .main, .content, #content, body').first().find('p').each((_, p)=>{
+    const t = cleanup($(p).text());
+    if (t && t.length > best.length) best = t;
+  });
+  return best;
 }
 
 /* ================== Listen ================== */
