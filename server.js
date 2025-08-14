@@ -80,23 +80,30 @@ app.get("/ingest", async (req, res) => {
       norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
     }
 
-    /* === Compass-only additive harvest (strictly scoped) === */
+    // === Compass-only additive harvest (keeps your existing data intact) ===
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
 
-      // Overview: bold opener + inline text nodes + paragraphs + bullets (Compass quirk)
+      // (1) Overview: full paragraphs + bullets (merged once)
       const compassOverview = harvestCompassOverview($);
       if (compassOverview) {
-        norm.description_raw = mergeDescriptionsCompass(norm.description_raw || "", compassOverview);
+        const seen = new Set(String(norm.description_raw || "").split(/\n+/).map(s=>s.trim().toLowerCase()).filter(Boolean));
+        const merged = [];
+        for (const l of String(norm.description_raw || "").split(/\n+/).map(s=>s.trim()).filter(Boolean)) merged.push(l);
+        for (const l of String(compassOverview).split(/\n+/).map(s=>s.trim()).filter(Boolean)) {
+          const k = l.toLowerCase();
+          if (!seen.has(k)) { merged.push(l); seen.add(k); }
+        }
+        norm.description_raw = merged.join("\n");
       }
 
-      // Technical Specifications: tab-trigger → target panel (plus fallbacks)
+      // (2) Technical Specifications (union-merge; existing keys win)
       const compassSpecs = harvestCompassSpecs($);
       if (Object.keys(compassSpecs).length) {
         norm.specs = { ...(norm.specs || {}), ...compassSpecs };
       }
     }
-    /* === end Compass-only additions === */
+    // === end Compass-only additions ===
 
     if (wantMd) {
       const $ = cheerio.load(html);
@@ -219,7 +226,7 @@ function schemaPropsToSpecs(props){
   return out;
 }
 
-/* === Your original conservative description picker (no global change) === */
+/* Prefer content blocks near product detail; also capture lead/strong/headings */
 function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
@@ -229,7 +236,12 @@ function pickBestDescriptionBlock($){
 
   let text = "";
   $(candidates).each((_, el) => {
-    let t = $(el).find('p, li').map((__, n)=>$(n).text()).get().join(' ');
+    let t = $(el)
+      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p')
+      .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
+      .map((__, n)=>$(n).text())
+      .get()
+      .join(' ');
     t = cleanup(t || $(el).text());
     if (t && t.length > text.length) text = t;
   });
@@ -540,63 +552,99 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   return Array.from(out);
 }
 
-/* === Specs === */
+/* === Specs (robust: scoped → dense block fallback → global) === */
 function extractSpecsSmart($){
+  // 1) Try dedicated specs pane/tab
+  let specPane = resolveTabPane($, [
+    'technical specifications','technical specification',
+    'tech specs','specifications','specification','details'
+  ]);
+  if (specPane) {
+    const scoped = extractSpecsFromContainer($, specPane);
+    if (Object.keys(scoped).length) return scoped;
+  }
+
+  // 2) Dense spec block heuristic (handles sites where panels lack IDs)
+  const dense = extractSpecsFromDensestBlock($);
+  if (Object.keys(dense).length) return dense;
+
+  // 3) Fallback: legacy global parsing
   const out = {};
 
-  // Tables
-  $("table").each((_, tbl)=>{
-    $(tbl).find("tr").each((__, tr)=>{
-      const cells=$(tr).find("th,td");
+  $('table').each((_, tbl)=>{
+    $(tbl).find('tr').each((__, tr)=>{
+      const cells=$(tr).find('th,td');
       if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_');
+        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         const v=cleanup($(cells[1]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     });
   });
 
-  // dl
-  $("dl").each((_, dl)=>{
-    const dts=$(dl).find("dt"), dds=$(dl).find("dd");
+  $('dl').each((_, dl)=>{
+    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_');
+        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         const v=cleanup($(dds[i]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     }
   });
 
-  // Locate "Specifications" pane
-  let specPane = resolveTabPane($, ['specification','specifications','tech specs','technical specifications','details']);
-  if (!specPane) {
-    const candidates = resolveAllPanes($, ['specification','specifications','technical specifications','tech specs','details']);
-    if (candidates.length) specPane = candidates[0];
-  }
+  $('li').each((_, li)=>{
+    const t = cleanup($(li).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k]=v;
+    }
+  });
 
-  if (specPane){
-    const $p = $(specPane);
+  return out;
+}
 
-    $p.find('li').each((_, li)=>{
-      const t = cleanup($(li).text());
-      if (!t || t.length < 3 || t.length > 250) return;
-      const m = t.split(/[:\-–]\s+/);
-      if (m.length >= 2){
-        const k = m[0].toLowerCase().replace(/\s+/g,'_');
-        const v = m.slice(1).join(': ').trim();
-        if (k && v && !out[k]) out[k]=v;
+/* — Find the container that most looks like a spec table/list and parse it — */
+function extractSpecsFromDensestBlock($){
+  const candidates = [
+    '[role="tabpanel"]', '.tab-pane', '.tabs-content > *', '.accordion-content',
+    '.product-tabs *', '.tab-content *', 'section', '.panel', '.panel-body', '.content'
+  ].join(', ');
+
+  let bestEl = null, bestScore = 0;
+
+  $(candidates).each((_, el)=>{
+    const $el = $(el);
+    let score = 0;
+
+    // table-like rows
+    $el.find('tr').each((__, tr)=>{
+      const cells=$(tr).find('th,td');
+      if (cells.length>=2){
+        const k = cleanup($(cells[0]).text());
+        const v = cleanup($(cells[1]).text());
+        if (k && v && /:|back|warranty|weight|capacity|handles|depth|height/i.test(k)) score++;
       }
     });
 
-    $p.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
-      const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
-      const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-      if (a && b) out[a.toLowerCase().replace(/\s+/g,'_')] = b;
-    });
-  }
+    // definition lists
+    const dts = $el.find('dt').length;
+    const dds = $el.find('dd').length;
+    if (dts && dds && dts === dds) score += Math.min(dts, 12);
 
-  return out;
+    // key:value list items
+    $el.find('li').each((__, li)=>{
+      const t = cleanup($(li).text());
+      if (/^[^:]{2,60}:\s+.{2,300}$/.test(t)) score++;
+    });
+
+    if (score > bestScore) { bestScore = score; bestEl = el; }
+  });
+
+  return bestEl ? extractSpecsFromContainer($, bestEl) : {};
 }
 
 function deriveSpecsFromParagraphs($){
@@ -615,14 +663,16 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features === */
+/* === Features (FOCUSED; no paragraph mining) === */
 function extractFeaturesSmart($){
   const items = [];
+
+  // Only explicit feature areas, not generic descriptions
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','.accordion-content',
-    '.product-highlights','.key-features','.overview','.description','.details','.product__description'
+    '.product-highlights','.key-features','.highlights'
   ].join(', ');
+
   const excludeSel = [
     'nav','.breadcrumb','.breadcrumbs','[aria-label="breadcrumb"]',
     '.related','.upsell','.cross-sell','.menu','.footer','.header','.sidebar',
@@ -643,26 +693,15 @@ function extractFeaturesSmart($){
     const $el = $(el);
     if ($el.closest(excludeSel).length) return;
     $el.find('li').each((__, li)=> pushIfGood($(li).text()));
-  });
-
-  $(scopeSel).each((_, el)=>{
-    const $el = $(el);
-    if ($el.closest(excludeSel).length) return;
-
-    $el.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((__, p)=>{
-      const raw = cleanup($(p).text());
-      if (!raw) return;
-      splitIntoSentences(raw).forEach(pushIfGood);
-    });
-
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  const featPane = resolveTabPane($, ['feature','features','key features','highlights','benefits']);
+  // Also from a dedicated "Features" tab if present
+  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
   if (featPane){
-    $(featPane).find('li').each((_, li)=> pushIfGood($(li).text()));
-    $(featPane).find('p').each((_, p)=> splitIntoSentences($(p).text()).forEach(pushIfGood));
-    $(featPane).find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
+    const $c = $(featPane);
+    $c.find('li').each((_, li)=> pushIfGood($(li).text()));
+    $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
   }
 
   const seen = new Set(); const out=[];
@@ -698,19 +737,21 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Resolve tabs (your original; fixed the stray ')') === */
+/* === Resolve tabs === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
 
-  $('a,button').each((_, el)=>{
+  $('a,button,[role="tab"]').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
+    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
     if (href && href.startsWith('#')) target = $(href)[0];
     if (!target && controls) target = documentQueryById($, controls);
+    if (!target && dataTarget && dataTarget.startsWith('#')) target = $(dataTarget)[0];
     if (target) { pane = target; return false; }
   });
 
@@ -739,8 +780,10 @@ function resolveAllPanes($, names){
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
+    const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     if (href && href.startsWith('#')) { const t = $(href)[0]; if (t) out.add(t); }
     if (controls) { const t = documentQueryById($, controls); if (t) out.add(t); }
+    if (dataTarget && dataTarget.startsWith('#')) { const t = $(dataTarget)[0]; if (t) out.add(t); }
   });
 
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
@@ -784,7 +827,7 @@ function augmentFromTabs(norm, baseUrl, html, opts){
 
   let addDesc = "";
   for (const el of descPanes) {
-    const d = extractDescriptionFromContainer($, el);
+    const d = extractDescriptionFromContainer($, el); // paragraphs/heads only (no bullets here)
     if (d && d.length > addDesc.length) addDesc = d;
   }
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
@@ -898,7 +941,6 @@ function extractFeaturesFromContainer($, container){
   };
 
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
-  $c.find('p').each((_, p)=> splitIntoSentences($(p).text()).forEach(pushIfGood));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
   const seen = new Set(); const out = [];
@@ -910,7 +952,7 @@ function extractFeaturesFromContainer($, container){
   return out;
 }
 
-/* — Overview extractor (paragraphs/heads only; unchanged behavior) — */
+/* — Overview extractor (paragraphs only; bullets handled by Compass helper) — */
 function extractDescriptionFromContainer($, container){
   const $c = $(container);
   const parts = [];
@@ -922,9 +964,9 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
+  // headings + paragraphs (no <li> here to avoid cross-contamination)
   $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
   $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
-  // (We intentionally do not pull <li> here to keep global behavior identical to before.)
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -936,7 +978,7 @@ function extractDescriptionFromContainer($, container){
   return out.join('\n');
 }
 
-/* ====== Markdown builders (unchanged, but fixed 1 stray ')' earlier) ====== */
+/* ====== Markdown builders (additive) ====== */
 function extractDescriptionMarkdown($){
   const candidates = [
     '[itemprop="description"]',
@@ -993,7 +1035,7 @@ function textToMarkdown(t){
 function objectToMarkdownTable(obj){
   const entries = Object.entries(obj || {});
   if (!entries.length) return "";
-  const rows = entries.map(([k,v]) => `| ${toTitleCase(k.replace(/_/g,' '))} | ${String(v).replace(/\n+/g,' ').trim()} |`);
+  const rows = entries.map(([k,v]) => `| ${toTitleCase(k.replace(/_/g,' '))} | ${String(v).replace(/\n+/g, ' ').trim()} |`);
   return ["| Spec | Value |","|---|---|",...rows].join("\n");
 }
 
@@ -1164,15 +1206,14 @@ function sanitizeIngestPayload(p) {
   let features = Array.isArray(out.features_raw) ? out.features_raw.filter(cleanFeature) : [];
   features = dedupeList(features);
 
+  // If not enough features, derive ONLY from specs (not from description).
   if (features.length < 3) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
       .filter((s) => s.length >= 7 && s.length <= 180)
-      .slice(0, 8);
+      .slice(0, 12);
 
-    const descBullets = splitBenefitSentencesText(out.description_raw || '').slice(0, 8);
-
-    features = dedupeList([...features, ...specBullets, ...descBullets]).slice(0, 12);
+    features = dedupeList([...features, ...specBullets]).slice(0, 12);
   }
 
   out.features_raw = features.slice(0, 20);
@@ -1265,131 +1306,70 @@ function mergeDescriptions(a, b){
 function isCompass(u){
   try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); } catch { return false; }
 }
-function normLineKeyForCompass(line){
-  const t = String(line || "")
-    .replace(/^[•\-\*\u2022]\s*/, "")
-    .replace(/\s+/g, " ")
-    .replace(/[.,;:]+$/,"")
-    .toLowerCase()
-    .trim();
-  return t;
-}
-function mergeDescriptionsCompass(a, b){
-  const out = [];
-  const seen = new Set();
-  const add = (s) => {
-    const key = normLineKeyForCompass(s);
-    if (!key) return;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(s.trim());
-  };
-  String(a || "").split(/\n+/).map(s=>s.trim()).filter(Boolean).forEach(add);
-  String(b || "").split(/\n+/).map(s=>s.trim()).filter(Boolean).forEach(add);
-  return out.join("\n");
-}
+
+/* Harvest full Overview (lead + all paragraphs + bullets) from Compass Overview tab */
 function harvestCompassOverview($){
-  const candidates = resolveAllPanes($, ['overview','description','product details']);
-  let bestEl = null, bestScore = 0;
+  const candPanels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, #tabs, .product-details, .product-detail');
+  let best = "";
+  candPanels.each((_, panel)=>{
+    const $p = $(panel);
+    const hasOverviewHeading =
+      /\boverview\b/i.test(($p.find('h1,h2,h3,h4,h5').first().text() || "")) ||
+      /\boverview\b/i.test(($p.prev('a,button,[role="tab"]').text() || ""));
+    const looksLikeOverview = hasOverviewHeading || ($p.find('ul li').length >= 3 && $p.find('p').length >= 1);
+    if (!looksLikeOverview) return;
 
-  const scorePanel = ($p)=>{
-    let score = 0;
-    const textLen = cleanup($p.text()).length;
-    const liCnt   = $p.find('li').length;
-    const pCnt    = $p.find('p').length;
-    if (/\boverview\b/i.test($p.find('h1,h2,h3,h4,h5').first().text()||"")) score += 5;
-    score += Math.min(liCnt, 8) + Math.min(pCnt, 4) + Math.floor(textLen/200);
-    return score;
-  };
+    const parts = [];
+    const push = (t) => { t = cleanup(t); if (t) parts.push(t); };
 
-  candidates.forEach(el=>{
-    const $p = $(el);
-    const s = scorePanel($p);
-    if (s > bestScore){ bestScore = s; bestEl = el; }
+    // All paragraphs (entire text, not only bolded sentence)
+    $p.find('p').each((__, el)=> push($(el).text()));
+    // Bullets under the overview
+    $p.find('ul li, ol li').each((__, el)=>{
+      const t = cleanup($(el).text());
+      if (t && t.length <= 220) parts.push(`• ${t}`);
+    });
+
+    const merged = parts
+      .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g,' ').trim())
+      .filter(Boolean)
+      .join('\n');
+
+    if (merged.length > best.length) best = merged;
   });
-
-  const $panel = bestEl ? $(bestEl) : null;
-  if (!$panel || !$panel.length) return "";
-
-  const parts = [];
-  const push = (t) => { t = cleanup(t); if (t) parts.push(t); };
-
-  // 1) Bold opener / headings (not hidden)
-  $panel.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro')
-    .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
-    .each((_, el)=> push($(el).text()));
-
-  // 2) Inline text nodes right under panel (Compass frequently appends sentence after <strong>)
-  $panel.contents().each((_, n)=>{
-    if (n.type === 'text') {
-      const t = cleanup($(n).text());
-      if (t && t.length > 2) push(t);
-    }
-  });
-
-  // 3) Paragraphs
-  $panel.find('p').each((_, p)=> push($(p).text()));
-
-  // 4) Bullets
-  $panel.find('ul li, ol li').each((_, li)=>{
-    const t = cleanup($(li).text());
-    if (t && t.length <= 220) parts.push(`• ${t}`);
-  });
-
-  const merged = parts
-    .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g,' ').trim())
-    .filter(Boolean);
-
-  const seen = new Set();
-  const out = [];
-  for (const s of merged){
-    const k = normLineKeyForCompass(s);
-    if (!k) continue;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(s);
-  }
-  return out.join('\n');
+  return best;
 }
+
+/* Harvest Compass Technical Specifications (two-column table and key:value bullets) */
 function harvestCompassSpecs($){
-  const out = {};
-
-  // 1) Use the tab trigger labeled "Technical Specifications"
-  $('a,button,[role="tab"]').each((_, el)=>{
-    const label = cleanup($(el).text());
-    if (!/technical\s+specifications?/i.test(label)) return;
-
-    const href = $(el).attr('href') || '';
-    const controls = $(el).attr('aria-controls') || '';
-    let target = null;
-    if (href && href.startsWith('#')) target = $(href)[0];
-    if (!target && controls) target = documentQueryById($, controls);
-
-    if (target) {
-      Object.assign(out, extractSpecsFromContainer($, target));
-      if (Object.keys(out).length) return false; // break
-    } else {
-      const $tabs = $(el).closest('.tabs, .tab, .product-tabs, .tab-wrap, .tab-container, .tab-content').parent();
-      if ($tabs.length) {
-        $tabs.find('[role="tabpanel"], .tab-pane, .accordion-content, .tab-content > *').each((__, panel)=>{
-          const local = extractSpecsFromContainer($, panel);
-          Object.assign(out, local);
-        });
-        if (Object.keys(out).length) return false;
-      }
-    }
-  });
-  if (Object.keys(out).length) return out;
-
-  // 2) Panels that have a heading "Technical Specifications"
   const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-details, .product-detail, section');
+  const out = {};
   panels.each((_, panel)=>{
     const $p = $(panel);
     const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
     if (!/technical\s+specifications?/i.test(heading)) return;
-    Object.assign(out, extractSpecsFromContainer($, panel));
-  });
 
+    // table rows
+    $p.find('tr').each((__, tr)=>{
+      const cells = $(tr).find('th,td');
+      if (cells.length >= 2){
+        const k = cleanup($(cells[0]).text()).replace(/:$/, '');
+        const v = cleanup($(cells[1]).text());
+        if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
+      }
+    });
+
+    // key:value bullets
+    $p.find('li').each((__, li)=>{
+      const t = cleanup($(li).text());
+      const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
+      if (m){
+        const k = m[1].toLowerCase().replace(/\s+/g,'_');
+        const v = m[2];
+        if (k && v) out[k] ||= v;
+      }
+    });
+  });
   return out;
 }
 
