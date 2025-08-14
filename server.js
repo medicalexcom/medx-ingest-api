@@ -987,7 +987,7 @@ function extractDescriptionMarkdown($){
   let bestEl = null, bestLen = 0;
 
   $(candidates).each((_, el)=>{
-    const text = cleanup($(el).text()));
+    const text = cleanup($(el).text());
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
 
