@@ -4,17 +4,17 @@ import cors from "cors";
 import * as cheerio from "cheerio";
 
 /* ================== Config via env ================== */
-const RENDER_API_URL = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
-const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
-const MIN_IMG_PX = parseInt(process.env.MIN_IMG_PX || "200", 10); // min width/height inferred from URL hints
+const RENDER_API_URL  = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
+const RENDER_API_TOKEN= (process.env.RENDER_API_TOKEN || "").trim(); // optional
+const MIN_IMG_PX      = parseInt(process.env.MIN_IMG_PX || "200", 10); // inferred from URL hints
 
 /* ================== App setup ================== */
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
-app.get("/healthz", (_, res) => res.json({ ok: true }));
+app.get("/",       (_, res) => res.type("text").send("ingest-api OK"));
+app.get("/healthz",(_, res) => res.json({ ok: true }));
 
 /* ================== Ingest route ================== */
 /**
@@ -25,7 +25,6 @@ app.get("/ingest", async (req, res) => {
     const rawUrl = String(req.query.url || "");
     if (!rawUrl) return res.status(400).json({ error: "Missing url param" });
 
-    // Accept BOTH raw and pre-encoded URLs without double-encoding
     const targetUrl = safeDecodeOnce(rawUrl);
     if (!/^https?:\/\//i.test(targetUrl)) {
       return res.status(400).json({ error: "Invalid url param" });
@@ -33,12 +32,12 @@ app.get("/ingest", async (req, res) => {
     if (!RENDER_API_URL) return res.status(500).json({ error: "RENDER_API_URL not set" });
 
     const selector = req.query.selector ? `&selector=${encodeURIComponent(String(req.query.selector))}` : "";
-    const wait = req.query.wait != null ? `&wait=${encodeURIComponent(String(req.query.wait))}` : "";
-    const timeout = req.query.timeout != null ? `&timeout=${encodeURIComponent(String(req.query.timeout))}` : "";
-    const mode = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=fast";
+    const wait     = req.query.wait != null ? `&wait=${encodeURIComponent(String(req.query.wait))}` : "";
+    const timeout  = req.query.timeout != null ? `&timeout=${encodeURIComponent(String(req.query.timeout))}` : "";
+    const mode     = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=fast";
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
-    const headers = { "User-Agent": "MedicalExIngest/1.2" };
+    const headers  = { "User-Agent": "MedicalExIngest/1.3" };
     if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
 
     // Retry renderer 3x (handles cold starts & flaky nav)
@@ -77,17 +76,13 @@ function extractNormalized(baseUrl, html) {
   const og = {
     title: $('meta[property="og:title"]').attr("content") || "",
     description: $('meta[property="og:description"]').attr("content") || "",
-    image: $('meta[property="og:image"]').attr("content") || ""
+    image: $('meta[property="og:image"]').attr("content") || $('meta[property="og:image:secure_url"]').attr("content") || ""
   };
 
-  // Name
-  const name = cleanup(jsonld.name || og.title || $("h1").first().text());
-
-  // Brand
-  let brand = cleanup(jsonld.brand || "");
+  const name  = cleanup(jsonld.name || og.title || $("h1").first().text());
+  let brand   = cleanup(jsonld.brand || "");
   if (!brand) brand = inferBrandFromName(name);
 
-  // Description (also mine tab panes)
   const description_raw = cleanup(
     jsonld.description ||
     pickBestDescriptionBlock($) ||
@@ -96,9 +91,9 @@ function extractNormalized(baseUrl, html) {
     ""
   );
 
-  const images = extractImages($, jsonld, og, baseUrl, name, html);
-  const manuals = extractManuals($, baseUrl, name);
-  const specs = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($);
+  const images   = extractImages($, jsonld, og, baseUrl, name, html);
+  const manuals  = extractManuals($, baseUrl, name, html);
+  const specs    = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($);
   const features = (jsonld.features && jsonld.features.length) ? jsonld.features : extractFeaturesSmart($);
 
   return {
@@ -135,7 +130,17 @@ function extractJsonLd($){
     brand: (p.brand && (p.brand.name || p.brand)) || '',
     specs: schemaPropsToSpecs(p.additionalProperty || p.additionalProperties || []),
     features: Array.isArray(p.featureList) ? p.featureList : [],
-    images: p.image ? (Array.isArray(p.image) ? p.image : [p.image]) : []
+    // Handle image as string, array, or ImageObject[]
+    images: (() => {
+      const img = p.image;
+      if (!img) return [];
+      if (Array.isArray(img)) {
+        return img.map(v => (typeof v === 'string' ? v : (v.url || v.contentUrl || v['@id'] || ''))).filter(Boolean);
+      }
+      if (typeof img === 'object') return [img.url || img.contentUrl || img['@id']].filter(Boolean);
+      if (typeof img === 'string') return [img];
+      return [];
+    })()
   };
 }
 
@@ -156,7 +161,7 @@ function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
     '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description',
-    '.tab-content, .tabs-content, .panel, [role="tabpanel"], #tabs'
+    '.tab-content, .tabs-content, .panel, [role="tabpanel"], #tabs, .accordion-content, .product-tabs'
   ].join(', ');
 
   let text = "";
@@ -185,9 +190,10 @@ function inferBrandFromName(name){
   return "";
 }
 
-/* === IMAGE EXTRACTION & SCORING (gallery-first, filters junk, min-px, cap 12) === */
+/* === IMAGE EXTRACTION & SCORING (gallery-first, JSON-in-scripts, min-px, cap 12) === */
 function extractImages($, jsonld, og, baseUrl, name, rawHtml){
   const set = new Set();
+  const imgWeights = new Map(); // boost items found in galleries
   const push = (u, weight = 0) => {
     if (!u) return;
     const absu = abs(baseUrl, u);
@@ -196,22 +202,27 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
     imgWeights.set(absu, Math.max(imgWeights.get(absu), weight));
     set.add(absu);
   };
-  const imgWeights = new Map();
 
-  // Prefer images INSIDE obvious gallery/media containers
+  // Gallery containers (expanded)
   const gallerySelectors = [
     '.product-media', '.product__media', '.product-gallery', '.gallery', '.media-gallery',
     '#product-gallery', '#gallery', '[data-gallery]', '.product-images', '.product-image-gallery',
-    '.pdp-gallery', '.slick-slider', '.swiper', '.carousel'
+    '.pdp-gallery', '.slick-slider', '.slick', '.swiper', '.swiper-container', '.carousel', '.owl-carousel',
+    '.fotorama', '.MagicZoom', '.cloudzoom-zoom', '.zoomWindow', '.zoomContainer'
   ].join(', ');
-
   $(gallerySelectors).find('img, source').each((_, el) => {
     const $el = $(el);
-    const src = $el.attr('src') || $el.attr('data-src') || $el.attr('data-original') || '';
-    const ss  = $el.attr('srcset') || '';
-    if (src) push(src, 3);
-    const best = pickLargestFromSrcset(ss);
-    if (best) push(best, 3);
+    const cands = [
+      $el.attr('src'),
+      $el.attr('data-src'),
+      $el.attr('data-srcset'),
+      $el.attr('data-original'),
+      $el.attr('data-large_image'),
+      $el.attr('data-image'),
+      $el.attr('data-zoom'),
+      pickLargestFromSrcset($el.attr('srcset')),
+    ];
+    cands.forEach(u => push(u, 3));
   });
 
   // JSON-LD & OG
@@ -224,9 +235,12 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
     const cands = [
       $el.attr("src"),
       $el.attr("data-src"),
+      $el.attr("data-srcset"),
       $el.attr("data-original"),
       $el.attr("data-lazy"),
       $el.attr("data-zoom-image"),
+      $el.attr("data-large_image"),
+      $el.attr("data-image"),
       pickLargestFromSrcset($el.attr("srcset")),
     ];
     cands.forEach(u => push(u, 1));
@@ -247,19 +261,32 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
   // link rel=image_src
   $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1));
 
-  // Regex sweep for asset paths in raw HTML (handles Compass & others)
+  // JSON buried in <script> tags (non-JSON-LD) — look for image arrays/objects
+  $('script').each((_, el) => {
+    const txt = String($(el).contents().text() || '');
+    // Fast bail if no file extensions present
+    if (!/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
+    try {
+      // Try JSON parse directly
+      const obj = JSON.parse(txt);
+      deepFindImagesFromJson(obj).forEach(u => push(u, 2));
+    } catch {
+      // Regex fallback: capture direct URLs to images
+      const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
+      let m; while ((m = re.exec(txt))) push(m[1], 1);
+    }
+  });
+
+  // Regex sweep in full HTML as last resort
   if (rawHtml) {
     const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-    let m;
-    while ((m = re.exec(rawHtml))) push(m[1], 0);
+    let m; while ((m = re.exec(rawHtml))) push(m[1], 0);
   }
 
   // Normalize + filter
   let arr = Array.from(set).filter(Boolean).map(u => decodeHtml(u));
 
   const okExt = /\.(jpe?g|png|webp)(?:[?#].*)?$/i;
-
-  // Block obvious non-product assets (social/icons/sprites/placeholders)
   const badRe = new RegExp([
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader','ajax-loader',
     'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
@@ -279,21 +306,15 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
 
   // Scoring (gallery weight + path pref + code/title hits; de-weight thumbs)
   const titleTokens = (name || "").toLowerCase().split(/\s+/).filter(Boolean);
-  const codeCandidates = [];
-  const m1 = /\/item\/([^\/?#]+)/i.exec(baseUrl);
-  const m2 = /\/p\/([A-Za-z0-9._-]+)/i.exec(baseUrl);
-  const m3 = /\/product\/([A-Za-z0-9._-]+)/i.exec(baseUrl);
-  if (m1) codeCandidates.push(m1[1]);
-  if (m2) codeCandidates.push(m2[1]);
-  if (m3) codeCandidates.push(m3[1]);
+  const codeCandidates = collectCodesFromUrl(baseUrl);
 
-  const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/)/i;
+  const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/)/i;
 
   const scored = arr.map(u => {
     const L = u.toLowerCase();
     let score = imgWeights.get(u) || 0;
     if (preferRe.test(L)) score += 3;
-    if (codeCandidates.some(c => c && L.includes(String(c).toLowerCase()))) score += 3;
+    if (codeCandidates.some(c => c && L.includes(c))) score += 3;
     if (titleTokens.some(t => L.includes(t))) score += 1;
     if (/thumb|thumbnail|small|tiny|badge|mini/.test(L)) score -= 1;
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|\/large\/|\/hi(res)?\/|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
@@ -312,7 +333,34 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
     out.push({ url: s.url });
     if (out.length >= 12) break;
   }
+  return out;
+}
 
+function deepFindImagesFromJson(obj, out = []){
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (/\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) {
+    obj.forEach(v => deepFindImagesFromJson(v, out));
+    return out;
+  }
+  if (typeof obj === 'object') {
+    // common keys
+    const keys = ['url','src','image','imageUrl','imageURL','contentUrl','thumbnail','full','large','zoom','original'];
+    keys.forEach(k => {
+      const v = obj[k];
+      if (typeof v === 'string' && /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(v)) out.push(v);
+      else if (v) deepFindImagesFromJson(v, out);
+    });
+    // arrays like images, gallery, media
+    ['images','gallery','media','assets','pictures','variants'].forEach(k=>{
+      if (obj[k]) deepFindImagesFromJson(obj[k], out);
+    });
+    // recurse all keys
+    Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
+  }
   return out;
 }
 
@@ -320,12 +368,10 @@ function pickLargestFromSrcset(srcset) {
   if (!srcset) return "";
   try {
     const parts = String(srcset)
-      .split(",")
-      .map(s => s.trim())
-      .filter(Boolean)
+      .split(",").map(s => s.trim()).filter(Boolean)
       .map(s => {
         const [u, d] = s.split(/\s+/);
-        const n = d && /\d+/.test(d) ? parseInt(d, 10) : 0; // treat "2x" or "800w" as numeric
+        const n = d && /\d+/.test(d) ? parseInt(d, 10) : 0; // "2x" or "800w"
         return { u, n };
       });
     if (!parts.length) return "";
@@ -337,71 +383,63 @@ function pickLargestFromSrcset(srcset) {
 }
 
 function inferSizeFromUrl(u) {
-  // Parses hints like ..._800x800..., -800x, 800x600, ?w=800&h=800, &width=1200, etc.
   try {
     const out = { w: 0, h: 0 };
     const lower = u.toLowerCase();
-
-    // Filename patterns
     const fn = lower.split("/").pop() || "";
-    let m = fn.match(/(?:_|-)(\d{2,5})x(\d{2,5})/); // _800x800 or -1200x628
-    if (m) { out.w = parseInt(m[1], 10); out.h = parseInt(m[2], 10); return out; }
 
-    m = fn.match(/(?:_|-)(\d{2,5})x/); // -800x (width only)
-    if (m) { out.w = parseInt(m[1], 10); return out; }
+    let m = fn.match(/(?:_|-)(\d{2,5})x(\d{2,5})/); if (m) { out.w = +m[1]; out.h = +m[2]; return out; }
+    m = fn.match(/(?:_|-)(\d{2,5})x/);             if (m) { out.w = +m[1]; return out; }
+    m = fn.match(/(\d{2,5})x(\d{2,5})/);           if (m) { out.w = +m[1]; out.h = +m[2]; return out; }
 
-    m = fn.match(/(\d{2,5})x(\d{2,5})/); // 800x600 (bare)
-    if (m) { out.w = parseInt(m[1], 10); out.h = parseInt(m[2], 10); return out; }
-
-    // Query params
     const q = u.split("?")[1] || "";
     if (q) {
       const params = new URLSearchParams(q);
-      const widthKeys = ["w", "width", "maxwidth", "mw", "size"];
-      const heightKeys = ["h", "height", "maxheight", "mh"];
-      for (const k of widthKeys) {
-        const v = params.get(k);
-        if (v && /^\d{2,5}$/.test(v)) out.w = Math.max(out.w, parseInt(v, 10));
-      }
-      for (const k of heightKeys) {
-        const v = params.get(k);
-        if (v && /^\d{2,5}$/.test(v)) out.h = Math.max(out.h, parseInt(v, 10));
-      }
+      const widthKeys  = ["w","width","maxwidth","mw","size"];
+      const heightKeys = ["h","height","maxheight","mh"];
+      widthKeys.forEach(k => { const v = params.get(k);  if (v && /^\d{2,5}$/.test(v)) out.w = Math.max(out.w, parseInt(v,10)); });
+      heightKeys.forEach(k=> { const v = params.get(k);  if (v && /^\d{2,5}$/.test(v)) out.h = Math.max(out.h, parseInt(v,10)); });
     }
     return out;
-  } catch {
-    return { w: 0, h: 0 };
-  }
+  } catch { return { w: 0, h: 0 }; }
 }
 
-/* === Manuals (IFU) — allowlist real manuals, block certifications === */
-function extractManuals($, baseUrl, name){
+function collectCodesFromUrl(url){
+  const out = [];
+  const u = url.toLowerCase();
+  const m1 = /\/item\/([^\/?#]+)/i.exec(u);
+  const m2 = /\/p\/([a-z0-9._-]+)/i.exec(u);
+  const m3 = /\/product\/([a-z0-9._-]+)/i.exec(u);
+  [m1, m2, m3].forEach(m => { if (m && m[1]) out.push(m[1]); });
+  return out;
+}
+
+/* === Manuals (IFU) — allowlist real manuals, block certifications; includes scripts === */
+function extractManuals($, baseUrl, name, rawHtml){
   const urls = new Set();
 
-  const allowRe = /(manual|ifu|instructions?|user[- ]?guide|assembly|owner|quick[- ]?start|install|setup|spec(sheet)?)/i;
-  const blockRe = /(iso|mdsap|ce(-|\\s)?cert|certificate|quality\\s+management|annex)/i; // certifications & quality docs
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet)/i;
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy)/i;
 
-  // Prefer links around PDP content/tabs only
-  const scope = $([
+  const scopeSel = [
     '.product-details','.product-detail','.product-description','.product__info',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','main','#main','.main','#content','.content'
-  ].join(', '));
+    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','main','#main','.main','#content','.content',
+    '.downloads','.documents','.resources','.manuals'
+  ].join(', ');
+  const scope = $(scopeSel);
 
+  // Links in visible PDP scope
   scope.find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
     const href = String($(el).attr("href")||"");
     const txt  = cleanup($(el).text()).toLowerCase();
     const full = abs(baseUrl, href);
     if (!full) return;
-
-    const looksManual = allowRe.test(txt) || allowRe.test(full);
-    const looksBlocked = blockRe.test(txt) || blockRe.test(full);
-
-    if (looksManual && !looksBlocked) {
+    if ((allowRe.test(txt) || allowRe.test(full)) && !(blockRe.test(txt) || blockRe.test(full))) {
       urls.add(full);
     }
   });
 
-  // If none found in scope, do a second-chance pass but still enforce allow/block
+  // Second chance: scan all anchors if none found in scope (with allow/block)
   if (!urls.size) {
     $('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
       const href=String($(el).attr("href")||"");
@@ -414,10 +452,53 @@ function extractManuals($, baseUrl, name){
     });
   }
 
-  return Array.from(urls);
+  // PDFs inside scripts/JSON blobs
+  $('script').each((_, el)=>{
+    const txt = String($(el).contents().text() || '');
+    if (!/\.pdf\b/i.test(txt)) return;
+    try {
+      const obj = JSON.parse(txt);
+      deepFindPdfsFromJson(obj).forEach(u => {
+        const full = abs(baseUrl, u);
+        if (full && allowRe.test(full) && !blockRe.test(full)) urls.add(full);
+      });
+    } catch {
+      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
+      let m; while ((m = re.exec(txt))) {
+        const full = abs(baseUrl, m[1]);
+        if (full && allowRe.test(full) && !blockRe.test(full)) urls.add(full);
+      }
+    }
+  });
+
+  // Final: filter again with allow/block, prefer URLs containing a product code or title token
+  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(Boolean);
+  const codes = collectCodesFromUrl(baseUrl);
+  return Array.from(urls).filter(u => {
+    const L = u.toLowerCase();
+    if (!(allowRe.test(L) && !blockRe.test(L))) return false;
+    // keep if likely product-specific
+    if (codes.some(c => L.includes(c))) return true;
+    if (titleTokens.some(t => t.length > 2 && L.includes(t))) return true;
+    // otherwise still keep (it matched allowlist), but deprioritize in client if needed
+    return true;
+  });
 }
 
-/* === Specs — tables + dl + key:value inside "Specifications" tab === */
+function deepFindPdfsFromJson(obj, out = []){
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (/\.pdf(?:[?#].*)?$/i.test(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) { obj.forEach(v => deepFindPdfsFromJson(v, out)); return out; }
+  if (typeof obj === 'object') {
+    Object.values(obj).forEach(v => deepFindPdfsFromJson(v, out));
+  }
+  return out;
+}
+
+/* === Specs — tables + dl + key:value inside "Specifications/Details" tab === */
 function extractSpecsSmart($){
   const out = {};
 
@@ -445,19 +526,26 @@ function extractSpecsSmart($){
     }
   });
 
-  // 3) Named pane: Specifications
+  // 3) Named panes: Specifications / Details
   const specPane = resolveTabPane($, ['specification','specifications','tech specs','technical specifications','details']);
-  if (specPane && Object.keys(out).length === 0){
+  if (specPane){
+    const $p = $(specPane);
     // key:value lists
-    $(specPane).find('li').each((_, li)=>{
+    $p.find('li').each((_, li)=>{
       const t = cleanup($(li).text());
       if (!t || t.length < 3 || t.length > 200) return;
       const m = t.split(/[:\-–]\s+/);
       if (m.length >= 2){
         const k = m[0].toLowerCase().replace(/\s+/g,'_');
         const v = m.slice(1).join(': ').trim();
-        if (k && v) out[k]=v;
+        if (k && v && !out[k]) out[k]=v;
       }
+    });
+    // two-column plain divs
+    $p.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
+      const a = cleanup($(r).find('.label, .name, .title, strong, b').first().text());
+      const b = cleanup($(r).find('.value, .val, .data, span, p').last().text());
+      if (a && b) out[a.toLowerCase().replace(/\s+/g,'_')] = b;
     });
   }
 
@@ -469,7 +557,7 @@ function extractFeaturesSmart($){
   const items = [];
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs'
+    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','.accordion-content'
   ].join(', ');
   const excludeSel = [
     'nav','.breadcrumb','.breadcrumbs','[aria-label="breadcrumb"]',
@@ -504,30 +592,36 @@ function extractFeaturesSmart($){
   return out;
 }
 
-/* === Resolve a tab button to its pane by text (e.g., "Specifications", "Features") === */
+/* === Resolve a tab button to its pane by text (e.g., "Specifications", "Features", "Documents") === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
-
-  // Look for tab buttons/links whose text matches
   let pane = null;
+
+  // 1) Buttons/links with href="#id" or aria-controls
   $('a,button').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
     let target = null;
-
     if (href && href.startsWith('#')) target = $(href)[0];
     if (!target && controls) target = documentQueryById($, controls);
-
-    if (target) { pane = target; return false; } // break
+    if (target) { pane = target; return false; }
   });
 
-  // Fallback: look for panels with heading matching
+  // 2) Panels whose heading matches
   if (!pane){
-    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content').each((_, el)=>{
+    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
       if (heading && nameRe.test(heading)) { pane = el; return false; }
+    });
+  }
+
+  // 3) Sections with class names containing target words
+  if (!pane){
+    const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
+    $('[class]').each((_, el)=>{
+      if (classRe.test($(el).attr('class')||'')) { pane = el; return false; }
     });
   }
   return pane;
@@ -555,7 +649,7 @@ function abs(base, link){
     if (/^https?:\/\//i.test(link)) return link;
     const u = new URL(base);
     if (link.startsWith('//')) return u.protocol + link;
-    if (link.startsWith('/')) return u.origin + link;
+    if (link.startsWith('/'))  return u.origin + link;
     const basePath = u.pathname.endsWith('/') ? u.pathname : u.pathname.replace(/\/[^\/]*$/,'/');
     return u.origin + basePath + link;
   } catch(e){ return link; }
