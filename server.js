@@ -22,7 +22,7 @@ app.get("/healthz", (_, res) => res.json({ ok: true }));
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
  *                  &minpx=200&excludepng=true&aggressive=true
  *                  &harvest=true&sanitize=true
- *                  &markdown=true       // <-- NEW (optional): also return *_md fields
+ *                  &markdown=true       // optional: include *_md fields alongside existing fields
  */
 app.get("/ingest", async (req, res) => {
   try {
@@ -76,12 +76,10 @@ app.get("/ingest", async (req, res) => {
       return res.status(422).json({ error: "No extractable product data (JSON-LD/DOM empty)." });
     }
 
-    // ADDED: panes/accordions harvester remains (unchanged), but now also has a looser spec-pane fallback
     if (doHarvest) {
       norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
     }
 
-    // ADDED: optional markdown outputs (purely additive; raw fields unchanged)
     if (wantMd) {
       const $ = cheerio.load(html);
       norm.description_md = extractDescriptionMarkdown($) || textToMarkdown(norm.description_raw || "");
@@ -92,7 +90,6 @@ app.get("/ingest", async (req, res) => {
     if (doSanitize) {
       norm = sanitizeIngestPayload(norm);
       if (wantMd) {
-        // Rebuild MD after sanitize (to reflect any filtering), without changing raw fields
         norm.features_md = (norm.features_raw || []).map(t => `- ${t}`).join("\n");
         norm.specs_md    = objectToMarkdownTable(norm.specs || {});
         if (!norm.description_md) norm.description_md = textToMarkdown(norm.description_raw || "");
@@ -124,7 +121,6 @@ function extractNormalized(baseUrl, html, opts) {
   let brand = cleanup(jsonld.brand || "");
   if (!brand) brand = inferBrandFromName(name);
 
-  // Tweaked line ONLY (add lead/strong/headings) — rest unchanged
   let description_raw = cleanup(
     jsonld.description ||
     pickBestDescriptionBlock($) ||
@@ -138,7 +134,6 @@ function extractNormalized(baseUrl, html, opts) {
   let   specs    = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($);
   let   features = (jsonld.features && jsonld.features.length) ? jsonld.features : extractFeaturesSmart($);
 
-  // Existing fallbacks (unchanged)
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
   const mans = manuals.length ? manuals : fallbackManualsFromPaths($, baseUrl, name, html);
   if (!features.length) features = deriveFeaturesFromParagraphs($);
@@ -206,7 +201,7 @@ function schemaPropsToSpecs(props){
   return out;
 }
 
-/* Prefer content blocks near product detail; now also capture lead/strong/headings */
+/* Prefer content blocks near product detail; also capture lead/strong/headings */
 function pickBestDescriptionBlock($){
   const candidates = [
     '[itemprop="description"]',
@@ -244,7 +239,7 @@ function inferBrandFromName(name){
   return "";
 }
 
-/* === IMAGE EXTRACTION & SCORING (unchanged) === */
+/* === IMAGE EXTRACTION & SCORING === */
 function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   const minPx = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
   const excludePng = (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
@@ -560,7 +555,7 @@ function extractSpecsSmart($){
     }
   });
 
-  // Locate "Specifications" pane — keep exact match, add loose fallback if not found
+  // Locate "Specifications" pane
   let specPane = resolveTabPane($, ['specification','specifications','tech specs','technical specifications','details']);
   if (!specPane) {
     const candidates = resolveAllPanes($, ['specification','specifications','technical specifications','tech specs','details']);
@@ -607,7 +602,7 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features (kept expanded to include sentences/paragraphs) === */
+/* === Features === */
 function extractFeaturesSmart($){
   const items = [];
   const scopeSel = [
@@ -652,7 +647,7 @@ function extractFeaturesSmart($){
 
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
-      const raw = cleanup($(p).text()));
+      const raw = cleanup($(p).text()); // <- fixed extraneous parenthesis
       if (!raw) return;
       splitIntoSentences(raw).forEach(pushIfGood);
     });
@@ -755,7 +750,7 @@ function resolveAllPanes($, names){
   return Array.from(out);
 }
 
-/* ================== Tab/Accordion Harvester (unchanged, plus description MD helper uses it) ================== */
+/* ================== Tab/Accordion Harvester ================== */
 function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
@@ -961,7 +956,6 @@ function extractDescriptionMarkdown($){
   return containerTextToMarkdown(raw);
 }
 function containerTextToMarkdown(s){
-  // Lines starting with "• " become bullets, others are paragraphs.
   const lines = String(s || "").split(/\n+/).map(l => l.trim()).filter(Boolean);
   const out = [];
   let para = [];
@@ -983,7 +977,6 @@ function containerTextToMarkdown(s){
 function textToMarkdown(t){
   const lines = String(t||"").split(/\n+/).map(s=>s.trim()).filter(Boolean);
   if (!lines.length) return "";
-  // Heuristic: if a line looks like a bullet, keep; else paragraphs
   const out = [];
   let para = [];
   const flush = () => { if (para.length){ out.push(para.join(' ')); para = []; } };
@@ -1153,7 +1146,7 @@ function firstGoodParagraph($){
   return best;
 }
 
-/* ================== Optional post-processor (unchanged; gated by &sanitize=true) ================== */
+/* ================== Optional post-processor (gated by &sanitize=true) ================== */
 function sanitizeIngestPayload(p) {
   const out = { ...p };
 
