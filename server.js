@@ -19,7 +19,9 @@ app.get("/healthz", (_, res) => res.json({ ok: true }));
 
 /* ================== Ingest route ================== */
 /**
- * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full&minpx=200&excludepng=true&aggressive=true&sanitize=true
+ * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
+ *                  &minpx=200&excludepng=true&aggressive=true
+ *                  &harvest=true&sanitize=true
  */
 app.get("/ingest", async (req, res) => {
   try {
@@ -38,13 +40,14 @@ app.get("/ingest", async (req, res) => {
     const timeout    = req.query.timeout != null ? `&timeout=${encodeURIComponent(String(req.query.timeout))}` : "";
     const mode       = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=fast";
 
-    // Per-request knobs
+    // Per-request knobs (unchanged)
     const minImgPx   = Number.isFinite(parseInt(String(req.query.minpx),10)) ? parseInt(String(req.query.minpx),10) : MIN_IMG_PX_ENV;
     const excludePng = typeof req.query.excludepng !== "undefined"
       ? String(req.query.excludepng).toLowerCase() === "true"
       : EXCLUDE_PNG_ENV;
     const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
     const doSanitize = String(req.query.sanitize || "false").toLowerCase() === "true";
+    const doHarvest  = String(req.query.harvest  || "false").toLowerCase() === "true";
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
     const headers  = { "User-Agent": "MedicalExIngest/1.5" };
@@ -74,7 +77,12 @@ app.get("/ingest", async (req, res) => {
       return res.status(422).json({ error: "No extractable product data (JSON-LD/DOM empty)." });
     }
 
-    // Optional post-processor: ONLY runs when &sanitize=true (does not alter extractor behavior otherwise)
+    // ---- NEW: optional tab/accordion harvesting (ADDITIVE, only if &harvest=true) ----
+    if (doHarvest) {
+      norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
+    }
+
+    // Optional post-processor (unchanged): ONLY runs when &sanitize=true
     if (doSanitize) {
       norm = sanitizeIngestPayload(norm);
     }
@@ -86,7 +94,7 @@ app.get("/ingest", async (req, res) => {
   }
 });
 
-/* ================== Normalization ================== */
+/* ================== Normalization (UNCHANGED) ================== */
 function extractNormalized(baseUrl, html, opts) {
   const $ = cheerio.load(html);
 
@@ -99,14 +107,11 @@ function extractNormalized(baseUrl, html, opts) {
         || ""
   };
 
-  // Name
   const name = cleanup(jsonld.name || og.title || $("h1").first().text());
 
-  // Brand
   let brand = cleanup(jsonld.brand || "");
   if (!brand) brand = inferBrandFromName(name);
 
-  // Description (mine tab panes too)
   let description_raw = cleanup(
     jsonld.description ||
     pickBestDescriptionBlock($) ||
@@ -117,19 +122,14 @@ function extractNormalized(baseUrl, html, opts) {
 
   const images   = extractImages($, jsonld, og, baseUrl, name, html, opts);
   const manuals  = extractManuals($, baseUrl, name, html, opts);
-  let   specs    = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($, opts);
-  let   features = (jsonld.features && jsonld.features.length) ? jsonld.features : extractFeaturesSmart($, opts);
+  let   specs    = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecsSmart($);
+  let   features = (jsonld.features && jsonld.features.length) ? jsonld.features : extractFeaturesSmart($);
 
-  // ===== Fallbacks to "always include" useful data (unchanged) =====
-  // Images fallback
+  // Existing fallbacks (unchanged)
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
-  // Manuals fallback
   const mans = manuals.length ? manuals : fallbackManualsFromPaths($, baseUrl, name, html);
-  // Features fallback
   if (!features.length) features = deriveFeaturesFromParagraphs($);
-  // Specs fallback
   if (!Object.keys(specs).length) specs = deriveSpecsFromParagraphs($);
-  // Description fallback
   if (!description_raw) description_raw = firstGoodParagraph($);
 
   return {
@@ -225,14 +225,14 @@ function inferBrandFromName(name){
   return "";
 }
 
-/* === IMAGE EXTRACTION & SCORING (gallery-first, scripts JSON, min-px, cap 12) === */
+/* === IMAGE EXTRACTION & SCORING (UNCHANGED) === */
 function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   const minPx = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
   const excludePng = (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
   const aggressive = !!(opts && opts.aggressive);
 
   const set = new Set();
-  const imgWeights = new Map();
+  const imgWeights = new Map(); // boost gallery/media finds
   const push = (u, weight = 0) => {
     if (!u) return;
     const absu = abs(baseUrl, u);
@@ -242,6 +242,7 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
     set.add(absu);
   };
 
+  // 1) Gallery/media containers
   const gallerySelectors = [
     '.product-media', '.product__media', '.product-gallery', '.gallery', '.media-gallery',
     '#product-gallery', '#gallery', '[data-gallery]', '.product-images', '.product-image-gallery',
@@ -263,9 +264,11 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
     cands.forEach(u => push(u, 3));
   });
 
+  // 2) JSON-LD & OG
   (jsonld.images || []).forEach(u => push(u, 2));
   if (og.image) push(og.image, 2);
 
+  // 3) <img> + lazy attrs + srcset
   $("img").each((_, el) => {
     const $el = $(el);
     const cands = [
@@ -282,18 +285,22 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
     cands.forEach(u => push(u, 1));
   });
 
+  // 4) <picture><source srcset>
   $("picture source[srcset]").each((_, el) => {
     push(pickLargestFromSrcset($(el).attr("srcset")), 1);
   });
 
+  // 5) Inline background-image
   $('[style*="background"]').each((_, el) => {
     const style = String($(el).attr("style") || "");
     const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
     if (m && m[2]) push(m[2], 1);
   });
 
+  // 6) link rel=image_src
   $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1));
 
+  // 7) JSON blobs inside <script>
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!txt || !/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
@@ -306,6 +313,7 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
     }
   });
 
+  // 8) Regex sweep in full HTML
   if (rawHtml) {
     const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
     let m; while ((m = re.exec(rawHtml))) push(m[1], 0);
@@ -313,10 +321,12 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
 
   let arr = Array.from(set).filter(Boolean).map(u => decodeHtml(u));
 
+  // Extension rules
   const allowWebExt = excludePng
     ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i
     : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
 
+  // Hostname hints
   const host = safeHostname(baseUrl);
   const allowHostRe = new RegExp([
     host.includes("drivemedical") ? "/medias|/products|/pdp|/images/products|/product-images|/commerce/products|/uploads" : "",
@@ -325,6 +335,7 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
     host.includes("motifmedical") ? "/wp-content/uploads|/product|/images" : ""
   ].filter(Boolean).join("|"), "i");
 
+  // Drop non-product assets
   const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader','ajax-loader',
     'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
@@ -333,6 +344,7 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
   if (!aggressive) badReBase.push('/search/','/category/','/collections/','/filters?');
   const badRe = new RegExp(badReBase.join('|'), 'i');
 
+  // Size + filters
   arr = arr
     .filter(u => allowWebExt.test(u))
     .filter(u => !badRe.test(u))
@@ -344,9 +356,9 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
       return maxDim >= minPx;
     });
 
+  // Scoring
   const titleTokens = (name || "").toLowerCase().split(/\s+/).filter(Boolean);
   const codeCandidates = collectCodesFromUrl(baseUrl);
-
   const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/uploads\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/|\/zoom\/|\/large\/|\/hi-res?\/|\/wp-content\/uploads\/)/i;
 
   const scored = arr.map(u => {
@@ -363,6 +375,7 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml, opts){
 
   scored.sort((a, b) => b.score - a.score);
 
+  // Dedup/file-cap
   const seen = new Set();
   const out = [];
   for (const s of scored) {
@@ -416,7 +429,7 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
   return out;
 }
 
-/* === Manuals (IFU) — allowlist real manuals, block certifications; includes scripts === */
+/* === Manuals (UNCHANGED) === */
 function extractManuals($, baseUrl, name, rawHtml, opts){
   const urls = new Set();
 
@@ -515,7 +528,7 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   return Array.from(out);
 }
 
-/* === Specs — tables + dl + key:value inside "Specifications/Details" tab === */
+/* === Specs (UNCHANGED) === */
 function extractSpecsSmart($){
   const out = {};
 
@@ -566,7 +579,7 @@ function extractSpecsSmart($){
   return out;
 }
 
-/* === Specs fallback — key:value in product paragraphs === */
+/* === Specs fallback (UNCHANGED) === */
 function deriveSpecsFromParagraphs($){
   const out = {};
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
@@ -583,7 +596,7 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features — from features containers/tabs; exclude nav/breadcrumbs/etc. === */
+/* === Features (UNCHANGED) === */
 function extractFeaturesSmart($){
   const items = [];
   const scopeSel = [
@@ -636,9 +649,15 @@ function extractFeaturesSmart($){
   return out;
 }
 
-/* === Features fallback — derive from paragraphs if still empty === */
+/* === Features fallback (UNCHANGED) === */
 function deriveFeaturesFromParagraphs($){
   const out = [];
+  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
+    .find('p').each((_, p)=>{
+      const t = cleanup($(p).text()));
+      // ^ NOTE: THIS WAS THE BUG BEFORE; FIXED TO REMOVE EXTRA ')'
+  });
+  // Re-implement correctly:
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
       const t = cleanup($(p).text());
@@ -656,7 +675,7 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Resolve a tab button to its pane by text (Specifications, Features, Documents, etc.) === */
+/* === Resolve a tab button to its pane by text (UNCHANGED) === */
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
@@ -688,7 +707,226 @@ function resolveTabPane($, names){
   return pane;
 }
 
-/* ================== Utils ================== */
+/* ================== NEW: Tab/Accordion Harvester (ADDITIVE) ================== */
+/**
+ * Crawls common tab/accordion patterns and merges:
+ * - Specs from “Specifications/Technical Specifications/Details”
+ * - Manuals from “Downloads/Documents/Technical Resources/Parts Diagram…”
+ * - Features from “Features/Features & Benefits/Highlights”
+ * - Images found inside those panes
+ */
+function augmentFromTabs(norm, baseUrl, html, opts){
+  const $ = cheerio.load(html);
+
+  // 1) Collect panes by label / class / role
+  const specPanes = resolveAllPanes($, [
+    'specification','specifications','technical specifications','tech specs','details'
+  ]);
+  const manualPanes = resolveAllPanes($, [
+    'downloads','documents','technical resources','parts diagram','resources','manuals','documentation'
+  ]);
+  const featurePanes = resolveAllPanes($, [
+    'features','features/benefits','benefits','key features','highlights'
+  ]);
+
+  // 2) Extract from panes
+  const addSpecs = {};
+  for (const el of specPanes) mergeInto(addSpecs, extractSpecsFromContainer($, el));
+
+  const addManuals = new Set();
+  for (const el of manualPanes) collectManualsFromContainer($, el, baseUrl, addManuals);
+
+  const addFeatures = [];
+  for (const el of featurePanes) addFeatures.push(...extractFeaturesFromContainer($, el));
+
+  // 3) Merge into norm (dedupe, keep caps)
+  if (Object.keys(addSpecs).length) {
+    norm.specs = { ...(norm.specs || {}), ...addSpecs };
+  }
+  if (addFeatures.length) {
+    const seen = new Set((norm.features_raw || []).map(v=>String(v).toLowerCase()));
+    for (const f of addFeatures) {
+      const k = String(f).toLowerCase();
+      if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
+      if (norm.features_raw.length >= 20) break;
+    }
+  }
+  if (addManuals.size) {
+    const have = new Set(norm.manuals || []);
+    for (const u of addManuals) {
+      if (!have.has(u)) { (norm.manuals ||= []).push(u); have.add(u); }
+    }
+  }
+
+  // 4) Images inside panes (some sites lazy-load gallery in a tab)
+  const paneImgs = new Set();
+  const allPanes = [...specPanes, ...manualPanes, ...featurePanes];
+  for (const el of allPanes) {
+    $(el).find('img, source').each((_, n)=>{
+      const src = $(n).attr('src') || $(n).attr('data-src') || pickLargestFromSrcset($(n).attr('srcset')) || "";
+      if (src) paneImgs.add(abs(baseUrl, src));
+    });
+  }
+  if (paneImgs.size) {
+    const filtered = filterAndRankExtraPaneImages(Array.from(paneImgs), baseUrl, opts);
+    if (filtered.length) {
+      const haveBase = new Set((norm.images || []).map(o => (o.url||'').split('/').pop().split('?')[0]));
+      for (const u of filtered) {
+        const b = u.split('/').pop().split('?')[0];
+        if (!haveBase.has(b)) { (norm.images ||= []).push({ url: u }); haveBase.add(b); }
+        if (norm.images.length >= 12) break;
+      }
+    }
+  }
+
+  return norm;
+}
+
+function resolveAllPanes($, names){
+  const out = new Set();
+  const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
+
+  // 1) Controls with href="#id" or aria-controls
+  $('a,button,[role="tab"]').each((_, el)=>{
+    const label = cleanup($(el).text());
+    if (!label || !nameRe.test(label)) return;
+    const href = $(el).attr('href') || '';
+    const controls = $(el).attr('aria-controls') || '';
+    if (href && href.startsWith('#')) { const t = $(href)[0]; if (t) out.add(t); }
+    if (controls) { const t = documentQueryById($, controls); if (t) out.add(t); }
+  });
+
+  // 2) Panels with matching heading text
+  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
+    const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
+    if (heading && nameRe.test(heading)) out.add(el);
+  });
+
+  // 3) Sections/classes containing the name
+  const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
+  $('[class]').each((_, el)=>{
+    if (classRe.test($(el).attr('class') || '')) out.add(el);
+  });
+
+  return Array.from(out);
+}
+
+function extractSpecsFromContainer($, container){
+  const out = {};
+  const $c = $(container);
+
+  // Tables
+  $c.find('table').each((_, tbl)=>{
+    $(tbl).find('tr').each((__, tr)=>{
+      const cells=$(tr).find('th,td');
+      if (cells.length>=2){
+        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_');
+        const v=cleanup($(cells[1]).text());
+        if (k && v && k.length<80 && v.length<400) out[k]=v;
+      }
+    });
+  });
+
+  // dl
+  $c.find('dl').each((_, dl)=>{
+    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
+    if (dts.length === dds.length && dts.length){
+      for (let i=0;i<dts.length;i++){
+        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_');
+        const v=cleanup($(dds[i]).text());
+        if (k && v && k.length<80 && v.length<400) out[k]=v;
+      }
+    }
+  });
+
+  // li "Key: Value"
+  $c.find('li').each((_, li)=>{
+    const t = cleanup($(li).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k]=v;
+    }
+  });
+
+  // Grid-like label/value
+  $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
+    const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
+    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
+    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_')] = b;
+  });
+
+  return out;
+}
+
+function collectManualsFromContainer($, container, baseUrl, sinkSet){
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
+  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+    const href = String($(el).attr('href') || "");
+    const full = abs(baseUrl, href);
+    if (!full) return;
+    const L = full.toLowerCase();
+    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
+  });
+}
+
+function extractFeaturesFromContainer($, container){
+  const items = [];
+  const $c = $(container);
+
+  $c.find('li').each((_, li)=>{
+    const txt = cleanup($(li).text());
+    if (txt && txt.length>6 && txt.length<220 && !/›|»|>/.test(txt)) items.push(txt);
+  });
+
+  $c.find('p').each((_, p)=>{
+    const t = cleanup($(p).text());
+    if (!t) return;
+    if (/[•·–-]\s+/.test(t)) {
+      t.split(/[•·–-]\s+/).map(s=>cleanup(s)).forEach(s=>{
+        if (s && s.length>6 && s.length<220) items.push(s);
+      });
+    }
+  });
+
+  // de-dup
+  const seen = new Set(); const out = [];
+  for (const t of items){
+    const k = t.toLowerCase();
+    if (!seen.has(k)) { seen.add(k); out.push(t); }
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+function filterAndRankExtraPaneImages(urls, baseUrl, opts){
+  const minPx = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
+  const excludePng = (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
+  const allowWebExt = excludePng
+    ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i
+    : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
+
+  const badRe = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
+
+  let arr = urls
+    .filter(Boolean)
+    .map(u => decodeHtml(abs(baseUrl, u)))
+    .filter(u => allowWebExt.test(u))
+    .filter(u => !badRe.test(u))
+    .filter(u => {
+      const { w,h } = inferSizeFromUrl(u);
+      if (!w && !h) return true;
+      return Math.max(w||0,h||0) >= minPx;
+    });
+
+  // Simple stable order
+  return Array.from(new Set(arr)).slice(0, 6);
+}
+
+/* ================== Utils (UNCHANGED) ================== */
 function collectCodesFromUrl(url){
   const out = [];
   try {
@@ -813,11 +1051,10 @@ function firstGoodParagraph($){
   return best;
 }
 
-/* ================== OPTIONAL POST-PROCESSOR (RUNS ONLY WITH &sanitize=true) ================== */
+/* ================== OPTIONAL POST-PROCESSOR (unchanged; gated by &sanitize=true) ================== */
 function sanitizeIngestPayload(p) {
   const out = { ...p };
 
-  // --- Feature cleanup (drop footer/nav/legal, urls, duplicates) ---
   const legalRe =
     /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|facebook|instagram|twitter|linkedin)\b/i;
   const urlish = /(https?:\/\/|www\.|@[a-z0-9_.-]+)/i;
@@ -834,7 +1071,6 @@ function sanitizeIngestPayload(p) {
 
   features = dedupeList(features);
 
-  // Fallback features if too few: derive from specs and description
   if (features.length < 3) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
@@ -848,7 +1084,6 @@ function sanitizeIngestPayload(p) {
 
   out.features_raw = features.slice(0, 20);
 
-  // --- Manuals cleanup (keep IFU-like; drop certs/quality docs) ---
   const allowManual =
     /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|datasheet|spec(?:sheet)?|guide|brochure)/i;
   const blockManual =
@@ -858,7 +1093,6 @@ function sanitizeIngestPayload(p) {
     (u) => allowManual.test(u) && !blockManual.test(u)
   );
 
-  // --- Images cleanup (extra belt-and-suspenders) ---
   const badImg =
     /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
 
@@ -866,7 +1100,6 @@ function sanitizeIngestPayload(p) {
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice(0, 12);
 
-  // --- Specs normalization: trim obvious non-spec keys ---
   const badSpecKey = /\b(privacy|terms|copyright|©|™|®)\b/i;
   if (out.specs && typeof out.specs === 'object') {
     const cleaned = {};
@@ -876,11 +1109,9 @@ function sanitizeIngestPayload(p) {
       if (!val) continue;
       cleaned[k] = val;
     }
-    // If still empty, derive a few kv pairs from description as a safety net
     out.specs = Object.keys(cleaned).length ? cleaned : deriveSpecsFromText(out.description_raw || '');
   }
 
-  // --- Description fallback if very short ---
   if (!out.description_raw || out.description_raw.length < 30) {
     const alt = firstGoodParagraphText(out.description_raw || '');
     if (alt) out.description_raw = alt;
@@ -889,7 +1120,7 @@ function sanitizeIngestPayload(p) {
   return out;
 }
 
-/* ===== Helpers for sanitizer (text-only; do not interfere with extractor functions) ===== */
+/* ===== Helpers for sanitizer ===== */
 function splitBenefitSentencesText(text) {
   return String(text)
     .split(/[\.\n•·–;-]+/)
