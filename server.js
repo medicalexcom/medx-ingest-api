@@ -212,7 +212,7 @@ function pickBestDescriptionBlock($){
   let text = "";
   $(candidates).each((_, el) => {
     let t = $(el)
-      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p,li')
+      .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p')
       .not('.sr-only,.visually-hidden,[aria-hidden="true"]')
       .map((__, n)=>$(n).text())
       .get()
@@ -527,61 +527,53 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   return Array.from(out);
 }
 
-/* === Specs === */
+/* === Specs (SCOPED FIRST) === */
 function extractSpecsSmart($){
+  // 1) Prefer a dedicated specs pane/tab
+  let specPane = resolveTabPane($, [
+    'technical specifications','technical specification',
+    'tech specs','specifications','specification','details'
+  ]);
+  if (specPane) {
+    const scoped = extractSpecsFromContainer($, specPane);
+    if (Object.keys(scoped).length) return scoped;
+  }
+
+  // 2) Fallback: legacy global parsing
   const out = {};
 
-  // Tables
-  $("table").each((_, tbl)=>{
-    $(tbl).find("tr").each((__, tr)=>{
-      const cells=$(tr).find("th,td");
+  $('table').each((_, tbl)=>{
+    $(tbl).find('tr').each((__, tr)=>{
+      const cells=$(tr).find('th,td');
       if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_');
+        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         const v=cleanup($(cells[1]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     });
   });
 
-  // dl
-  $("dl").each((_, dl)=>{
-    const dts=$(dl).find("dt"), dds=$(dl).find("dd");
+  $('dl').each((_, dl)=>{
+    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_');
+        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         const v=cleanup($(dds[i]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     }
   });
 
-  // Locate "Specifications" pane
-  let specPane = resolveTabPane($, ['specification','specifications','tech specs','technical specifications','details']);
-  if (!specPane) {
-    const candidates = resolveAllPanes($, ['specification','specifications','technical specifications','tech specs','details']);
-    if (candidates.length) specPane = candidates[0];
-  }
-
-  if (specPane){
-    const $p = $(specPane);
-
-    $p.find('li').each((_, li)=>{
-      const t = cleanup($(li).text());
-      if (!t || t.length < 3 || t.length > 250) return;
-      const m = t.split(/[:\-–]\s+/);
-      if (m.length >= 2){
-        const k = m[0].toLowerCase().replace(/\s+/g,'_');
-        const v = m.slice(1).join(': ').trim();
-        if (k && v && !out[k]) out[k]=v;
-      }
-    });
-
-    $p.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
-      const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
-      const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-      if (a && b) out[a.toLowerCase().replace(/\s+/g,'_')] = b;
-    });
-  }
+  $('li').each((_, li)=>{
+    const t = cleanup($(li).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k]=v;
+    }
+  });
 
   return out;
 }
@@ -602,14 +594,16 @@ function deriveSpecsFromParagraphs($){
   return out;
 }
 
-/* === Features === */
+/* === Features (FOCUSED; no paragraph mining) === */
 function extractFeaturesSmart($){
   const items = [];
+
+  // Only explicit feature areas, not generic descriptions
   const scopeSel = [
     '.features','.feature-list','.product-features','[data-features]',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','.accordion-content',
-    '.product-highlights','.key-features','.overview','.description','.details','.product__description'
+    '.product-highlights','.key-features','.highlights'
   ].join(', ');
+
   const excludeSel = [
     'nav','.breadcrumb','.breadcrumbs','[aria-label="breadcrumb"]',
     '.related','.upsell','.cross-sell','.menu','.footer','.header','.sidebar',
@@ -630,33 +624,15 @@ function extractFeaturesSmart($){
     const $el = $(el);
     if ($el.closest(excludeSel).length) return;
     $el.find('li').each((__, li)=> pushIfGood($(li).text()));
-  });
-
-  $(scopeSel).each((_, el)=>{
-    const $el = $(el);
-    if ($el.closest(excludeSel).length) return;
-
-    $el.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((__, p)=>{
-      const raw = cleanup($(p).text());
-      if (!raw) return;
-      splitIntoSentences(raw).forEach(pushIfGood);
-    });
-
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
-    .find('p').each((_, p)=>{
-      const raw = cleanup($(p).text()); // <- fixed extraneous parenthesis
-      if (!raw) return;
-      splitIntoSentences(raw).forEach(pushIfGood);
-    });
-
-  const featPane = resolveTabPane($, ['feature','features','key features','highlights','benefits']);
+  // Also from a dedicated "Features" tab if present
+  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
   if (featPane){
-    $(featPane).find('li').each((_, li)=> pushIfGood($(li).text()));
-    $(featPane).find('p').each((_, p)=> splitIntoSentences($(p).text()).forEach(pushIfGood));
-    $(featPane).find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
+    const $c = $(featPane);
+    $c.find('li').each((_, li)=> pushIfGood($(li).text()));
+    $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
   }
 
   const seen = new Set(); const out=[];
@@ -834,7 +810,7 @@ function extractSpecsFromContainer($, container){
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_');
+        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         const v=cleanup($(cells[1]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
@@ -845,7 +821,7 @@ function extractSpecsFromContainer($, container){
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_');
+        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         const v=cleanup($(dds[i]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
@@ -857,7 +833,7 @@ function extractSpecsFromContainer($, container){
     if (!t || t.length < 3 || t.length > 250) return;
     const m = t.split(/[:\-–]\s+/);
     if (m.length >= 2){
-      const k = m[0].toLowerCase().replace(/\s+/g,'_');
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
       const v = m.slice(1).join(': ').trim();
       if (k && v && !out[k]) out[k]=v;
     }
@@ -866,7 +842,7 @@ function extractSpecsFromContainer($, container){
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
     const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_')] = b;
+    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
   });
 
   return out;
@@ -899,7 +875,6 @@ function extractFeaturesFromContainer($, container){
   };
 
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
-  $c.find('p').each((_, p)=> splitIntoSentences($(p).text()).forEach(pushIfGood));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
   const seen = new Set(); const out = [];
@@ -923,9 +898,9 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
+  // HEADINGS + PARAGRAPHS ONLY (no <li> → avoids bullet bleed into description)
   $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
   $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
-  $c.find('li').each((_, li)=> push(`• ${cleanup($(li).text())}`));
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -994,7 +969,7 @@ function textToMarkdown(t){
 function objectToMarkdownTable(obj){
   const entries = Object.entries(obj || {});
   if (!entries.length) return "";
-  const rows = entries.map(([k,v]) => `| ${toTitleCase(k.replace(/_/g,' '))} | ${String(v).replace(/\n+/g,' ').trim()} |`);
+  const rows = entries.map(([k,v]) => `| ${toTitleCase(k.replace(/_/g,' '))} | ${String(v).replace(/\n+/g, ' ').trim()} |`);
   return ["| Spec | Value |","|---|---|",...rows].join("\n");
 }
 
@@ -1165,15 +1140,14 @@ function sanitizeIngestPayload(p) {
   let features = Array.isArray(out.features_raw) ? out.features_raw.filter(cleanFeature) : [];
   features = dedupeList(features);
 
+  // If not enough features, derive ONLY from specs (not from description).
   if (features.length < 3) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
       .filter((s) => s.length >= 7 && s.length <= 180)
-      .slice(0, 8);
+      .slice(0, 12);
 
-    const descBullets = splitBenefitSentencesText(out.description_raw || '').slice(0, 8);
-
-    features = dedupeList([...features, ...specBullets, ...descBullets]).slice(0, 12);
+    features = dedupeList([...features, ...specBullets]).slice(0, 12);
   }
 
   out.features_raw = features.slice(0, 20);
