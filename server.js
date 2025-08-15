@@ -1190,56 +1190,114 @@ function resolveTabPane($, names){
 
 /* ===== Dojo/dijit TabContainer helpers (for role=tab + dojo ids) ===== */
 
-// Parse Dojo/ARIA tabs inside a <div role="tablist"> and map each tab -> panel/html/text
+// ===== Dojo/dijit TabContainer helpers (improved) =====
+
+// Parse Dojo/ARIA tabs and map each tab -> {title, html/text, href}.
+// Scans multiple tablist patterns and falls back by tab index when needed.
 function parseDojoTabs($, baseUrl, tablistRoot) {
   const out = [];
-  const $root = tablistRoot ? $(tablistRoot) : $('[role="tablist"]').first();
-  if (!$root.length) return out;
 
-  $root.find('[role="tab"]').each((_, el) => {
-    const $tab = $(el);
-    const tabId = $tab.attr('id') || '';
-    const title = (String($tab.attr('title') || '').trim()) || (String($tab.text() || '').trim());
+  // Candidate tablist roots (covers Dojo 1.x variations and ARIA)
+  const $roots = tablistRoot
+    ? $(tablistRoot)
+    : $(
+        [
+          '[role="tablist"]',
+          '.dijitTabContainer',
+          '[data-dojo-type*="TabContainer"]',
+          '[dojoType*="TabContainer"]',
+        ].join(', ')
+      );
 
-    // prefer aria-controls; dojo fallback: extract after "tablist_"
-    let paneId = $tab.attr('aria-controls') || '';
-    if (!paneId && tabId && tabId.includes('tablist_')) {
-      paneId = tabId.slice(tabId.indexOf('tablist_') + 'tablist_'.length);
-    }
-    if (!paneId) return;
+  if (!$roots.length) return out;
 
-    // find panel by id or aria-labelledby
-    let $panel;
-    try {
-      $panel = $(`#${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(paneId) : paneId}`);
-    } catch {
-      $panel = $(`#${paneId}`);
-    }
-    if (!$panel.length && tabId) $panel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`);
+  $roots.each((_, rootEl) => {
+    const $root = $(rootEl);
 
-    const html = $panel.html() || '';
-    const text = (String($panel.text() || '')).replace(/\s+/g,' ').trim();
+    // Collect tabs: real ARIA tabs + common Dojo tab nodes
+    const tabs = $root
+      .find('[role="tab"], .dijitTab, .dijitTabChecked, .dijitTabContainer .dijitTabListWrapper .dijitTab')
+      .toArray();
 
-    // Support Dojo ContentPane lazy loading (href or data-dojo-props)
-    let href = $panel.attr('href') || $panel.attr('data-href') || '';
-    if (!href) {
-      const props = $panel.attr('data-dojo-props') || '';
-      const m = /href\s*:\s*['"]([^'"]+)['"]/.exec(props);
-      if (m) href = m[1];
-    }
+    // Find all panels near this tablist (helps when linkage attrs are missing)
+    const $container = $root.closest('.dijitTabContainer').length ? $root.closest('.dijitTabContainer') : $root.parent();
+    const panelCandidates = $container
+      .find('[role="tabpanel"], .dijitTabPane, .dijitTabContainer .dijitTabPaneWrapper > *')
+      .toArray();
 
-    out.push({
-      tab_id: tabId,
-      panel_id: paneId,
-      title: title || '',
-      html,
-      text,
-      href: href ? abs(baseUrl, href) : ''
+    tabs.forEach((tabEl, i) => {
+      const $label = $(tabEl);
+      // If the visible text sits on a child (e.g., .tabLabel), prefer the longest text we can find
+      const $tabNode = $label.is('[role="tab"]') ? $label : $label.closest('[role="tab"]');
+      const rawTitle = [
+        String($label.attr('title') || '').trim(),
+        String($label.text() || '').trim(),
+        $tabNode.length ? String($tabNode.attr('title') || '').trim() : '',
+        $tabNode.length ? String($tabNode.text() || '').trim() : '',
+      ]
+        .map(s => s || '')
+        .sort((a, b) => b.length - a.length)[0] || '';
+
+      const tabId = ($tabNode.attr('id') || $label.attr('id') || '').trim();
+
+      // prefer aria-controls; fallback: extract after "tablist_" from Dojo ids
+      let paneId = ($tabNode.attr('aria-controls') || '').trim();
+      if (!paneId && tabId && tabId.includes('tablist_')) {
+        paneId = tabId.slice(tabId.indexOf('tablist_') + 'tablist_'.length);
+      }
+
+      // Locate the panel by id or aria-labelledby; otherwise by index
+      let $panel = null;
+      if (paneId) {
+        try {
+          $panel = $(`#${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(paneId) : paneId}`);
+        } catch {
+          $panel = $(`#${paneId}`);
+        }
+      }
+      if (!$panel || !$panel.length) {
+        if (tabId) $panel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`);
+      }
+      if (!$panel || !$panel.length) {
+        // Last resort: map i-th tab to i-th panel within the same container
+        const p = panelCandidates[i];
+        if (p) $panel = $(p);
+      }
+      if (!$panel || !$panel.length) return; // give up on this tab
+
+      const html = $panel.html() || '';
+      const text = (String($panel.text() || '')).replace(/\s+/g, ' ').trim();
+
+      // Support Dojo ContentPane lazy loading (href / data-href / data-dojo-props), on panel *or* tab
+      let href =
+        $panel.attr('href') ||
+        $panel.attr('data-href') ||
+        $tabNode.attr('href') ||
+        $tabNode.attr('data-href') ||
+        '';
+      if (!href) {
+        const props =
+          $panel.attr('data-dojo-props') ||
+          $tabNode.attr('data-dojo-props') ||
+          '';
+        const m = /href\s*:\s*['"]([^'"]+)['"]/.exec(props);
+        if (m) href = m[1];
+      }
+
+      out.push({
+        tab_id: tabId,
+        panel_id: paneId || '',
+        title: rawTitle || '',
+        html,
+        text,
+        href: href ? abs(baseUrl, href) : '',
+      });
     });
   });
 
   return out;
 }
+
 
 // If a tab was lazy (no html but has href), render/fetch it once and fill html/text.
 // Uses your existing Render API + token.
@@ -1253,12 +1311,22 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     if (!tt.html && tt.href) {
       try {
         const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
-        // Reuse our robust retrier
         const { html } = await fetchWithRetry(url, { headers });
         const $p = cheerio.load(html);
         tt.html = $p.root().html() || '';
         tt.text = $p.root().text().replace(/\s+/g,' ').trim();
-      } catch {}
+      } catch (e) {
+        // Soft fallback: fetch raw HTML directly if renderer 5xx’s
+        const status = e && e.status ? Number(e.status) : 0;
+        if (typeof fetchDirectHtml === 'function' && (status === 502 || status === 503 || status === 504)) {
+          try {
+            const html = await fetchDirectHtml(tt.href, { headers });
+            const $p = cheerio.load(html);
+            tt.html = $p.root().html() || '';
+            tt.text = $p.root().text().replace(/\s+/g,' ').trim();
+          } catch {}
+        }
+      }
     }
     out.push(tt);
   }
