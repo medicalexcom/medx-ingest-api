@@ -238,7 +238,7 @@ app.get("/ingest", async (req, res) => {
 
     if (doHarvest) {
       const t2 = now();
-      norm = augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
+      norm = await augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
       diag.timings.harvestMs = now() - t2;
     }
 
@@ -1176,7 +1176,7 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
     } catch {
       $panel = $(`#${paneId}`);
     }
-    if (!$panel.length && tabId) $panel = $([`[role="tabpanel"][aria-labelledby="${tabId}"]`]);
+    if (!$panel.length && tabId) $panel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`);
 
     const html = $panel.html() || '';
     const text = (String($panel.text() || '')).replace(/\s+/g,' ').trim();
@@ -1539,7 +1539,7 @@ function firstGoodParagraph($){
 }
 
 /* ================== Tab harvest orchestrator ================== */
-function augmentFromTabs(norm, baseUrl, html, opts){
+async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
   // === Dojo/dijit TabContainer pre-pass (handles <span class="tabLabel" role="tab"> etc.) ===
