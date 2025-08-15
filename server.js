@@ -308,16 +308,29 @@ function extractNormalized(baseUrl, html, opts) {
   const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) {
-    brand = name.trim().split(/\s+/)[0];
+    const skipWords = ["the", "a", "an", "new"];
+    const parts = name.trim().split(/\s+/);
+    let guessed = parts[0];
+    if (skipWords.includes(guessed.toLowerCase()) && parts.length > 1) {
+      guessed = parts[1];
+    }
+    brand = guessed;  
   }
 
   let description_raw = cleanup(
-    mergedSD.description ||
-    pickBestDescriptionBlock($) ||
-    og.description ||
-    $('meta[name="description"]').attr("content") ||
-    ""
-  );
+  mergedSD.description ||
+  // Fallback: pick the longest <p> text on the page
+  (() => {
+    const paragraphs = $("p").map((i, el) => $(el).text()).get();
+    if (paragraphs.length === 0) return "";
+    return paragraphs.reduce((longest, current) =>
+      cleanup(current).length > cleanup(longest).length ? current : longest
+    , "");
+  })() ||
+  og.description ||
+  $('meta[name="description"]').attr("content") ||
+  ""
+);
 
   const images   = extractImages($, mergedSD, og, baseUrl, name, html, opts);
   const manuals  = extractManuals($, baseUrl, name, html, opts);
