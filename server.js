@@ -370,7 +370,6 @@ function extractNormalized(baseUrl, html, opts) {
     brand
   };
 }
-
 /* ================== Structured Data Extractors ================== */
 function schemaPropsToSpecs(props){
   const out = {};
@@ -1269,7 +1268,7 @@ function extractDescriptionMarkdown($){
   let bestEl = null, bestLen = 0;
 
   $(candidates).each((_, el)=>{
-    const text = cleanup($(el).text()));
+    const text = cleanup($(el).text());
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
 
@@ -1633,7 +1632,7 @@ function harvestCompassSpecs($){
       const cells = $(tr).find('th,td');
       if (cells.length >= 2){
         const k = cleanup($(cells[0]).text()).replace(/:$/, '');
-        const v = cleanup($(cells[1]).text());
+        const v = cleanup($(cells[1]).text()));
         if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
       }
     });
