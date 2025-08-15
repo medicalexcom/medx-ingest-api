@@ -279,7 +279,6 @@ app.get("/ingest", async (req, res) => {
     return res.status(status >= 400 && status <= 599 ? status : 500).json({ error: String(e && e.message || e) });
   }
 });
-
 /* ================== Normalization ================== */
 function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
@@ -304,6 +303,12 @@ function extractNormalized(baseUrl, html, opts) {
          || "",
     product: extractOgProductMeta($)
   };
+
+  // ==== FIX: define name and brand before using them ====
+  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+  let brand = cleanup(mergedSD.brand || "");
+  if (!brand && name) brand = inferBrandFromName(name);
+  // =====================================================
 
   let description_raw = cleanup(
     mergedSD.description ||
@@ -1264,7 +1269,7 @@ function extractDescriptionMarkdown($){
   let bestEl = null, bestLen = 0;
 
   $(candidates).each((_, el)=>{
-    const text = cleanup($(el).text());
+    const text = cleanup($(el).text()));
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
 
@@ -1340,6 +1345,15 @@ function filterAndRankExtraPaneImages(urls, baseUrl, opts){
 }
 
 /* ================== Utils ================== */
+// ---- FIX: add brand inference helper used as fallback ----
+function inferBrandFromName(name){
+  const first = (String(name||"").trim().split(/\s+/)[0] || "");
+  if (/^(the|a|an|with|and|for|of|by|pro|basic)$/i.test(first)) return "";
+  if (/^[A-Z][A-Za-z0-9\-]+$/.test(first)) return first;
+  return "";
+}
+// ----------------------------------------------------------
+
 function collectCodesFromUrl(url){
   const out = [];
   try {
