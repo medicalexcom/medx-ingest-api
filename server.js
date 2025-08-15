@@ -307,7 +307,9 @@ function extractNormalized(baseUrl, html, opts) {
 
   const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
   let brand = cleanup(mergedSD.brand || "");
-  if (!brand) brand = inferBrandFromName(name);
+  if (!brand && name) {
+    brand = name.trim().split(/\s+/)[0];
+  }
 
   let description_raw = cleanup(
     mergedSD.description ||
