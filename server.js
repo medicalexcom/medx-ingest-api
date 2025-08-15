@@ -166,6 +166,25 @@ async function fetchWithRetry(endpoint, { headers, attempts=3, timeoutMs=DEFAULT
   throw err;
 }
 
+async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEOUT_MS } = {}) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(new Error("direct-timeout")), timeoutMs);
+  try {
+    const r = await fetch(url, { headers, signal: ctrl.signal, redirect: "follow" });
+    if (!r.ok) {
+      const err = new Error(`direct-fetch-status-${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > MAX_HTML_BYTES) throw new Error(`html-too-large(${buf.byteLength})`);
+    return Buffer.from(buf).toString("utf8");
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+
 /* ================== Ingest route ================== */
 /**
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
@@ -219,13 +238,30 @@ app.get("/ingest", async (req, res) => {
     let fetched = false;
     if (!html){
       const t0 = now();
-      const { html: rendered } = await fetchWithRetry(endpoint, { headers });
+      let rendered = "";
+      try {
+        const r = await fetchWithRetry(endpoint, { headers });
+        rendered = r.html;
+      } catch (e) {
+        const status = e && e.status ? Number(e.status) : 0;
+        // Soft fallback only for transient upstream errors
+        if (status === 502 || status === 503 || status === 504) {
+          diag.warnings.push(`render-upstream-${status}; falling back to direct fetch`);
+          try {
+            // Direct fetch of the target URL (no JS). Still better than failing the request.
+            rendered = await fetchDirectHtml(targetUrl, { headers });
+          } catch (e2) {
+            // If fallback also fails, rethrow original error so behavior is unchanged for other cases
+            throw e;
+          }
+        } else {
+          throw e;
+        }
+      }
       diag.timings.renderMs = now() - t0;
       html = rendered;
       cacheSet(cacheKey, html);
       fetched = true;
-    } else {
-      diag.timings.cacheHit = true;
     }
 
     const t1 = now();
@@ -1214,13 +1250,11 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     if (!tt.html && tt.href) {
       try {
         const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
-        const r = await fetch(url, { headers, redirect: "follow" });
-        if (r.ok) {
-          const raw = await r.text();
-          const $p = cheerio.load(raw);
-          tt.html = $p.root().html() || '';
-          tt.text = $p.root().text().replace(/\s+/g,' ').trim();
-        }
+        // Reuse our robust retrier
+        const { html } = await fetchWithRetry(url, { headers });
+        const $p = cheerio.load(html);
+        tt.html = $p.root().html() || '';
+        tt.text = $p.root().text().replace(/\s+/g,' ').trim();
       } catch {}
     }
     out.push(tt);
