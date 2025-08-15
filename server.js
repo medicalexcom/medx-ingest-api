@@ -907,7 +907,7 @@ function extractSpecsSmart($){
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
         const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(dds[i]).text()));
+        const v=cleanup($(dds[i]).text());
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     }
