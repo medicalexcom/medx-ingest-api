@@ -305,32 +305,43 @@ function extractNormalized(baseUrl, html, opts) {
     product: extractOgProductMeta($)
   };
 
-  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
-  let brand = cleanup(mergedSD.brand || "");
-  if (!brand && name) {
-    const skipWords = ["the", "a", "an", "new"];
-    const parts = name.trim().split(/\s+/);
-    let guessed = parts[0];
-    if (skipWords.includes(guessed.toLowerCase()) && parts.length > 1) {
-      guessed = parts[1];
-    }
-    brand = guessed;  
-  }
-
   let description_raw = cleanup(
-  mergedSD.description ||
-  // Fallback: pick the longest <p> text on the page
-  (() => {
-    const paragraphs = $("p").map((i, el) => $(el).text()).get();
-    if (paragraphs.length === 0) return "";
-    return paragraphs.reduce((longest, current) =>
-      cleanup(current).length > cleanup(longest).length ? current : longest
-    , "");
-  })() ||
-  og.description ||
-  $('meta[name="description"]').attr("content") ||
-  ""
-);
+    mergedSD.description ||
+    (() => {
+      // 1) Prefer obvious description containers
+      const selectors = [
+        '[itemprop="description"]',
+        '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
+        '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
+        // generic safety net: any node with "description/details/overview/copy" in id or class
+        '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
+      ].join(', ');
+  
+      let best = "";
+      $(selectors).each((_, el) => {
+        const $el = $(el);
+        // headings + lead + paragraphs feel like a true description
+        const text = [
+          $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
+          $el.find('p').map((i, n) => $(n).text()).get().join(' ')
+        ].join(' ');
+        const cleaned = cleanup(text);
+        if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
+      });
+  
+      // 2) Fallback: longest paragraph anywhere in main content
+      if (!best) {
+        const scope = $('main,#main,.main,#content,.content,body').first();
+        const paras = scope.find('p').map((i, el) => cleanup($(el).text())).get();
+        best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), "");
+      }
+  
+      return best || "";
+    })() ||
+    og.description ||
+    $('meta[name="description"]').attr('content') ||
+    ""
+  );
 
   const images   = extractImages($, mergedSD, og, baseUrl, name, html, opts);
   const manuals  = extractManuals($, baseUrl, name, html, opts);
