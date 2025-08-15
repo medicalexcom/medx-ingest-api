@@ -183,6 +183,7 @@ async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEO
     clearTimeout(to);
   }
 }
+
 /* ================== Ingest route ================== */
 /**
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
@@ -324,7 +325,8 @@ app.get("/ingest", async (req, res) => {
       try { norm.specs_md    = objectToMarkdownTable(norm.specs || {}); } catch(e){}
     }
 
-    if (doSanitize) {
+    const doSanitizeFlag = doSanitize; // keep name stable
+    if (doSanitizeFlag) {
       norm = sanitizeIngestPayload(norm);
       if (wantMd) {
         norm.features_md = (norm.features_raw || []).map(t => `- ${t}`).join("\n");
@@ -347,7 +349,6 @@ app.get("/ingest", async (req, res) => {
     return res.status(status >= 400 && status <= 599 ? status : 500).json({ error: String((e && e.message) || e) });
   }
 });
-
 /* ================== Normalization ================== */
 function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
@@ -376,11 +377,10 @@ function extractNormalized(baseUrl, html, opts) {
     product: extractOgProductMeta($)
   };
 
-  // ==== FIX: define name and brand before using them ====
+  // define name and brand before using them
   const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) brand = inferBrandFromName(name);
-  // =====================================================
 
   let description_raw = cleanup(
     mergedSD.description || (() => {
@@ -389,14 +389,13 @@ function extractNormalized(baseUrl, html, opts) {
         '[itemprop="description"]',
         '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
         '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
-        // generic safety net: any node with "description/details/overview/copy" in id or class
+        // generic safety net
         '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
       ].join(', ');
 
       let best = "";
       $(selectors).each((_, el) => {
         const $el = $(el);
-        // headings + lead + paragraphs feel like a true description
         const text = [
           $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
           $el.find('p').map((i, n) => $(n).text()).get().join(' ')
@@ -439,6 +438,7 @@ function extractNormalized(baseUrl, html, opts) {
     brand
   };
 }
+
 /* ================== Structured Data Extractors ================== */
 function schemaPropsToSpecs(props){
   const out = {};
@@ -959,6 +959,7 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   }
   return Array.from(out);
 }
+
 /* === Specs (scoped → dense block → global) === */
 function extractSpecsSmart($){
   let specPane = resolveTabPane($, [
@@ -1025,7 +1026,7 @@ function extractSpecsFromDensestBlock($){
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k = cleanup($(cells[0]).text());
-        const v = cleanup($(cells[1]).text()));
+        const v = cleanup($(cells[1]).text());
         if (k && v && /:|back|warranty|weight|capacity|handles|depth|height/i.test(k)) score++;
       }
     });
@@ -1143,7 +1144,6 @@ function deriveFeaturesFromParagraphs($){
   }
   return uniq;
 }
-
 /* === Resolve tabs === */
 function escapeRe(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
@@ -1188,9 +1188,7 @@ function resolveTabPane($, names){
   return pane;
 }
 
-/* ===== Dojo/dijit TabContainer helpers (for role=tab + dojo ids) ===== */
-
-// Parse Dojo/ARIA tabs inside a <div role="tablist"> and map each tab -> panel/html/text
+/* ===== Dojo/dijit TabContainer helpers ===== */
 function parseDojoTabs($, baseUrl, tablistRoot) {
   const out = [];
   const $root = tablistRoot ? $(tablistRoot) : $('[role="tablist"]').first();
@@ -1201,14 +1199,12 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
     const tabId = $tab.attr('id') || '';
     const title = (String($tab.attr('title') || '').trim()) || (String($tab.text() || '').trim());
 
-    // prefer aria-controls; dojo fallback: extract after "tablist_"
     let paneId = $tab.attr('aria-controls') || '';
     if (!paneId && tabId && tabId.includes('tablist_')) {
       paneId = tabId.slice(tabId.indexOf('tablist_') + 'tablist_'.length);
     }
     if (!paneId) return;
 
-    // find panel by id or aria-labelledby
     let $panel;
     try {
       $panel = $(`#${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(paneId) : paneId}`);
@@ -1220,7 +1216,6 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
     const html = $panel.html() || '';
     const text = (String($panel.text() || '')).replace(/\s+/g,' ').trim();
 
-    // Support Dojo ContentPane lazy loading (href or data-dojo-props)
     let href = $panel.attr('href') || $panel.attr('data-href') || '';
     if (!href) {
       const props = $panel.attr('data-dojo-props') || '';
@@ -1241,8 +1236,6 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
   return out;
 }
 
-// If a tab was lazy (no html but has href), render/fetch it once and fill html/text.
-// Uses your existing Render API + token.
 async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   if (!tabs || !tabs.length || !renderApiUrl) return tabs || [];
   const base = renderApiUrl.replace(/\/+$/,'');
@@ -1253,7 +1246,6 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     if (!tt.html && tt.href) {
       try {
         const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
-        // Reuse our robust retrier
         const { html } = await fetchWithRetry(url, { headers });
         const $p = cheerio.load(html);
         tt.html = $p.root().html() || '';
@@ -1265,7 +1257,6 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   return out;
 }
 
-// Convenience: merge texts from a preferred tab order into one block (optional)
 function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Features','Downloads']) {
   const rank = t => {
     const i = order.findIndex(x => x && t && x.toLowerCase() === t.toLowerCase());
@@ -1284,7 +1275,7 @@ function resolveAllPanes($, names){
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
 
   $('a,button,[role="tab"]').each((_, el)=>{
-    const label = cleanup($(el).text()));
+    const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
 
     const href = $(el).attr('href') || '';
@@ -1303,7 +1294,7 @@ function resolveAllPanes($, names){
   });
 
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
-    const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text()));
+    const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
 
@@ -1325,7 +1316,7 @@ function extractSpecsFromContainer($, container){
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(cells[1]).text());
+        const v=cleanup($(cells[1]).text()); // <-- fixed: removed extra ')'
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     });
@@ -1343,7 +1334,7 @@ function extractSpecsFromContainer($, container){
   });
 
   $c.find('li').each((_, li)=>{
-    const t = cleanup($(li).text()));
+    const t = cleanup($(li).text());
     if (!t || t.length < 3 || t.length > 250) return;
     const m = t.split(/[:\-–]\s+/);
     if (m.length >= 2){
@@ -1354,8 +1345,8 @@ function extractSpecsFromContainer($, container){
   });
 
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
-    const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text()));
-    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text()));
+    const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
+    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
     if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
   });
 
@@ -1388,8 +1379,8 @@ function extractFeaturesFromContainer($, container){
     items.push(t);
   };
 
-  $c.find('li').each((_, li)=> pushIfGood($(li).text())));
-  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text())));
+  $c.find('li').each((_, li)=> pushIfGood($(li).text()));
+  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
   const seen = new Set();
   const out = [];
@@ -1415,8 +1406,8 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
-  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text())));
-  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text())));
+  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
+  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -1444,7 +1435,7 @@ function extractDescriptionMarkdown($){
 
   let bestEl = null, bestLen = 0;
   $(candidates).each((_, el)=>{
-    const text = cleanup($(el).text()));
+    const text = cleanup($(el).text());
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
   if (!bestEl) return "";
@@ -1513,14 +1504,13 @@ function filterAndRankExtraPaneImages(urls, baseUrl, opts){
 
 /* ================== Utils ================== */
 
-// ---- FIX: add brand inference helper used as fallback ----
+// brand inference fallback
 function inferBrandFromName(name){
   const first = (String(name||"").trim().split(/\s+/)[0] || "");
   if (/^(the|a|an|with|and|for|of|by|pro|basic)$/i.test(first)) return "";
   if (/^[A-Z][A-Za-z0-9\-]+$/.test(first)) return first;
   return "";
 }
-// ----------------------------------------------------------
 
 function collectCodesFromUrl(url){
   const out = [];
@@ -1575,16 +1565,14 @@ function firstGoodParagraph($){
   });
   return best;
 }
-
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
-  // === Dojo/dijit TabContainer pre-pass (handles <span class="tabLabel" role="tab"> etc.) ===
+  // Dojo/dijit pre-pass
   try {
     const dojoTabs0 = parseDojoTabs($, baseUrl);
     if (dojoTabs0.length) {
-      // hydrate any lazy tabs (ContentPane with href)
       const headers = { "User-Agent": "MedicalExIngest/1.7" };
       if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
       const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
@@ -1602,7 +1590,6 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       for (const t of dojoTabs) {
         if (!t.html && !t.text) continue;
         const $p = cheerio.load(t.html || "");
-        // route by tab title
         const title = String(t.title || '').toLowerCase();
 
         if (specNames.some(n => title.includes(n))) {
@@ -1613,7 +1600,6 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
         }
         if (downNames.some(n => title.includes(n))) {
           collectManualsFromContainer($p, $p.root(), baseUrl, addManuals);
-          // also scan for PDFs in raw html as a bonus
           ($p('a[href$=".pdf"], a[href*=".pdf"]') || []).each((_, el)=>{
             const href = String($p(el).attr("href")||"");
             if (href) addManuals.add(abs(baseUrl, href));
@@ -1647,7 +1633,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   } catch(e) {
     // non-fatal
   }
-  // === end Dojo/dijit pre-pass ===
+  // end pre-pass
 
   const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
@@ -1712,9 +1698,11 @@ function sanitizeIngestPayload(p) {
 
   const legalRe = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|facebook|instagram|twitter|linkedin)\b/i;
   const urlish  = /(https?:\/\/|www\.|@[a-z0-9_.-]+)/i;
-  const cleanFeature = (t) => t && t.length >= 7 && t.length <= 220 && !legalRe.test(t) && !urlish.test(t) && !/[›»>]/.test(t);
 
-  let features = Array.isArray(out.features_raw) ? out.features_raw.filter(cleanFeature) : [];
+  let features = Array.isArray(out.features_raw) ? out.features_raw.filter((t) => {
+    const s = String(t||'');
+    return s.length >= 7 && s.length <= 220 && !legalRe.test(s) && !urlish.test(s) && !/[›»>]/.test(s);
+  }) : [];
   features = dedupeList(features);
 
   if (features.length < 3) {
@@ -1840,7 +1828,7 @@ function harvestCompassOverview($){
 
     $p.find('p').each((__, el)=> push($(el).text()));
     $p.find('ul li, ol li').each((__, el)=>{
-      const t = cleanup($(el).text()));
+      const t = cleanup($(el).text());
       if (t && t.length <= 220) parts.push(`• ${t}`);
     });
 
@@ -1859,20 +1847,20 @@ function harvestCompassSpecs($){
   const out = {};
   panels.each((_, panel)=>{
     const $p = $(panel);
-    const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text()));
+    const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
     if (!/technical\s+specifications?/i.test(heading)) return;
 
     $p.find('tr').each((__, tr)=>{
       const cells = $(tr).find('th,td');
       if (cells.length >= 2){
-        const k = cleanup($(cells[0]).text()).replace(/:$/, ''));
-        const v = cleanup($(cells[1]).text()));
+        const k = cleanup($(cells[0]).text()).replace(/:$/, '');
+        const v = cleanup($(cells[1]).text());
         if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
       }
     });
 
     $p.find('li').each((__, li)=>{
-      const t = cleanup($(li).text()));
+      const t = cleanup($(li).text());
       const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
       if (m){
         const k = m[1].toLowerCase().replace(/\s+/g,'_');
