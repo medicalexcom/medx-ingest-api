@@ -219,9 +219,11 @@ app.get("/ingest", async (req, res) => {
       diag.timings.harvestMs = now() - t2;
     }
 
-    // Compass-only additive harvest (unchanged)
+    // === Compass-only additive harvest (keeps your existing data intact) ===
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
+
+      // (1) Overview: full paragraphs + bullets (merged once)
       try {
         const compassOverview = harvestCompassOverview($);
         if (compassOverview) {
@@ -236,6 +238,7 @@ app.get("/ingest", async (req, res) => {
         }
       } catch(e){ diag.warnings.push(`compass-overview: ${e.message||e}`); }
 
+      // (2) Technical Specifications (union-merge; existing keys win)
       try {
         const compassSpecs = harvestCompassSpecs($);
         if (Object.keys(compassSpecs).length) {
@@ -243,6 +246,7 @@ app.get("/ingest", async (req, res) => {
         }
       } catch(e){ diag.warnings.push(`compass-specs: ${e.message||e}`); }
     }
+    // === end Compass-only additions ===
 
     if (wantMd) {
       const $ = cheerio.load(html);
@@ -903,7 +907,7 @@ function extractSpecsSmart($){
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
         const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(dds[i]).text());
+        const v=cleanup($(dds[i]).text()));
         if (k && v && k.length<80 && v.length<400) out[k]=v;
       }
     }
@@ -1061,7 +1065,7 @@ function resolveTabPane($, names){
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
-    const controls = $(el).attr('aria-controls') || '';
+       const controls = $(el).attr('aria-controls') || '';
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
     if (href && href.startsWith('#')) target = $(href)[0];
@@ -1091,7 +1095,7 @@ function resolveAllPanes($, names){
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
 
   $('a,button,[role="tab"]').each((_, el)=>{
-    const label = cleanup($(el).text());
+    const label = cleanup($(el).text()));
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
     const controls = $(el).attr('aria-controls') || '';
