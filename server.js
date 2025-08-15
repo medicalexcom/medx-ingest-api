@@ -219,9 +219,11 @@ app.get("/ingest", async (req, res) => {
       diag.timings.harvestMs = now() - t2;
     }
 
-    // === Compass-only additive harvest ===
+    // === Compass-only additive harvest (keeps your existing data intact) ===
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
+
+      // (1) Overview: full paragraphs + bullets (merged once)
       try {
         const compassOverview = harvestCompassOverview($);
         if (compassOverview) {
@@ -236,6 +238,7 @@ app.get("/ingest", async (req, res) => {
         }
       } catch(e){ diag.warnings.push(`compass-overview: ${e.message||e}`); }
 
+      // (2) Technical Specifications (union-merge; existing keys win)
       try {
         const compassSpecs = harvestCompassSpecs($);
         if (Object.keys(compassSpecs).length) {
@@ -940,7 +943,7 @@ function extractSpecsFromDensestBlock($){
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k = cleanup($(cells[0]).text());
-        const v = cleanup($(cells[1]).text()));
+        const v = cleanup($(cells[1]).text());
         if (k && v && /:|back|warranty|weight|capacity|handles|depth|height/i.test(k)) score++;
       }
     });
@@ -1062,7 +1065,7 @@ function resolveTabPane($, names){
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
     const href = $(el).attr('href') || '';
-    const controls = $(el).attr('aria-controls') || '';
+       const controls = $(el).attr('aria-controls') || '';
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
     if (href && href.startsWith('#')) target = $(href)[0];
@@ -1590,7 +1593,7 @@ function harvestCompassSpecs($){
       const cells = $(tr).find('th,td');
       if (cells.length >= 2){
         const k = cleanup($(cells[0]).text()).replace(/:$/, '');
-        const v = cleanup($(cells[1]).text()));
+        const v = cleanup($(cells[1]).text());
         if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
       }
     });
