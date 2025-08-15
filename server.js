@@ -1632,7 +1632,7 @@ function harvestCompassSpecs($){
       const cells = $(tr).find('th,td');
       if (cells.length >= 2){
         const k = cleanup($(cells[0]).text()).replace(/:$/, '');
-        const v = cleanup($(cells[1]).text()));
+        const v = cleanup($(cells[1]).text());
         if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
       }
     });
