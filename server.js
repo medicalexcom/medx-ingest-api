@@ -184,7 +184,6 @@ async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEO
   }
 }
 
-
 /* ================== Ingest route ================== */
 /**
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
@@ -238,30 +237,34 @@ app.get("/ingest", async (req, res) => {
     let fetched = false;
     if (!html){
       const t0 = now();
-      let rendered = "";
-      try {
-        const r = await fetchWithRetry(endpoint, { headers });
-        rendered = r.html;
-      } catch (e) {
-        const status = e && e.status ? Number(e.status) : 0;
-        // Soft fallback only for transient upstream errors
-        if (status === 502 || status === 503 || status === 504) {
-          diag.warnings.push(`render-upstream-${status}; falling back to direct fetch`);
-          try {
-            // Direct fetch of the target URL (no JS). Still better than failing the request.
-            rendered = await fetchDirectHtml(targetUrl, { headers });
-          } catch (e2) {
-            // If fallback also fails, rethrow original error so behavior is unchanged for other cases
-            throw e;
-          }
-        } else {
+
+    let rendered = "";
+    try {
+      const r = await fetchWithRetry(endpoint, { headers });
+      rendered = r.html;
+    } catch (e) {
+      const status = e && e.status ? Number(e.status) : 0;
+      // Soft fallback only for transient upstream errors
+      if (status === 502 || status === 503 || status === 504) {
+        diag.warnings.push(`render-upstream-${status}; falling back to direct fetch`);
+        try {
+          // Direct fetch of the target URL (no JS). Still better than failing the request.
+          rendered = await fetchDirectHtml(targetUrl, { headers });
+        } catch (e2) {
+          // If fallback also fails, rethrow original error so behavior is unchanged for other cases
           throw e;
         }
+      } else {
+        throw e;
       }
-      diag.timings.renderMs = now() - t0;
-      html = rendered;
-      cacheSet(cacheKey, html);
-      fetched = true;
+    }
+    diag.timings.renderMs = now() - t0;
+    html = rendered;
+    cacheSet(cacheKey, html);
+    fetched = true;
+
+    } else {
+      diag.timings.cacheHit = true;
     }
 
     const t1 = now();
