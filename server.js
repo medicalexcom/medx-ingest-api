@@ -707,7 +707,6 @@ function inferSizeFromUrl(u) {
     return out;
   } catch { return { w: 0, h: 0 }; }
 }
-
 /* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
 /* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
 
@@ -899,10 +898,13 @@ function pluckJsonObjectsFromJs(txt, maxBlocks = 3) {
 }
 
 /* ================== Specs: pull from embedded JSON (ADD-ONLY) ================== */
-/* ==== MEDX ADD-ONLY: extract specs from scripts v1 ==== */
+/* ==== MEDX ADD-ONLY: extract specs from scripts v1 (with reco-path guard) ==== */
 function extractSpecsFromScripts($, container /* optional */) {
   const scope = container ? $(container) : $;
+  if (container && (isFooterOrNav($, container) || isRecoBlock($, container))) return {};
+
   const out = {};
+  const RECO_PATH_RE = /(related|recommend|upsell|cross|also(view|bought)|similar|fbt|suggest)/i;
 
   const pushKV = (name, value) => {
     const k = canonicalizeSpecKey(name);
@@ -911,53 +913,58 @@ function extractSpecsFromScripts($, container /* optional */) {
     if (!out[k]) out[k] = v; // first occurrence wins; DOM/SD will win later via merge order
   };
 
-  const visit = (node) => {
+  const visit = (node, path = "") => {
     if (node == null) return;
     if (typeof node === "string") return;
 
     if (Array.isArray(node)) {
-      node.forEach(visit);
+      for (let i = 0; i < node.length; i++) visit(node[i], `${path}[${i}]`);
       return;
     }
 
     if (typeof node === "object") {
+      // If path looks like recommendations, skip collecting KV from this subtree
+      const looksReco = RECO_PATH_RE.test(path);
       const nameLike  = node.name || node.label || node.title || node.displayName || node.key || node.property;
       const valueLike = node.value || node.displayValue || node.val || node.text || node.content || node.description;
-      if (nameLike && (valueLike != null && valueLike !== "")) pushKV(nameLike, valueLike);
+      if (!looksReco && nameLike && (valueLike != null && valueLike !== "")) pushKV(nameLike, valueLike);
 
       const containers = [
         "specs","specifications","technicalSpecifications","attributes","attributeGroups",
         "productAttributes","properties","features","details","data","dataSheet","Specification","Specifications",
         "custom_fields","customFields","customfields"
       ];
-      containers.forEach(c => { if (node[c]) visit(node[c]); });
+      containers.forEach(c => { if (node[c]) visit(node[c], `${path}.${c}`); });
 
       // BigCommerce/BCData shapes
       if (node.product && (node.product.attributes || node.product.custom_fields)) {
-        visit(node.product.attributes || []);
-        visit(node.product.custom_fields || []);
+        visit(node.product.attributes || [], `${path}.product.attributes`);
+        visit(node.product.custom_fields || [], `${path}.product.custom_fields`);
       }
 
-      Object.values(node).forEach(visit);
+      // Recurse into other fields with path context
+      for (const [k, v] of Object.entries(node)) visit(v, `${path}.${k}`);
     }
   };
 
   // 1) Strict JSON blobs
   scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
+    if (isRecoBlock($, el)) return;
     const raw = $(el).contents().text();
     if (!raw || !raw.trim()) return;
-    try { visit(JSON.parse(raw.trim())); } catch {}
+    try { visit(JSON.parse(raw.trim()), "$"); } catch {}
   });
 
   // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
   scope.find("script").each((_, el) => {
+    if (isRecoBlock($, el)) return;
     const txt = String($(el).contents().text() || "");
     if (!txt || txt.length < 40) return;
     if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
 
     const blocks = pluckJsonObjectsFromJs(txt, 5);
     for (const block of blocks) {
-      try { visit(JSON.parse(block)); } catch {}
+      try { visit(JSON.parse(block), "$"); } catch {}
     }
   });
 
@@ -995,13 +1002,13 @@ function extractJsonLdAllProductSpecs($){
   return merged;
 }
 
-/* ==== MEDX ADD-ONLY: Global spec sweep v1 ==== */
+/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware) ==== */
 function extractAllSpecPairs($){
   const out = {};
 
   // Tables
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl)) return; // ADD
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl)) return; // ADD reco guard
     let hits = 0;
     const local = {};
     $(tbl).find('tr').each((__, tr)=>{
@@ -1022,7 +1029,7 @@ function extractAllSpecPairs($){
 
   // Definition lists
   $('dl').each((_, dl)=>{
-    if (isFooterOrNav($, dl)) return; // ADD
+    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return; // ADD reco guard
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length >= 3){
       for (let i=0;i<dts.length;i++){
@@ -1036,7 +1043,7 @@ function extractAllSpecPairs($){
 
   // Colon/hyphen pairs in main/product areas (keep scope, but still guard)
   $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
-    if (isFooterOrNav($, el)) return; // ADD
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
     const t = cleanup($(el).text());
     if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
@@ -1345,7 +1352,7 @@ function extractSpecsSmart($){
     'tech specs','specifications','specification','details'
   ]);
   // ADD: Make spec pane selection “footer-aware”
-  if (specPane && isFooterOrNav($, specPane)) {
+  if (specPane && (isFooterOrNav($, specPane) || isRecoBlock($, specPane))) {
     specPane = null;
   }
 
@@ -1361,7 +1368,7 @@ function extractSpecsSmart($){
   
   // Tables (global fallback)
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl)) return; // ADD
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl)) return; // ADD reco guard
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -1376,7 +1383,7 @@ function extractSpecsSmart($){
 
   // Definition lists
   $('dl').each((_, dl)=>{
-    if (isFooterOrNav($, dl)) return; // ADD
+    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return; // ADD reco guard
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
@@ -1391,7 +1398,7 @@ function extractSpecsSmart($){
 
   // LI pairs
   $('li').each((_, li)=>{
-    if (isFooterOrNav($, li)) return; // ADD
+    if (isFooterOrNav($, li) || isRecoBlock($, li)) return; // ADD reco guard
     const t = cleanup($(li).text());
     if (!t || t.length < 3 || t.length > 250 || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.split(/[:\-–]\s+/);
@@ -1413,6 +1420,7 @@ function extractSpecsFromDensestBlock($){
   let bestEl = null, bestScore = 0;
 
   $(candidates).each((_, el)=>{
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
     const $el = $(el);
     let score = 0;
 
@@ -1444,6 +1452,7 @@ function deriveSpecsFromParagraphs($){
   const out = {};
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p, li').each((_, el)=>{
+      if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
       const t = cleanup($(el).text());
       if (!t) return;
       const m = t.match(/^([^:]{2,60}):\s*(.{2,300})$/);
@@ -1467,7 +1476,8 @@ function extractFeaturesSmart($){
   const excludeSel = [
     'nav','.breadcrumb','.breadcrumbs','[aria-label="breadcrumb"]',
     '.related','.upsell','.cross-sell','.menu','.footer','.header','.sidebar',
-    '.category','.collections','.filters'
+    '.category','.collections','.filters',
+    '.frequently-bought','.frequently-bought-together','.also-viewed','.people-also-viewed','.recommendations','.product-recommendations'
   ].join(', ');
 
   const pushIfGood = (txt) => {
@@ -1506,7 +1516,6 @@ function extractFeaturesSmart($){
   }
   return out;
 }
-
 function deriveFeaturesFromParagraphs($){
   const out = [];
   const pushIfGood = (txt) => {
@@ -1521,6 +1530,7 @@ function deriveFeaturesFromParagraphs($){
 
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
+      if (isFooterOrNav($, p) || isRecoBlock($, p)) return; // ADD reco guard
       const raw = cleanup($(p).text());
       if (!raw) return;
       splitIntoSentences(raw).forEach(pushIfGood);
@@ -1703,8 +1713,8 @@ function resolveAllPanes($, names){
 
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
-  // ADD: avoid footer/nav contamination
-  if (isFooterOrNav($, container)) return {};
+  // ADD: avoid footer/nav/reco contamination
+  if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
   const out = {};
   const $c = $(container);
 
@@ -1832,7 +1842,7 @@ function extractDescriptionMarkdown($){
   let bestEl = null, bestLen = 0;
   $(candidates).each((_, el)=>{
     // ADD: skip footer/nav & legal-like text nodes
-    if (isFooterOrNav($, el)) return;
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     const textCheck = cleanup($(el).text());
     if (LEGAL_MENU_RE.test(textCheck) || /^©\s?\d{4}/.test(textCheck)) return;
 
@@ -1975,6 +1985,18 @@ function isFooterOrNav($, el){
     ' nav, .nav, .navbar, [role="navigation"], [role="contentinfo"],' +
     ' [aria-label*="footer" i], [aria-label*="breadcrumb" i], .breadcrumbs,' +
     ' .legal, .legalese, .bottom-bar, .cookie, .consent, .newsletter, .subscribe, .sitemap'
+  ).length > 0;
+}
+
+// ADD: recommendation/reco block detector (prevents spec leakage from “related/also viewed/etc.”)
+function isRecoBlock($, el){
+  return $(el).closest(
+    '.related, .related-products, #related-products, ' +
+    '.upsell, .cross-sell, .crosssell, .you-may-also-like, ' +
+    '.recommended, .recommendations, .product-recommendations, .product-recs, [data-recommendations], ' +
+    '.frequently-bought, .frequently-bought-together, .fbt, ' +
+    '.also-viewed, .people-also-viewed, .also-bought, .customers-also-bought, ' +
+    '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
   ).length > 0;
 }
 
