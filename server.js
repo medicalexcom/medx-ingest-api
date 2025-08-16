@@ -987,8 +987,10 @@ function extractJsonLdAllProductSpecs($){
 /* ==== MEDX ADD-ONLY: Global spec sweep v1 ==== */
 function extractAllSpecPairs($){
   const out = {};
-  // 1) Any table that looks like a spec table (>=3 rows with short header cells)
+
+  // Tables
   $('table').each((_, tbl)=>{
+    if (isFooterOrNav($, tbl)) return; // ADD
     let hits = 0;
     const local = {};
     $(tbl).find('tr').each((__, tr)=>{
@@ -996,7 +998,9 @@ function extractAllSpecPairs($){
       if (cells.length >= 2) {
         const k = cleanup($(cells[0]).text());
         const v = cleanup($(cells[1]).text());
-        if (k && v && k.length <= 80 && v.length <= 400) {
+        // ADD: ignore legal/menu rows
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return;
+        if (k.length <= 80 && v.length <= 400) {
           local[canonicalizeSpecKey(k)] = v;
           hits++;
         }
@@ -1005,21 +1009,25 @@ function extractAllSpecPairs($){
     if (hits >= 3) Object.assign(out, local);
   });
 
-  // 2) Definition lists
+  // Definition lists
   $('dl').each((_, dl)=>{
+    if (isFooterOrNav($, dl)) return; // ADD
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length >= 3){
       for (let i=0;i<dts.length;i++){
         const k=cleanup($(dts[i]).text());
         const v=cleanup($(dds[i]).text());
-        if (k && v) out[canonicalizeSpecKey(k)] = v;
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue; // ADD
+        out[canonicalizeSpecKey(k)] = v;
       }
     }
   });
 
-  // 3) Colon/hyphen pairs in main/product areas
+  // Colon/hyphen pairs in main/product areas (keep scope, but still guard)
   $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
+    if (isFooterOrNav($, el)) return; // ADD
     const t = cleanup($(el).text());
+    if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
     if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
   });
@@ -1334,31 +1342,42 @@ function extractSpecsSmart($){
   if (Object.keys(dense).length) return dense;
 
   const out = {};
+  
+  // Tables (global fallback)
   $('table').each((_, tbl)=>{
+    if (isFooterOrNav($, tbl)) return; // ADD
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const k=cleanup($(cells[0]).text());
         const v=cleanup($(cells[1]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return; // ADD
+        const kk = k.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        if (kk && v && kk.length<80 && v.length<400) out[kk]=v;
       }
     });
   });
 
+  // Definition lists
   $('dl').each((_, dl)=>{
+    if (isFooterOrNav($, dl)) return; // ADD
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const k=cleanup($(dts[i]).text());
         const v=cleanup($(dds[i]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue; // ADD
+        const kk = k.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        if (kk && v && kk.length<80 && v.length<400) out[kk]=v;
       }
     }
   });
 
+  // LI pairs
   $('li').each((_, li)=>{
+    if (isFooterOrNav($, li)) return; // ADD
     const t = cleanup($(li).text());
-    if (!t || t.length < 3 || t.length > 250) return;
+    if (!t || t.length < 3 || t.length > 250 || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.split(/[:\-–]\s+/);
     if (m.length >= 2){
       const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
@@ -1762,7 +1781,7 @@ function extractDescriptionFromContainer($, container){
   const push = (t) => {
     t = cleanup(t);
     if (!t) return;
-    if (/^\s*(share|subscribe|privacy|terms)\b/i.test(t)) return;
+    if (/^\s*(share|subscribe|privacy|terms|trademark|copyright)\b/i.test(t)) return;
     parts.push(t);
   };
 
@@ -1925,6 +1944,19 @@ function firstGoodParagraph($){
   });
   return best;
 }
+
+// ADD: footer/nav detection + legal/menu text guard
+function isFooterOrNav($, el){
+  return $(el).closest(
+    'footer, #footer, .footer, .site-footer, .page-footer, .global-footer, #global-footer,' +
+    ' nav, .nav, .navbar, [role="navigation"], [role="contentinfo"],' +
+    ' [aria-label*="footer" i], [aria-label*="breadcrumb" i], .breadcrumbs,' +
+    ' .legal, .legalese, .bottom-bar, .cookie, .consent, .newsletter, .subscribe, .sitemap'
+  ).length > 0;
+}
+
+const LEGAL_MENU_RE = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|sign\s*in)\b/i;
+
 
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
