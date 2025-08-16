@@ -1912,7 +1912,8 @@ function resolveTabPane($, names){
   });
 
   if (!pane){
-    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
+    // Broaden to common tab panel containers (incl. Magento 2)
+    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items').each((_, el)=>{
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
       if (heading && nameRe.test(heading)) { pane = el; return false; }
     });
@@ -2052,6 +2053,7 @@ function resolveAllPanes($, names){
   const out = new Set();
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
 
+  // Tab triggers -> target panes
   $('a,button,[role="tab"]').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
@@ -2071,11 +2073,13 @@ function resolveAllPanes($, names){
     }
   });
 
-  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
+  // Heuristic: panels/sections with matching headings (incl. Magento 2 selectors)
+  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
 
+  // Class-name fallback
   const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
   $('[class]').each((_, el)=>{
     if (classRe.test($(el).attr('class') || '')) out.add(el);
@@ -2084,15 +2088,31 @@ function resolveAllPanes($, names){
   return Array.from(out);
 }
 
+// === TABS-ONLY ADD: parse lines like "WAVELENGTH RANGE 200-1000nm" (often inside spec tabs)
+function parseUpperSpecLine(t = "") {
+  const s = cleanup(t);
+  // Label in caps (with spaces, numbers, symbols) + at least one space + value
+  const m =
+    s.match(/^([A-Z][A-Z0-9\s/%°.\-]{2,60})\s{1,}(.{2,300})$/) ||
+    null;
+  if (!m) return null;
+
+  const key = canonicalizeSpecKey(m[1]);
+  const val = normalizeUnitsInText(m[2]);
+  if (!key || !val) return null;
+  return [key, val];
+}
+
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
-  // ADD: avoid footer/nav/reco contamination
+  // tabs-only guard against footer/nav/reco contamination
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
   const out = {};
   const $c = $(container);
 
+  // Tables
   $c.find('table').each((_, tbl)=>{
-    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
+    if (isPartsOrAccessoryTable($, tbl)) return; // skip parts/accessories tables inside tabs
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -2103,6 +2123,7 @@ function extractSpecsFromContainer($, container){
     });
   });
 
+  // Definition lists
   $c.find('dl').each((_, dl)=>{
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
@@ -2114,21 +2135,30 @@ function extractSpecsFromContainer($, container){
     }
   });
 
-  $c.find('li').each((_, li)=>{
-    const t = cleanup($(li).text());
-    if (!t || t.length < 3 || t.length > 250) return;
-    const m = t.split(/[:\-–]\s+/);
-    if (m.length >= 2){
-      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-      const v = m.slice(1).join(': ').trim();
+  // List / paragraph pairs like "Key: Value"
+  $c.find('li, p').each((_, el)=>{
+    const t = cleanup($(el).text());
+    if (!t || t.length < 3 || t.length > 300) return;
+
+    // Standard "Key: Value" or "Key - Value"
+    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
+    if (m){
+      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m[2];
       if (k && v && !out[k]) out[k]=v;
+      return;
     }
+
+    // NEW (tabs-only): ALL-CAPS label + value (Magento/industrial spec style)
+    const uv = parseUpperSpecLine(t);
+    if (uv && !out[uv[0]]) out[uv[0]] = uv[1];
   });
 
+  // Common 2-column "label/value" rows inside grids
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
     const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
+    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] ||= b;
   });
 
   return out;
@@ -2555,7 +2585,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   } catch (_) { /* non-fatal */ }
   // === end generic lazy fragments ===
 
-  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
+  const specPanes   = resolveAllPanes($, [
+    'specification','specifications','technical specifications','tech specs','details',
+    'size & weight','size and weight'
+  ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
   const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
   const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
