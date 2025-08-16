@@ -1145,13 +1145,13 @@ function extractJsonLdAllProductSpecs($){
   return merged;
 }
 
-/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware & parts-aware) ==== */
+/* ================== Global Spec Sweep (enhanced for tab/accordion patterns) ================== */
 function extractAllSpecPairs($){
   const out = {};
 
-  // Tables
+  // Tables (global)
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // guard reco + parts
     let hits = 0;
     const local = {};
     $(tbl).find('tr').each((__, tr)=>{
@@ -1159,7 +1159,7 @@ function extractAllSpecPairs($){
       if (cells.length >= 2) {
         const k = cleanup($(cells[0]).text());
         const v = cleanup($(cells[1]).text());
-        // ADD: ignore legal/menu rows
+        // ignore legal/menu rows
         if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return;
         if (k.length <= 80 && v.length <= 400) {
           local[canonicalizeSpecKey(k)] = v;
@@ -1170,204 +1170,91 @@ function extractAllSpecPairs($){
     if (hits >= 3) Object.assign(out, local);
   });
 
-  // Definition lists
+  // Definition lists (global)
   $('dl').each((_, dl)=>{
-    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return; // ADD reco guard
+    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return;
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length >= 3){
       for (let i=0;i<dts.length;i++){
         const k=cleanup($(dts[i]).text());
         const v=cleanup($(dds[i]).text());
-        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue; // ADD
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue;
         out[canonicalizeSpecKey(k)] = v;
       }
     }
   });
 
-  // Colon/hyphen pairs in main/product areas (keep scope, but still guard)
-  $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
-    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
-    const t = cleanup($(el).text());
-    if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
-    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
-    if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
-  });
+  // Colon/hyphen pairs in main/product areas (keep scope, guard reco/footer)
+  $('main, #main, .main, .content, #content, .product, .product-details, .product-detail')
+    .find('li,p').each((_, el)=>{
+      if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+      const t = cleanup($(el).text());
+      if (!t || LEGAL_MENU_RE.test(t)) return;
+      const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
+      if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
+    });
+
+  // ========= NEW: Stacked-adjacent KV fallback (global, conservative) =========
+  (function stackedAdjacentKVGlobal(){
+    // Only attempt if we still have very few pairs, to avoid noise
+    if (Object.keys(out).length >= 3) return;
+
+    // Include main/product + common tab/accordion containers
+    const scope = $([
+      'main, #main, .main, .content, #content, .product, .product-details, .product-detail',
+      '[role="tabpanel"], .tab-pane, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items'
+    ].join(', ')).first();
+    if (!scope.length) return;
+
+    const looksKey = (s) => {
+      const t = cleanup(s);
+      return t && t.length >= 2 && t.length <= 60 && !/[.:]/.test(t) && !/^\d+$/.test(t);
+    };
+    const looksVal = (s) => {
+      const t = cleanup(s);
+      return t && t.length >= 1 && t.length <= 300;
+    };
+
+    let added = 0;
+
+    // Pattern A: two-child rows → first child label, second child value
+    scope.find('li, .row, .grid, .spec, [class*="spec"]').each((_, node)=>{
+      if (isFooterOrNav($, node) || isRecoBlock($, node)) return;
+      const $n = $(node);
+      const kids = $n.children().toArray();
+      if (kids.length !== 2) return;
+      const k = cleanup($(kids[0]).text());
+      const v = cleanup($(kids[1]).text());
+      if (looksKey(k) && looksVal(v)){
+        const ck = canonicalizeSpecKey(k);
+        if (!out[ck]) { out[ck] = normalizeUnitsInText(v); added++; }
+      }
+    });
+
+    // Pattern B: label element + immediate sibling value or value-ish child
+    if (added < 6){
+      scope.find('strong,b,.label,.name,.title,th,dt').each((_, lab)=>{
+        if (isFooterOrNav($, lab) || isRecoBlock($, lab)) return;
+        const $lab = $(lab);
+        const k = cleanup($lab.text());
+        const $container = $lab.closest('li,div,dt,th,td');
+        const $valNode = $container.next();
+        const v = cleanup(
+          $container.find('.value,.val,.data,dd,td,span,p').first().text() ||
+          ($valNode && $valNode.length ? $valNode.text() : '')
+        );
+        if (looksKey(k) && looksVal(v)){
+          const ck = canonicalizeSpecKey(k);
+          if (!out[ck]) { out[ck] = normalizeUnitsInText(v); added++; }
+        }
+      });
+    }
+  })();
+  // ========= END stacked-adjacent KV fallback =========
 
   const norm = {};
   for (const [k,v] of Object.entries(out)) norm[k] = normalizeUnitsInText(v);
   return enrichSpecsWithDerived(norm);
-}
-
-/* === Images continued === */
-function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
-  const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
-  const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
-  const aggressive= !!(opts && opts.aggressive);
-
-  const set = new Set();
-  const imgWeights = new Map();
-
-  // NEW: track image context (main gallery vs. related/upsell) for scoring
-  const imgContext = new Map(); // url -> { inReco: bool, inMain: bool }
-  const markCtx = (absu, ctx) => {
-    const prev = imgContext.get(absu) || { inReco:false, inMain:false };
-    imgContext.set(absu, { inReco: prev.inReco || !!ctx.inReco, inMain: prev.inMain || !!ctx.inMain });
-  };
-
-  const push = (u, weight = 0, ctx = null) => {
-    if (!u) return;
-    const absu = abs(baseUrl, u);
-    if (!absu) return;
-    if (!imgWeights.has(absu)) imgWeights.set(absu, 0);
-    imgWeights.set(absu, Math.max(imgWeights.get(absu), weight));
-    if (ctx) markCtx(absu, ctx);
-    set.add(absu);
-  };
-
-  // structured data images — prefer strongly
-  (structured.images || []).forEach(u => push(u, 8, { inMain: true }));
-
-  // gallery containers (skip related/recommendation blocks entirely)
-  const gallerySelectors = [
-    '.product-media','.product__media','.product-gallery','.gallery','.media-gallery','#product-gallery','#gallery','[data-gallery]',
-    '.product-images','.product-image-gallery','.pdp-gallery','.slick-slider','.slick','.swiper','.swiper-container','.carousel',
-    '.owl-carousel','.fotorama','.MagicZoom','.cloudzoom-zoom','.zoomWindow','.zoomContainer','.lightbox','.thumbnails'
-  ].join(', ');
-  $(gallerySelectors).find('img, source').each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const $el = $(el);
-    const cands = [
-      $el.attr('src'), $el.attr('data-src'), $el.attr('data-srcset'),
-      $el.attr('data-original'), $el.attr('data-large_image'), $el.attr('data-image'),
-      $el.attr('data-zoom'), pickLargestFromSrcset($el.attr('srcset')),
-    ];
-    cands.forEach(u => push(u, 6, { inReco:false, inMain: isMainProductNode($, el) }));
-  });
-
-  if (og.image) push(og.image, 3, { inMain: true });
-
-  // page-wide images (skip recommendation areas)
-  $("img").each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const $el = $(el);
-    const cands = [
-      $el.attr("src"), $el.attr("data-src"), $el.attr("data-srcset"),
-      $el.attr("data-original"), $el.attr("data-lazy"), $el.attr("data-zoom-image"),
-      $el.attr("data-large_image"), $el.attr("data-image"),
-      pickLargestFromSrcset($el.attr("srcset")),
-    ];
-    cands.forEach(u => push(u, 2, { inReco:false, inMain: isMainProductNode($, el) }));
-  });
-
-  // noscript fallbacks
-  $("noscript").each((_, n)=>{
-    if (isRecoBlock($, n)) return;
-    const inner = $(n).html() || "";
-    const _$ = cheerio.load(inner);
-    _$("img").each((__, el)=>{
-      const src = _$(el).attr("src") || _$(el).attr("data-src") || pickLargestFromSrcset(_$(el).attr("srcset"));
-      if (src) push(src, 3, { inReco:false, inMain: isMainProductNode($, n) });
-    });
-  });
-
-  // picture/srcset
-  $("picture source[srcset]").each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    push(pickLargestFromSrcset($(el).attr("srcset")), 2, { inReco:false, inMain: isMainProductNode($, el) });
-  });
-
-  // backgrounds
-  $('[style*="background"]').each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const style = String($(el).attr("style") || "");
-    const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) push(m[2], 2, { inReco:false, inMain: isMainProductNode($, el) });
-  });
-
-  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1, { inMain: true }));
-
-  $('script').each((_, el) => {
-    const txt = String($(el).contents().text() || '');
-    if (!txt || !/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
-    try {
-      const obj = JSON.parse(txt);
-      deepFindImagesFromJson(obj).forEach(u => push(u, 2, { inMain: true }));
-    } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(m[1], 1, { inMain: true });
-    }
-  });
-
-  if (rawHtml) {
-    const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-    let m; while ((m = re.exec(rawHtml))) push(m[1], 0);
-  }
-
-  let arr = Array.from(set).filter(Boolean).map(u => decodeHtml(u));
-
-  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
-  const host = safeHostname(baseUrl);
-  const allowHostRe = new RegExp([
-    host.includes("drivemedical")        ? "/medias|/products|/pdp|/images/products|/product-images|/commerce/products|/uploads" : "",
-    host.includes("mckesson")            ? "/product|/images|/product-images|/assets/product" : "",
-    host.includes("compasshealthbrands") ? "/media/images/items|/product|/images" : "",
-    host.includes("motifmedical")        ? "/wp-content/uploads|/product|/images" : ""
-  ].filter(Boolean).join("|"), "i");
-
-  // EXPANDED placeholder filter
-  const badReBase = [
-    'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
-    'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
-    'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
-    '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/'
-  ];
-  if (!aggressive) badReBase.push('/search/','/category/','/collections/','/filters?');
-  const badRe = new RegExp(badReBase.join('|'), 'i');
-
-  arr = arr
-    .filter(u => allowWebExt.test(u))
-    .filter(u => !badRe.test(u))
-    .filter(u => !allowHostRe.source.length || allowHostRe.test(u) || aggressive)
-    .filter(u => {
-      const { w, h } = inferSizeFromUrl(u);
-      if (!w && !h) return true;
-      return Math.max(w || 0, h || 0) >= minPx;
-    });
-
-  const titleTokens   = (name || "").toLowerCase().split(/\s+/).filter(Boolean);
-  const codeCandidates= collectCodesFromUrl(baseUrl);
-  const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/uploads\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/|\/zoom\/|\/large\/|\/hi-res?\/|\/wp-content\/uploads\/)/i;
-
-  const scored = arr.map(u => {
-    const L = u.toLowerCase();
-    let score = imgWeights.get(u) || 0;
-    if (preferRe.test(L)) score += 3;
-    if (allowHostRe.source.length && allowHostRe.test(L)) score += 2;
-    if (codeCandidates.some(c => c && L.includes(c))) score += 3;
-    if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
-    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3; // stronger downweight incl. swatch
-    if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
-
-    // Context-aware penalties/bonuses
-    const ctx = imgContext.get(u) || {};
-    if (ctx.inReco) score -= 5;
-    if (ctx.inMain) score += 3;
-
-    return { url: u, score };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-
-  const seen = new Set();
-  const out  = [];
-  for (const s of scored) {
-    const base = s.url.split("/").pop().split("?")[0];
-    if (seen.has(base)) continue;
-    seen.add(base);
-    out.push({ url: s.url });
-    if (out.length >= 12) break;
-  }
-  return out;
 }
 
 /* ================== ADD-ONLY: Enhanced image harvester (CDN + main scope) ================== */
@@ -2080,30 +1967,33 @@ function resolveAllPanes($, names){
 
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
-  // ADD: avoid footer/nav/reco contamination
+  // Avoid footer/nav/reco contamination
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
   const out = {};
   const $c = $(container);
+  const kfmt = (s) => String(s || "").toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
 
+  // Tables
   $c.find('table').each((_, tbl)=>{
-    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
+    if (isPartsOrAccessoryTable($, tbl)) return;
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const k=cleanup($(cells[0]).text());
         const v=cleanup($(cells[1]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+        if (k && v && k.length<80 && v.length<400) out[kfmt(k)]=v;
       }
     });
   });
 
+  // Definition lists
   $c.find('dl').each((_, dl)=>{
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const k=cleanup($(dts[i]).text());
         const v=cleanup($(dds[i]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+        if (k && v && k.length<80 && v.length<400) out[kfmt(k)]=v;
       }
     }
   });
@@ -2116,22 +2006,86 @@ function extractSpecsFromContainer($, container){
     // classic "k: v" / "k - v"
     const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
     if (m){
-      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const k = kfmt(m[1]);
       const v = m[2];
       if (k && v && !out[k]) out[k]=v;
       return;
     }
 
-    // NEW: ALL-CAPS label followed by value (e.g., "WAVELENGTH RANGE 200-1000nm")
+    // ALL-CAPS label followed by value (e.g., "WAVELENGTH RANGE 200-1000nm")
     const uv = parseUpperSpecLine(t);
     if (uv && !out[uv[0]]) out[uv[0]] = uv[1];
   });
 
+  // Grid/card-ish rows: <div class="row spec"><div class="label">Key</div><div class="value">Val</div></div>
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
     const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
+    if (a && b) out[kfmt(a)] = b;
   });
+
+  // ===== NEW: Stacked-adjacent KV fallback (conservative; runs only if few pairs found) =====
+  (function stackedAdjacentKV(){
+    const looksKey = (s) => {
+      const t = cleanup(s);
+      return t && t.length >= 2 && t.length <= 60 && !/[.:]/.test(t) && !/^\d+$/.test(t);
+    };
+    const looksVal = (s) => {
+      const t = cleanup(s);
+      return t && t.length >= 1 && t.length <= 300;
+    };
+
+    let found = Object.keys(out).length;
+    if (found >= 3) return; // only as a last resort to avoid noise
+
+    // Candidate nodes: shallow children + list items (common in tab panes)
+    const candidates = $c.children().toArray().concat($c.find('li').toArray());
+    for (const node of candidates){
+      const $n = $(node);
+
+      // Pattern A: label-ish element in this node, value in a sibling/value-ish child
+      const kA = cleanup(
+        $n.find('strong,b,.label,.name,.title,th,dt').first().text() ||
+        ($n.contents().length ? String($n.contents().first().text || $n.contents().first()).trim() : '')
+      );
+      const $next = $n.next();
+      const vA = cleanup(
+        $n.find('.value,.val,.data,dd,td,span,p').first().text() ||
+        ($next && $next.length ? $next.text() : '')
+      );
+      if (looksKey(kA) && looksVal(vA)){
+        const kk = kfmt(kA);
+        if (!out[kk]) { out[kk] = normalizeUnitsInText ? normalizeUnitsInText(vA) : vA; found++; }
+        if (found >= 12) break;
+      }
+
+      // Pattern B: <li><strong>Key</strong>Value text node/span follows</li>
+      const kB = cleanup($n.find('strong,b,.label,.name,.title,th,dt').first().text());
+      if (kB){
+        const clone = $n.clone();
+        clone.find('strong,b,.label,.name,.title,th,dt').first().remove();
+        const vB = cleanup(clone.text());
+        if (looksKey(kB) && looksVal(vB)){
+          const kk2 = kfmt(kB);
+          if (!out[kk2]) { out[kk2] = normalizeUnitsInText ? normalizeUnitsInText(vB) : vB; found++; }
+          if (found >= 12) break;
+        }
+      }
+
+      // Pattern C: exactly two child blocks → first is key, second is value
+      const kids = $n.children().toArray();
+      if (kids.length === 2){
+        const kC = cleanup($(kids[0]).text());
+        const vC = cleanup($(kids[1]).text());
+        if (looksKey(kC) && looksVal(vC)){
+          const kk3 = kfmt(kC);
+          if (!out[kk3]) { out[kk3] = normalizeUnitsInText ? normalizeUnitsInText(vC) : vC; found++; }
+          if (found >= 12) break;
+        }
+      }
+    }
+  })();
+  // ===== END stacked-adjacent KV fallback =====
 
   return out;
 }
