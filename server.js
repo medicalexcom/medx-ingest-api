@@ -444,7 +444,7 @@ function extractNormalized(baseUrl, html, opts) {
 
   /* ==== MEDX ADD-ONLY: merge JSON-LD specs from all Product nodes v1 ==== */
   try {
-    const jsonldAll = extractJsonLdAllProductSpecs($);
+    const jsonldAll = extractJsonLdAllProductSpecs($); // (ADD: now internally constrained to same page)
     if (jsonldAll && Object.keys(jsonldAll).length) {
       specs = mergeSpecsAdditive(specs, jsonldAll);
     }
@@ -458,17 +458,12 @@ function extractNormalized(baseUrl, html, opts) {
     }
   } catch {}
 
+  // ==== ADD: prune parts/accessories noise from specs (add-only) ====
+  try { specs = prunePartsLikeSpecs(specs); } catch {}
+
   let features = (mergedSD.features && mergedSD.features.length) ? mergedSD.features : extractFeaturesSmart($);
 
-  let imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
-
-  /* ==== MEDX ADD-ONLY: Robust image augmentation v1 (ADD-ONLY, non-breaking) ==== */
-  try {
-    imgs = augmentImagesRobust(imgs, $, baseUrl, og, { ...opts, name, html });
-  } catch (e) {
-    if (opts && opts.diag) opts.diag.warnings.push(`images-augment: ${e.message || e}`);
-  }
-
+  const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
   const mans = manuals.length ? manuals : fallbackManualsFromPaths($, baseUrl, name, html);
 
   if (!features.length) features = deriveFeaturesFromParagraphs($);
@@ -486,7 +481,6 @@ function extractNormalized(baseUrl, html, opts) {
     brand
   };
 }
-
 /* ================== Structured Data Extractors ================== */
 function schemaPropsToSpecs(props){
   const out = {};
@@ -715,7 +709,6 @@ function inferSizeFromUrl(u) {
     return out;
   } catch { return { w: 0, h: 0 }; }
 }
-
 /* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
 /* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
 
@@ -986,7 +979,7 @@ function extractSpecsFromScripts($, container /* optional */) {
   return enrichSpecsWithDerived(canon);
 }
 
-/* ==== MEDX ADD-ONLY: JSON-LD extras from all Product nodes v1 ==== */
+/* ==== MEDX ADD-ONLY: JSON-LD extras from all Product nodes v1 (ADD: now filtered to page) ==== */
 function extractJsonLdAllProductSpecs($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -1000,9 +993,38 @@ function extractJsonLdAllProductSpecs($){
       });
     } catch {}
   });
+
+  // ADD: detect page canonical URL to constrain merges
+  const pageUrl =
+    $('link[rel="canonical"]').attr('href') ||
+    $('meta[property="og:url"]').attr('content') ||
+    "";
+
+  let pageHost = "";
+  let pagePath = "";
+  try {
+    const u = new URL(pageUrl);
+    pageHost = (u.hostname || "").toLowerCase();
+    pagePath = u.pathname || "";
+  } catch {}
+
   const prods = nodes.filter(n => String(n && n['@type'] || '').toLowerCase().includes('product'));
+
+  // ADD: narrow to products that belong to the same page/host if possible
+  const filtered = prods.filter(p => {
+    const url = String(p.url || p['@id'] || "");
+    if (!url) return !!pageHost ? false : true;
+    try {
+      const u = new URL(url, pageUrl || "https://example.com/");
+      if (pageHost && u.hostname.toLowerCase() !== pageHost) return false;
+      if (pagePath && u.pathname && u.pathname !== pagePath) return false;
+      return true;
+    } catch { return false; }
+  });
+
+  const chosen = filtered.length ? filtered : (prods.length ? [prods[0]] : []);
   const merged = {};
-  for (const p of prods) {
+  for (const p of chosen) {
     const specs = schemaPropsToSpecs(
       p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
     );
@@ -1011,13 +1033,13 @@ function extractJsonLdAllProductSpecs($){
   return merged;
 }
 
-/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware) ==== */
+/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware & parts-aware) ==== */
 function extractAllSpecPairs($){
   const out = {};
 
   // Tables
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl)) return; // ADD reco guard
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
     let hits = 0;
     const local = {};
     $(tbl).find('tr').each((__, tr)=>{
@@ -1377,7 +1399,7 @@ function extractSpecsSmart($){
   
   // Tables (global fallback)
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl)) return; // ADD reco guard
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -1409,7 +1431,7 @@ function extractSpecsSmart($){
   $('li').each((_, li)=>{
     if (isFooterOrNav($, li) || isRecoBlock($, li)) return; // ADD reco guard
     const t = cleanup($(li).text());
-    if (!t || t.length < 3 || t.length > 250) return;
+    if (!t || t.length < 3 || t.length > 250 || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.split(/[:\-–]\s+/);
     if (m.length >= 2){
       const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
@@ -1437,7 +1459,7 @@ function extractSpecsFromDensestBlock($){
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k = cleanup($(cells[0]).text());
-        const v = cleanup($(cells[1]).text()));
+        const v = cleanup($(cells[1]).text());
         if (k && v && /:|back|warranty|weight|capacity|handles|depth|height/i.test(k)) score++;
       }
     });
@@ -1720,7 +1742,7 @@ function resolveAllPanes($, names){
   return Array.from(out);
 }
 
-/* ================== Tab harvest orchestrator ================== */
+/* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
   // ADD: avoid footer/nav/reco contamination
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
@@ -1728,6 +1750,7 @@ function extractSpecsFromContainer($, container){
   const $c = $(container);
 
   $c.find('table').each((_, tbl)=>{
+    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -1999,178 +2022,202 @@ function isFooterOrNav($, el){
 
 // ADD: recommendation/reco block detector (prevents spec leakage from “related/also viewed/etc.”)
 function isRecoBlock($, el){
-  return $(el).closest(
+  if ($(el).closest(
     '.related, .related-products, #related-products, ' +
     '.upsell, .cross-sell, .crosssell, .you-may-also-like, ' +
     '.recommended, .recommendations, .product-recommendations, .product-recs, [data-recommendations], ' +
     '.frequently-bought, .frequently-bought-together, .fbt, ' +
     '.also-viewed, .people-also-viewed, .also-bought, .customers-also-bought, ' +
     '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
-  ).length > 0;
+  ).length > 0) return true;
+
+  // ADD: extra coverage for sites using singular `.recommendation`, "co-viewed", and explicit data flags
+  if ($(el).closest('.recommendation, .co-viewed, [data-br-request-type="recommendation"]').length > 0) return true;
+
+  return false;
 }
 
 const LEGAL_MENU_RE = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|sign\s*in)\b/i;
 
-/* ================== EXTRA: robust image augmentation (ADD-ONLY) ================== */
-// Accepts the already-computed image list and only *adds* more (never removes),
-// with relaxed fallbacks when nothing good is found.
-function augmentImagesRobust(current = [], $, baseUrl, og, ctx = {}) {
-  const name = String(ctx.name || "");
-  const minPx = Number.isFinite(ctx.minImgPx) ? ctx.minImgPx : MIN_IMG_PX_ENV;
-  const excludePng = typeof ctx.excludePng === "boolean" ? ctx.excludePng : EXCLUDE_PNG_ENV;
+/* ===== ADD: Parts/accessory table detection & pruning (add-only) ===== */
+const PARTS_HEADER_RE = /\b(no\.?|part(?:\s*no\.?)?|item(?:\s*description)?|qty(?:\s*req\.)?|quantity|price)\b/i;
 
-  const have = new Set((current || []).map(o => (o && o.url) ? o.url : "").filter(Boolean));
-  const cand = new Set();
-
-  const push = (u) => { if (!u) return; const absu = decodeHtml(abs(baseUrl, u)); if (absu && !have.has(absu)) cand.add(absu); };
-
-  // 1) Twitter Card images + secure OG variants
-  $('meta[name="twitter:image"], meta[property="twitter:image"], meta[property="twitter:image:src"]').each((_, el)=>{
-    push($(el).attr('content'));
-  });
-  $('meta[property="og:image:url"], meta[name="og:image"]').each((_, el)=>{
-    push($(el).attr('content'));
-  });
-
-  // 2) <link rel="preload" as="image"> and imagesrcset
-  $('link[rel="preload"][as="image"]').each((_, el)=>{
-    const href = $(el).attr('href');
-    const srcset = $(el).attr('imagesrcset') || $(el).attr('imageSrcSet');
-    if (srcset) push(pickLargestFromSrcset(srcset));
-    if (href) push(href);
-  });
-
-  // 3) AMP images
-  $('amp-img').each((_, el)=>{
-    const $el = $(el);
-    push($el.attr('src'));
-    const ss = $el.attr('srcset');
-    if (ss) push(pickLargestFromSrcset(ss));
-  });
-
-  // 4) picture sources with data-srcset (lazy loaders)
-  $('picture source[data-srcset]').each((_, el)=>{
-    push(pickLargestFromSrcset($(el).attr('data-srcset')));
-  });
-
-  // 5) lazy background attributes often used by theme frameworks
-  $('[data-bg],[data-background],[data-bgset],[data-background-image],[data-bg-src],[data-flickity-lazyload]').each((_, el)=>{
-    const $el = $(el);
-    ['data-bg','data-background','data-bgset','data-background-image','data-bg-src','data-flickity-lazyload']
-      .forEach(a=>{
-        const v = $el.attr(a);
-        if (!v) return;
-        if (a.endsWith('set')) push(pickLargestFromSrcset(v));
-        else push(v);
-      });
-  });
-
-  // 6) JSON-LD: collect images from *all* Product nodes (additive to earlier)
+function isPartsOrAccessoryTable($, tbl){
   try {
-    extractAllProductImagesFromJsonLd($).forEach(u => push(u));
-  } catch {}
+    // header scan
+    const header = $(tbl).find('tr').first().find('th,td')
+      .map((_,c)=>cleanup($(c).text())).get().join(' | ');
+    if (PARTS_HEADER_RE.test(header)) return true;
 
-  // 7) If OG has explicit width/height, keep it even if smaller than min
-  const ogW = parseInt($('meta[property="og:image:width"]').attr('content') || "0", 10);
-  const ogH = parseInt($('meta[property="og:image:height"]').attr('content') || "0", 10);
-  if (og && og.image) push(og.image);
-  const titleTokens = name.toLowerCase().split(/\s+/).filter(Boolean);
-  const codes = collectCodesFromUrl(baseUrl);
-
-  // Filter + rank (loosely mirrors existing logic but allows extension-less CDNs)
-  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
-  const knownCdnRe = /(cloudinary\.com\/image\/upload|imgix\.net\/|cdn\.shopify\.com\/s\/files|wp\.com\/|images\.ctfassets\.net\/|akamaihd\.net\/|scene7\.com\/is\/image\/|i\d\.wp\.com\/|cdn\.shopify\.com\/|bigcommerce\.com\/|assets\.(?:adobedtm|adobe)\.com\/)/i;
-  const badRe = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
-
-  const candArr0 = Array.from(cand);
-
-  const filtered1 = candArr0.filter(u => {
-    if (badRe.test(u)) return false;
-    if (allowWebExt.test(u)) return true;
-    // Allow extension-less if from a known image CDN or has format hints
-    const q = (u.split('?')[1] || '').toLowerCase();
-    const formatHint = /\b(format|fm|f|image|img|quality|q|auto)=/.test(q);
-    return knownCdnRe.test(u) || formatHint;
-  });
-
-  const scored = filtered1.map(u => {
-    const L = u.toLowerCase();
-    const s1 = (codes.some(c=>c && L.includes(c)) ? 3 : 0);
-    const s2 = (titleTokens.some(t=>t.length>2 && L.includes(t)) ? 1 : 0);
-    const s3 = /(\/product|\/products|\/images|\/uploads|\/zoom|\/hi-res|\/large|\/wp-content\/uploads\/)/.test(L) ? 2 : 0;
-    const dim = inferSizeFromUrl(u);
-    const s4 = Math.max(dim.w||0, dim.h||0) >= minPx ? 1 : 0;
-    const s5 = allowWebExt.test(u) ? 1 : 0;
-    return { url: u, score: s1 + s2 + s3 + s4 + s5 };
-  }).sort((a,b)=>b.score - a.score);
-
-  // Merge with existing images (dedupe by basename)
-  const seenBase = new Set((current||[]).map(o => (o.url||'').split('/').pop().split('?')[0]));
-  const out = [...(current || [])];
-  for (const s of scored) {
-    const base = s.url.split('/').pop().split('?')[0];
-    if (seenBase.has(base)) continue;
-    out.push({ url: s.url });
-    seenBase.add(base);
-    if (out.length >= 12) break;
-  }
-
-  // Last-ditch relax mode: if still nothing, allow PNG + smaller sizes + any CDN hints.
-  if (!out.length) {
-    const relax = candArr0.filter(u => {
-      if (badRe.test(u)) return false;
-      const dim = inferSizeFromUrl(u);
-      const maxpx = Math.max(dim.w||0, dim.h||0);
-      const okExt = /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(u) || knownCdnRe.test(u);
-      return okExt && (maxpx >= Math.max(100, Math.floor(minPx/2)) || (u === og?.image && (ogW||ogH)));
+    // row heuristics
+    let numericFirstCol = 0, itemLinks = 0, rows = 0;
+    $(tbl).find('tr').each((_, tr)=>{
+      const cells = $(tr).find('td,th');
+      if (cells.length < 2) return;
+      rows++;
+      const first = cleanup($(cells[0]).text());
+      if (/^\d+$/.test(first)) numericFirstCol++;
+      if ($(cells[1]).find('a[href*="/item/"], a[href*="/product/"]').length) itemLinks++;
     });
-    const uniq = [];
-    const sb = new Set();
-    for (const u of relax) {
-      const b = u.split('/').pop().split('?')[0];
-      if (sb.has(b)) continue;
-      sb.add(b);
-      uniq.push({ url: u });
-      if (uniq.length >= 6) break;
-    }
-    return uniq;
-  }
-
-  return out.slice(0, 12);
+    return (rows >= 3 && numericFirstCol >= 2 && itemLinks >= 2);
+  } catch { return false; }
 }
 
-// Collect images from *all* Product JSON-LD nodes (additive to main extractor)
-function extractAllProductImagesFromJsonLd($){
-  const out = [];
-  $('script[type="application/ld+json"]').each((_, el)=>{
+function prunePartsLikeSpecs(specs = {}){
+  const out = {};
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?)$/i;
+
+  for (const [k, v] of Object.entries(specs || {})) {
+    const key = String(k || "").trim();
+    const val = String(v || "").trim();
+    // drop empty
+    if (!key || !val) continue;
+    // drop numeric index keys (1, 2, 3…)
+    if (/^\d+$/.test(key)) continue;
+    // drop classic parts table headers masquerading as specs
+    if (BAD_KEYS.test(key)) continue;
+    out[key] = val;
+  }
+  return out;
+}
+
+/* ================== Tab harvest orchestrator ================== */
+async function augmentFromTabs(norm, baseUrl, html, opts){
+  const $ = cheerio.load(html);
+
+  // === Dojo/dijit TabContainer pre-pass ===
+  try {
+    const dojoTabs0 = parseDojoTabs($, baseUrl);
+    if (dojoTabs0.length) {
+      const headers = { "User-Agent": "MedicalExIngest/1.7" };
+      if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
+      const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
+
+      const specNames = ['specification','specifications','technical specifications','tech specs','details'];
+      const featNames = ['features','features/benefits','benefits','key features','highlights'];
+      const downNames = ['downloads','documents','technical resources','resources'];
+      const descNames = ['overview','description','product details','details'];
+
+      const addSpecs   = {};
+      const addManuals = new Set();
+      const addFeatures= [];
+      let addDesc = "";
+
+      for (const t of dojoTabs) {
+        if (!t.html && !t.text) continue;
+        const $p = cheerio.load(t.html || "");
+        const title = String(t.title || '').toLowerCase();
+
+        if (specNames.some(n => title.includes(n))) {
+          Object.assign(addSpecs, extractSpecsFromContainer($p, $p.root()));
+          /* ==== MEDX ADD-ONLY: specs-from-scripts in Dojo tab v1 ==== */
+          try {
+            const jsonExtras = extractSpecsFromScripts($p, $p.root());
+            Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
+          } catch {}
+        }
+        if (featNames.some(n => title.includes(n))) {
+          addFeatures.push(...extractFeaturesFromContainer($p, $p.root()));
+        }
+        if (downNames.some(n => title.includes(n))) {
+          collectManualsFromContainer($p, $p.root(), baseUrl, addManuals);
+          ($p('a[href$=".pdf"], a[href*=".pdf"]') || []).each((_, el)=>{
+            const href = String($p(el).attr("href")||"");
+            if (href) addManuals.add(abs(baseUrl, href));
+          });
+        }
+        if (descNames.some(n => title.includes(n))) {
+          const d = extractDescriptionFromContainer($p, $p.root());
+          if (d && d.length > (addDesc || "").length) addDesc = d;
+        }
+      }
+
+      if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
+      if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
+
+      if (addFeatures.length) {
+        const seen = new Set((norm.features_raw || []).map(v=>String(v).toLowerCase()));
+        for (const f of addFeatures) {
+          const k = String(f).toLowerCase();
+          if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
+          if (norm.features_raw.length >= 20) break;
+        }
+      }
+
+      if (addManuals.size) {
+        const have = new Set((norm.manuals || []));
+        for (const u of addManuals) {
+          if (!have.has(u)) { (norm.manuals ||= []).push(u); have.add(u); }
+        }
+      }
+    }
+  } catch(e) {
+    // non-fatal
+  }
+  // === end Dojo/dijit pre-pass ===
+
+  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
+  const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
+  const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
+  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
+
+  const addSpecs = {};
+  for (const el of specPanes) {
+    Object.assign(addSpecs, extractSpecsFromContainer($, el));
+    /* ==== MEDX ADD-ONLY: specs-from-scripts inside spec panes v1 ==== */
     try {
-      const raw = $(el).contents().text();
-      if (!raw || !raw.trim()) return;
-      const parsed = JSON.parse(raw.trim());
-      const nodes = Array.isArray(parsed) ? parsed : [parsed];
-      nodes.forEach(obj=>{
-        const list = (obj && obj['@graph'] && Array.isArray(obj['@graph'])) ? obj['@graph'] : nodes;
-        list.forEach(n=>{
-          const t = String(n && n['@type'] || '').toLowerCase();
-          if (!t.includes('product')) return;
-          const img = n && n.image;
-          if (!img) return;
-          if (Array.isArray(img)) {
-            img.forEach(v => {
-              if (typeof v === 'string') out.push(v);
-              else if (v && (v.url || v.contentUrl || v['@id'])) out.push(v.url || v.contentUrl || v['@id']);
-            });
-          } else if (typeof img === 'string') {
-            out.push(img);
-          } else if (typeof img === 'object') {
-            const v = img.url || img.contentUrl || img['@id'];
-            if (v) out.push(v);
-          }
-        });
-      });
+      const jsonExtras = extractSpecsFromScripts($, el);
+      Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
     } catch {}
-  });
-  return out.filter(Boolean);
+  }
+
+  const addManuals = new Set();
+  for (const el of manualPanes) collectManualsFromContainer($, el, baseUrl, addManuals);
+
+  const addFeatures = [];
+  for (const el of featurePanes) addFeatures.push(...extractFeaturesFromContainer($, el));
+
+  let addDesc = "";
+  for (const el of descPanes) {
+    const d = extractDescriptionFromContainer($, el);
+    if (d && d.length > addDesc.length) addDesc = d;
+  }
+
+  if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
+  if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
+
+  if (addFeatures.length) {
+    const seen = new Set((norm.features_raw || []).map(v=>String(v).toLowerCase()));
+    for (const f of addFeatures) {
+      const k = String(f).toLowerCase();
+      if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
+      if (norm.features_raw.length >= 20) break;
+    }
+  }
+
+  const paneImgs = new Set();
+  const allPanes = [...specPanes, ...manualPanes, ...featurePanes, ...descPanes];
+  for (const el of allPanes) {
+    $(el).find('img, source').each((_, n)=>{
+      const src = $(n).attr('src') || $(n).attr('data-src') || pickLargestFromSrcset($(n).attr('srcset')) || "";
+      if (src) paneImgs.add(abs(baseUrl, src));
+    });
+  }
+  if (paneImgs.size) {
+    const filtered = filterAndRankExtraPaneImages(Array.from(paneImgs), baseUrl, opts);
+    if (filtered.length) {
+      const haveBase = new Set((norm.images || []).map(o => (o.url||'').split('/').pop().split('?')[0]));
+      for (const u of filtered) {
+        const b = u.split('/').pop().split('?')[0];
+        if (!haveBase.has(b)) {
+          (norm.images ||= []).push({ url: u });
+          haveBase.add(b);
+        }
+        if (norm.images.length >= 12) break;
+      }
+    }
+  }
+  return norm;
 }
 
 /* ================== Optional post-processor (gated by &sanitize=true) ================== */
@@ -2333,7 +2380,7 @@ function harvestCompassSpecs($){
       const cells = $(tr).find('th,td');
       if (cells.length >= 2){
         const k = cleanup($(cells[0]).text()).replace(/:$/, '');
-        const v = cleanup($(cells[1]).text()));
+        const v = cleanup($(cells[1]).text());
         if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
       }
     });
