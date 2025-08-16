@@ -1707,7 +1707,7 @@ function extractSpecsSmart($){
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k=cleanup($(cells[0]).text());
-        const v=cleanup($(cells[1]).text()));
+        const v=cleanup($(cells[1]).text());
         if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return; // ADD
         const kk = k.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         if (kk && v && kk.length<80 && v.length<400) out[kk]=v;
