@@ -2497,6 +2497,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     // non-fatal
   }
   // === end Dojo/dijit pre-pass ===
+
     // === ADD-ONLY: generic lazy tab fragments (Bootstrap/React/etc.) ===
   try {
     const lazyUrls = discoverLazyTabUrls($, baseUrl);
@@ -2553,7 +2554,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     }
   } catch (_) { /* non-fatal */ }
   // === end generic lazy fragments ===
-  
+
   const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
   const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
