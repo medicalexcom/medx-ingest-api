@@ -1996,6 +1996,45 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   return out;
 }
 
+/* ================== ADD-ONLY: generic lazy tab fetcher ================== */
+function discoverLazyTabUrls($, baseUrl) {
+  const urls = new Set();
+
+  // Look at probable tab triggers
+  $('a[role="tab"], button[role="tab"], .tabs a, .tab a, [data-tab], [data-target], [data-remote], [data-url], [data-href]')
+    .each((_, el) => {
+      const $el = $(el);
+      const cand = $el.attr('data-url') || $el.attr('data-href') || $el.attr('data-remote') ||
+                   $el.attr('href') || $el.attr('data-load') || '';
+      if (!cand) return;
+
+      const u = cand.trim();
+      if (!u || u === '#' || u.startsWith('javascript:')) return;
+
+      // absolute or site-relative URL → treat as remote fragment
+      if (/^https?:\/\//i.test(u) || u.startsWith('/') || /\.html?(\?|#|$)/i.test(u)) {
+        urls.add(abs(baseUrl, u));
+      }
+    });
+
+  return Array.from(urls);
+}
+
+async function hydrateLazyFragments(urls, renderApiUrl, headers = {}) {
+  const out = [];
+  if (!urls || !urls.length || !renderApiUrl) return out;
+
+  const base = renderApiUrl.replace(/\/+$/,'');
+  for (const u of urls) {
+    try {
+      const endpoint = `${base}/render?url=${encodeURIComponent(u)}&mode=fast`;
+      const { html } = await fetchWithRetry(endpoint, { headers });
+      out.push({ url: u, html });
+    } catch (_) { /* non-fatal */ }
+  }
+  return out;
+}
+
 function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Features','Downloads']) {
   const rank = t => {
     const i = order.findIndex(x => x && t && x.toLowerCase() === t.toLowerCase());
@@ -2458,7 +2497,63 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     // non-fatal
   }
   // === end Dojo/dijit pre-pass ===
+    // === ADD-ONLY: generic lazy tab fragments (Bootstrap/React/etc.) ===
+  try {
+    const lazyUrls = discoverLazyTabUrls($, baseUrl);
+    if (lazyUrls.length) {
+      const headers = { "User-Agent": "MedicalExIngest/1.7" };
+      if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
+      const frags = await hydrateLazyFragments(lazyUrls, RENDER_API_URL, headers);
 
+      const addSpecs   = {};
+      const addManuals = new Set();
+      const addFeatures= [];
+      let addDesc = "";
+
+      for (const frag of frags) {
+        const $p = cheerio.load(frag.html || "");
+        // Specs
+        Object.assign(addSpecs, extractSpecsFromContainer($p, $p.root()));
+        try {
+          // also harvest script-embedded specs from fragment
+          const jsonExtras = extractSpecsFromScripts($p, $p.root());
+          Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
+        } catch {}
+        // Features
+        addFeatures.push(...extractFeaturesFromContainer($p, $p.root()));
+        // Manuals
+        collectManualsFromContainer($p, $p.root(), baseUrl, addManuals);
+        ($p('a[href$=".pdf"], a[href*=".pdf"]') || []).each((_, el)=> {
+          const href = String($p(el).attr("href")||"");
+          if (href) addManuals.add(abs(baseUrl, href));
+        });
+        // Description (prefer the longest)
+        const d = extractDescriptionFromContainer($p, $p.root());
+        if (d && d.length > (addDesc || "").length) addDesc = d;
+      }
+
+      if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
+      if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
+
+      if (addFeatures.length) {
+        const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+        for (const f of addFeatures) {
+          const k = String(f).toLowerCase();
+          if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
+          if (norm.features_raw.length >= 20) break;
+        }
+      }
+
+      if (addManuals.size) {
+        const have = new Set((norm.manuals || []));
+        for (const u of addManuals) {
+          if (!have.has(u)) { (norm.manuals ||= []).push(u); have.add(u); }
+        }
+      }
+    }
+  } catch (_) { /* non-fatal */ }
+  // === end generic lazy fragments ===
+  
   const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
   const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
