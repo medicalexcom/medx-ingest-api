@@ -107,93 +107,6 @@ function abs(base, link){
   } catch(e){ return link; }
 }
 
-/* ================== ADD-ONLY helpers for image/CDN/manual capture ================== */
-function getRegistrableDomain(host) {
-  try {
-    const parts = String(host||"").toLowerCase().split(".").filter(Boolean);
-    if (parts.length <= 2) return parts.join(".");
-    const twoPartTLD = new Set(["co.uk","org.uk","gov.uk","ac.uk","com.au","net.au","co.jp"]);
-    const last2 = parts.slice(-2).join(".");
-    const last3 = parts.slice(-3).join(".");
-    return twoPartTLD.has(last2) ? last3 : last2;
-  } catch { return String(host||"").toLowerCase(); }
-}
-
-function isSameSiteOrCdn(baseUrl, otherUrl) {
-  try {
-    const a = new URL(baseUrl);
-    const b = new URL(otherUrl);
-    const aReg = getRegistrableDomain(a.hostname);
-    const bReg = getRegistrableDomain(b.hostname);
-    if (a.hostname === b.hostname) return true;
-    if (aReg && bReg && aReg === bReg) return true;
-    if (/(cdn|cloudfront|akamai|akamaized|azureedge|fastly|shopifycdn|bigcommerce|mzstatic|cdn.shopify)/i.test(b.hostname)) return true;
-    return false;
-  } catch { return false; }
-}
-
-function isMainProductNode($, el) {
-  const $el = $(el);
-  if (!$el || !$el.length) return false;
-  if ($el.closest('[itemscope][itemtype*="Product" i]').length) return true;
-  if ($el.closest('.product, .product-page, .product-detail, .product-details, #product, [id*="product" i]').length) return true;
-  if ($el.closest('.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery]').length) return true;
-  return $el.closest('main,#main,.main,#content,.content,article').length > 0;
-}
-
-function findMainProductScope($) {
-  const scopes = [
-    '[itemscope][itemtype*="Product" i]',
-    '.product, .product-detail, .product-details, #product',
-    '.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery]',
-    'main, #main, .main, #content, .content, article'
-  ];
-  for (const sel of scopes) {
-    const $hit = $(sel).first();
-    if ($hit && $hit.length) return $hit;
-  }
-  return $.root();
-}
-
-function scoreByContext($, node, { mainOnly=false } = {}) {
-  if (isRecoBlock($, node) || isFooterOrNav($, node)) return -999;
-  const inMain = isMainProductNode($, node);
-  if (mainOnly) return inMain ? 2 : -999;
-  return inMain ? 2 : 0;
-}
-
-function keyForImageDedup(url) {
-  const u = String(url||"");
-  const base = u.split("/").pop().split("?")[0];
-  const size = (u.match(/(\d{2,5})x(\d{2,5})/) || []).slice(1).join("x");
-  return size ? `${base}#${size}` : base;
-}
-
-function dedupeImageObjs(cands, limit = 12) {
-  const seen = new Set();
-  const out = [];
-  for (const c of cands) {
-    const k = keyForImageDedup(c.url);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push({ url: c.url });
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-function dedupeManualUrls(urls) {
-  const seen = new Set();
-  const out = [];
-  for (const u of urls) {
-    const k = u.replace(/#.*$/,'').trim();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(k);
-  }
-  return out;
-}
-
 /* ================== HTML cache (TTL + naive LRU) ================== */
 const htmlCache = new Map(); // key -> { html, expires, last }
 
@@ -278,7 +191,6 @@ async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEO
  * &harvest=true&sanitize=true
  * &markdown=true
  * &debug=true
- * &mainonly=true   <-- ADD-ONLY flag to restrict to main product scope
  */
 app.get("/ingest", async (req, res) => {
   const started = now();
@@ -314,7 +226,6 @@ app.get("/ingest", async (req, res) => {
     const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
     const doHarvest  = String(req.query.harvest   || "false").toLowerCase() === "true";
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
-    const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
 
@@ -333,11 +244,14 @@ app.get("/ingest", async (req, res) => {
         rendered = r.html;
       } catch (e) {
         const status = e && e.status ? Number(e.status) : 0;
+        // Soft fallback only for transient upstream errors
         if (status === 502 || status === 503 || status === 504) {
           diag.warnings.push(`render-upstream-${status}; falling back to direct fetch`);
           try {
+            // Direct fetch of the target URL (no JS). Still better than failing the request.
             rendered = await fetchDirectHtml(targetUrl, { headers });
           } catch (e2) {
+            // If fallback also fails, rethrow original error so behavior is unchanged for other cases
             throw e;
           }
         } else {
@@ -354,7 +268,7 @@ app.get("/ingest", async (req, res) => {
     }
 
     const t1 = now();
-    let norm = extractNormalized(targetUrl, html, { minImgPx, excludePng, aggressive, diag, mainOnly }); // ADD-ONLY pass mainOnly
+    let norm = extractNormalized(targetUrl, html, { minImgPx, excludePng, aggressive, diag });
     diag.timings.extractMs = now() - t1;
 
     if (!norm.name_raw && (!norm.description_raw || norm.description_raw.length < 10)) {
@@ -363,7 +277,7 @@ app.get("/ingest", async (req, res) => {
 
     if (doHarvest) {
       const t2 = now();
-      norm = await augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng, mainOnly }); // ADD-ONLY propagate
+      norm = await augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng });
       diag.timings.harvestMs = now() - t2;
     }
 
@@ -387,8 +301,7 @@ app.get("/ingest", async (req, res) => {
           norm.description_raw = merged.join("\n");
         }
       } catch(e){
-        const msg = e && e.message ? e.message : String(e);
-        diag.warnings.push(`compass-overview: ${msg}`);
+        diag.warnings.push(`compass-overview: ${e.message||e}`);
       }
 
       // (2) Technical Specifications (union-merge; existing keys win)
@@ -398,8 +311,7 @@ app.get("/ingest", async (req, res) => {
           norm.specs = { ...(norm.specs || {}), ...compassSpecs };
         }
       } catch(e){
-        const msg = e && e.message ? e.message : String(e);
-        diag.warnings.push(`compass-specs: ${msg}`);
+        diag.warnings.push(`compass-specs: ${e.message||e}`);
       }
     }
     // === end Compass-only additions ===
@@ -439,7 +351,6 @@ app.get("/ingest", async (req, res) => {
     return res.status(status >= 400 && status <= 599 ? status : 500).json({ error: String((e && e.message) || e) });
   }
 });
-
 /* ================== Normalization ================== */
 function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
@@ -520,28 +431,6 @@ function extractNormalized(baseUrl, html, opts) {
 
   const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
   const manuals = extractManuals($, baseUrl, name, html, opts);
-
-  /* ==== ADD-ONLY: merge extra images/manuals from enhanced passes ==== */
-  try {
-    const extraImgs = extractImagesPlus($, mergedSD, og, baseUrl, name, html, opts);
-    if (extraImgs && extraImgs.length) {
-      const combined = [...(images||[]).map(i => ({ url: i.url })), ...extraImgs];
-      const ranked = combined
-        .map(x => ({ url: x.url, score: /cdn|cloudfront|akamai|uploads|product|gallery/i.test(x.url) ? 2 : 0 }))
-        .sort((a,b)=> b.score - a.score);
-      const deduped = dedupeImageObjs(ranked, 12);
-      images.length = 0; deduped.forEach(x => images.push(x));
-    }
-  } catch {}
-
-  try {
-    const extraMans = extractManualsPlus($, baseUrl, name, html, opts);
-    if (extraMans && extraMans.length) {
-      const combined = dedupeManualUrls([ ...(manuals||[]), ...extraMans ]);
-      manuals.length = 0; combined.forEach(x => manuals.push(x));
-    }
-  } catch {}
-  /* ==== END ADD-ONLY ==== */
 
   let specs    = Object.keys(mergedSD.specs || {}).length ? mergedSD.specs : extractSpecsSmart($);
 
@@ -820,7 +709,6 @@ function inferSizeFromUrl(u) {
     return out;
   } catch { return { w: 0, h: 0 }; }
 }
-
 /* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
 /* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
 
@@ -1206,49 +1094,37 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
   const set = new Set();
   const imgWeights = new Map();
-
-  // NEW: track image context (main gallery vs. related/upsell) for scoring
-  const imgContext = new Map(); // url -> { inReco: bool, inMain: bool }
-  const markCtx = (absu, ctx) => {
-    const prev = imgContext.get(absu) || { inReco:false, inMain:false };
-    imgContext.set(absu, { inReco: prev.inReco || !!ctx.inReco, inMain: prev.inMain || !!ctx.inMain });
-  };
-
-  const push = (u, weight = 0, ctx = null) => {
+  const push = (u, weight = 0) => {
     if (!u) return;
     const absu = abs(baseUrl, u);
     if (!absu) return;
     if (!imgWeights.has(absu)) imgWeights.set(absu, 0);
     imgWeights.set(absu, Math.max(imgWeights.get(absu), weight));
-    if (ctx) markCtx(absu, ctx);
     set.add(absu);
   };
 
-  // structured data images — prefer strongly
-  (structured.images || []).forEach(u => push(u, 8, { inMain: true }));
+  // structured data images
+  (structured.images || []).forEach(u => push(u, 3));
 
-  // gallery containers (skip related/recommendation blocks entirely)
+  // gallery containers
   const gallerySelectors = [
     '.product-media','.product__media','.product-gallery','.gallery','.media-gallery','#product-gallery','#gallery','[data-gallery]',
     '.product-images','.product-image-gallery','.pdp-gallery','.slick-slider','.slick','.swiper','.swiper-container','.carousel',
     '.owl-carousel','.fotorama','.MagicZoom','.cloudzoom-zoom','.zoomWindow','.zoomContainer','.lightbox','.thumbnails'
   ].join(', ');
   $(gallerySelectors).find('img, source').each((_, el) => {
-    if (isRecoBlock($, el)) return;
     const $el = $(el);
     const cands = [
       $el.attr('src'), $el.attr('data-src'), $el.attr('data-srcset'),
       $el.attr('data-original'), $el.attr('data-large_image'), $el.attr('data-image'),
       $el.attr('data-zoom'), pickLargestFromSrcset($el.attr('srcset')),
     ];
-    cands.forEach(u => push(u, 6, { inReco:false, inMain: isMainProductNode($, el) }));
+    cands.forEach(u => push(u, 3));
   });
 
-  if (og.image) push(og.image, 3, { inMain: true });
+  if (og.image) push(og.image, 2);
 
-  // page-wide images (skip recommendation areas)
   $("img").each((_, el) => {
-    if (isRecoBlock($, el)) return;
     const $el = $(el);
     const cands = [
       $el.attr("src"), $el.attr("data-src"), $el.attr("data-srcset"),
@@ -1256,45 +1132,38 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
       $el.attr("data-large_image"), $el.attr("data-image"),
       pickLargestFromSrcset($el.attr("srcset")),
     ];
-    cands.forEach(u => push(u, 2, { inReco:false, inMain: isMainProductNode($, el) }));
+    cands.forEach(u => push(u, 1));
   });
 
   // noscript fallbacks
   $("noscript").each((_, n)=>{
-    if (isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
     const _$ = cheerio.load(inner);
     _$("img").each((__, el)=>{
       const src = _$(el).attr("src") || _$(el).attr("data-src") || pickLargestFromSrcset(_$(el).attr("srcset"));
-      if (src) push(src, 3, { inReco:false, inMain: isMainProductNode($, n) });
+      if (src) push(src, 2);
     });
   });
 
-  // picture/srcset
-  $("picture source[srcset]").each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    push(pickLargestFromSrcset($(el).attr("srcset")), 2, { inReco:false, inMain: isMainProductNode($, el) });
-  });
+  $("picture source[srcset]").each((_, el) => { push(pickLargestFromSrcset($(el).attr("srcset")), 1); });
 
-  // backgrounds
   $('[style*="background"]').each((_, el) => {
-    if (isRecoBlock($, el)) return;
     const style = String($(el).attr("style") || "");
     const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) push(m[2], 2, { inReco:false, inMain: isMainProductNode($, el) });
+    if (m && m[2]) push(m[2], 1);
   });
 
-  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1, { inMain: true }));
+  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1));
 
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!txt || !/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
     try {
       const obj = JSON.parse(txt);
-      deepFindImagesFromJson(obj).forEach(u => push(u, 2, { inMain: true }));
+      deepFindImagesFromJson(obj).forEach(u => push(u, 2));
     } catch {
       const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(m[1], 1, { inMain: true });
+      let m; while ((m = re.exec(txt))) push(m[1], 1);
     }
   });
 
@@ -1314,10 +1183,8 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     host.includes("motifmedical")        ? "/wp-content/uploads|/product|/images" : ""
   ].filter(Boolean).join("|"), "i");
 
-  // EXPANDED placeholder filter
   const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
-    'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
     'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
     '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/'
   ];
@@ -1345,14 +1212,8 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (allowHostRe.source.length && allowHostRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 3;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
-    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3; // stronger downweight incl. swatch
+    if (/thumb|thumbnail|small|tiny|badge|mini|icon/.test(L)) score -= 2;
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
-
-    // Context-aware penalties/bonuses
-    const ctx = imgContext.get(u) || {};
-    if (ctx.inReco) score -= 5;
-    if (ctx.inMain) score += 3;
-
     return { url: u, score };
   });
 
@@ -1368,94 +1229,6 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (out.length >= 12) break;
   }
   return out;
-}
-
-/* ================== ADD-ONLY: Enhanced image harvester (CDN + main scope) ================== */
-function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
-  const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
-  const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
-  const mainOnly  = !!(opts && (opts.mainOnly || opts.mainonly));
-  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
-
-  const scope = findMainProductScope($);
-  const set = new Map(); // url -> score
-
-  const push = (node, url, baseScore = 0) => {
-    if (!url) return;
-    const u = decodeHtml(abs(baseUrl, url));
-    if (!u || !allowWebExt.test(u)) return;
-    if (!isSameSiteOrCdn(baseUrl, u)) return;
-    const ctx = scoreByContext($, node, { mainOnly });
-    if (ctx <= -999) return;
-    const cur = set.get(u) || 0;
-    set.set(u, Math.max(cur, baseScore + ctx));
-  };
-
-  // 1) Gallery/media in main scope
-  scope.find('.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery], .slick, .swiper, .carousel, .fotorama')
-    .find('img, source').each((_, el) => {
-      const $el = $(el);
-      const cands = [
-        $el.attr('src'), $el.attr('data-src'), $el.attr('data-original'), $el.attr('data-zoom'),
-        $el.attr('data-zoom-image'), $el.attr('data-image'), $el.attr('data-large_image'),
-        pickLargestFromSrcset($el.attr('srcset'))
-      ];
-      cands.forEach(u => push(el, u, 6));
-    });
-
-  // 2) Preloads & social metas
-  $('link[rel="preload"][as="image"]').each((_, el) => push(el, $(el).attr('href'), 3));
-  const tw = $('meta[name="twitter:image"]').attr('content'); if (tw) push($.root(), tw, 2);
-
-  // 3) General main-scope images
-  scope.find('img, source, picture source').each((_, el) => {
-    const $el = $(el);
-    const cands = [
-      $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
-      $el.attr('data-original'), $el.attr('data-image'),
-      $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset'))
-    ];
-    cands.forEach(u => push(el, u, 3));
-  });
-
-  // 4) Backgrounds in main scope
-  scope.find('[style*="background"]').each((_, el) => {
-    const style = String($(el).attr('style') || '');
-    const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) push(el, m[2], 2);
-  });
-
-  // 5) JSON blobs
-  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(t => t.length > 2);
-  const codes = collectCodesFromUrl(baseUrl);
-  $('script').each((_, el) => {
-    const txt = String($(el).contents().text() || '');
-    if (!/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
-    try {
-      const obj = JSON.parse(txt);
-      const arr = deepFindImagesFromJson(obj, []);
-      for (const u of arr) {
-        const L = String(u||'').toLowerCase();
-        const hit = (codes.some(c => L.includes(c)) ? 2 : 0) + (titleTokens.some(t => L.includes(t)) ? 1 : 0);
-        push(el, u, hit ? 3 + hit : 1);
-      }
-    } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(el, m[1], 1);
-    }
-  });
-
-  // Size gating & sort by score
-  const scored = Array.from(set.entries())
-    .filter(([u]) => {
-      const { w, h } = inferSizeFromUrl(u);
-      if (!w && !h) return true;
-      return Math.max(w||0, h||0) >= minPx;
-    })
-    .map(([url, score]) => ({ url, score }))
-    .sort((a, b) => b.score - a.score);
-
-  return dedupeImageObjs(scored, 12);
 }
 
 function fallbackImagesFromMain($, baseUrl, og, opts){
@@ -1575,82 +1348,6 @@ function extractManuals($, baseUrl, name, rawHtml, opts){
 
   return arr;
 }
-/* ================== ADD-ONLY: Enhanced manuals harvester ================== */
-function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
-  const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
-  const urls = new Map(); // url -> score
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
-  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-
-  const push = (node, url, baseScore = 0) => {
-    if (!url) return;
-    const u = decodeHtml(abs(baseUrl, url));
-    if (!u) return;
-    const L = u.toLowerCase();
-    const ctx = scoreByContext($, node, { mainOnly });
-    if (ctx <= -999) return;
-    if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) return;
-    if (blockRe.test(L)) return;
-    const cur = urls.get(u) || 0;
-    urls.set(u, Math.max(cur, baseScore + ctx));
-  };
-
-  const scope = findMainProductScope($);
-
-  // 1) Direct anchors with wider attribute coverage
-  scope.find('a').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
-    const t = ($el.text() || $el.attr('aria-label') || '').toLowerCase();
-    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) push(el, href, 4);
-  });
-
-  // 2) onclick handlers that open PDFs
-  $('a[onclick], button[onclick]').each((_, el) => {
-    const s = String($(el).attr('onclick') || '');
-    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
-    if (m) push(el, m[0], 3);
-  });
-
-  // 3) PDF in <object>/<embed>/<iframe>
-  $('object[type="application/pdf"], embed[type="application/pdf"], iframe[src*=".pdf"]').each((_, el) => {
-    const $el = $(el);
-    push(el, $el.attr('data') || $el.attr('src') || '', 5);
-  });
-
-  // 4) JSON blobs (documents arrays)
-  $('script').each((_, el) => {
-    const txt = String($(el).contents().text() || '');
-    if (!/\.(pdf)\b/i.test(txt) && !/documents?|downloads?|resources?/i.test(txt)) return;
-    try {
-      const obj = JSON.parse(txt);
-      const arr = deepFindPdfsFromJson(obj, []);
-      for (const u of arr) {
-        const L = String(u||'').toLowerCase();
-        if (allowRe.test(L) && !blockRe.test(L)) push(el, u, 3);
-      }
-    } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(el, m[1], 2);
-    }
-  });
-
-  // 5) Last-resort: global anchors with strong text hints
-  $('a[href*=".pdf"], a[download]').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') || '';
-    const txt  = ($el.text() || $el.attr('title') || '').toLowerCase();
-    if (allowRe.test(txt)) push(el, href, 2);
-  });
-
-  const ranked = Array.from(urls.entries())
-    .map(([url, score]) => ({ url, score }))
-    .sort((a, b) => b.score - a.score)
-    .map(x => x.url);
-
-  return dedupeManualUrls(ranked);
-}
-
 function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   const out = new Set();
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
@@ -1734,7 +1431,7 @@ function extractSpecsSmart($){
   $('li').each((_, li)=>{
     if (isFooterOrNav($, li) || isRecoBlock($, li)) return; // ADD reco guard
     const t = cleanup($(li).text());
-    if (!t || t.length < 3 || t.length > 250) return;
+    if (!t || t.length < 3 || t.length > 250 || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.split(/[:\-–]\s+/);
     if (m.length >= 2){
       const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
@@ -2242,7 +1939,7 @@ function filterAndRankExtraPaneImages(urls, baseUrl, opts){
     .filter(u => {
       const { w,h } = inferSizeFromUrl(u);
       if (!w && !h) return true;
-      return Math.max(w||0, h||0) >= minPx;
+      return Math.max(w||0,h||0) >= minPx;
     });
 
   return Array.from(new Set(arr)).slice(0, 6);
@@ -2547,8 +2244,7 @@ function sanitizeIngestPayload(p) {
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
-  // EXPANDED bad image filter to exclude placeholders
-  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
+  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice(0, 12);
