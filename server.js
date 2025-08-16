@@ -312,7 +312,7 @@ app.get("/ingest", async (req, res) => {
 
     const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
     const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
-    const doHarvest  = String(req.query.harvest   ?? "true").toLowerCase() === "true"; // TABS: default ON
+    const doHarvest  = String(req.query.harvest   || "false").toLowerCase() === "true";
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
     const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
 
@@ -1608,7 +1608,7 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   // 2) onclick handlers that open PDFs
   $('a[onclick], button[onclick]').each((_, el) => {
     const s = String($(el).attr('onclick') || '');
-    const m = /https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i.exec(s);
+    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
     if (m) push(el, m[0], 3);
   });
 
@@ -1886,26 +1886,17 @@ function deriveFeaturesFromParagraphs($){
 /* === Resolve tabs === */
 function escapeRe(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-/* ===== TABS: robust CSS id escape (Node lacks CSS.escape) ===== */
-function cssEscapeId(id = "") {
-  return String(id).replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
-}
-
 function documentQueryById($, id){
-  try {
-    return id ? $(`#${cssEscapeId(id)}`)[0] : null;
-  } catch {
-    return id ? $(`#${id}`)[0] : null;
-  }
+  try { return id ? $(`#${CSS.escape(id)}`)[0] : null; }
+  catch { return id ? $(`#${id}`)[0] : null; }
 }
 
 function resolveTabPane($, names){
-  // TABS: fuzzy match instead of exact
-  const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
+  const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
 
   $('a,button,[role="tab"]').each((_, el)=>{
-    const label = cleanup($(el).text()).replace(/\s+/g, ' ');
+    const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
 
     const href = $(el).attr('href') || '';
@@ -1921,8 +1912,7 @@ function resolveTabPane($, names){
   });
 
   if (!pane){
-    // Broaden to common tab panel containers (incl. Magento 2)
-    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items').each((_, el)=>{
+    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
       if (heading && nameRe.test(heading)) { pane = el; return false; }
     });
@@ -1956,7 +1946,7 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
 
     let $panel;
     try {
-      $panel = $(`#${cssEscapeId(paneId)}`);
+      $panel = $(`#${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(paneId) : paneId}`);
     } catch {
       $panel = $(`#${paneId}`);
     }
@@ -2006,47 +1996,6 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   return out;
 }
 
-/* ================== ADD-ONLY: generic lazy tab fetcher ================== */
-function discoverLazyTabUrls($, baseUrl) {
-  const urls = new Set();
-
-  // Look at probable tab triggers
-  $('a[role="tab"], button[role="tab"], .tabs a, .tab a, [data-tab], [data-target], [data-remote], [data-url], [data-href], [data-content-url], [data-ajax-url]')
-    .each((_, el) => {
-      const $el = $(el);
-      const cand =
-        $el.attr('data-url') || $el.attr('data-href') || $el.attr('data-remote') ||
-        $el.attr('data-content-url') || $el.attr('data-ajax-url') ||
-        $el.attr('data-load') || $el.attr('href') || '';
-      if (!cand) return;
-
-      const u = cand.trim();
-      if (!u || u === '#' || u.startsWith('javascript:')) return;
-
-      // Accept absolute or site-relative URLs
-      if (/^https?:\/\//i.test(u) || u.startsWith('/')) {
-        urls.add(abs(baseUrl, u));
-      }
-    });
-
-  return Array.from(urls);
-}
-
-async function hydrateLazyFragments(urls, renderApiUrl, headers = {}) {
-  const out = [];
-  if (!urls || !urls.length || !renderApiUrl) return out;
-
-  const base = renderApiUrl.replace(/\/+$/,'');
-  for (const u of urls) {
-    try {
-      const endpoint = `${base}/render?url=${encodeURIComponent(u)}&mode=fast`;
-      const { html } = await fetchWithRetry(endpoint, { headers });
-      out.push({ url: u, html });
-    } catch (_) { /* non-fatal */ }
-  }
-  return out;
-}
-
 function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Features','Downloads']) {
   const rank = t => {
     const i = order.findIndex(x => x && t && x.toLowerCase() === t.toLowerCase());
@@ -2064,7 +2013,6 @@ function resolveAllPanes($, names){
   const out = new Set();
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
 
-  // Tab triggers -> target panes
   $('a,button,[role="tab"]').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
@@ -2084,13 +2032,11 @@ function resolveAllPanes($, names){
     }
   });
 
-  // Heuristic: panels/sections with matching headings (incl. Magento 2)
-  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items, section').each((_, el)=>{
+  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
 
-  // Class-name fallback
   const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
   $('[class]').each((_, el)=>{
     if (classRe.test($(el).attr('class') || '')) out.add(el);
@@ -2099,31 +2045,15 @@ function resolveAllPanes($, names){
   return Array.from(out);
 }
 
-// === TABS-ONLY ADD: parse lines like "WAVELENGTH RANGE 200-1000nm" (often inside spec tabs)
-function parseUpperSpecLine(t = "") {
-  const s = cleanup(t);
-  // Label in caps (with spaces, numbers, symbols) + at least one space + value
-  const m =
-    s.match(/^([A-Z][A-Z0-9\s/%°.\-]{2,60})\s{1,}(.{2,300})$/) ||
-    null;
-  if (!m) return null;
-
-  const key = canonicalizeSpecKey(m[1]);
-  const val = normalizeUnitsInText(m[2]);
-  if (!key || !val) return null;
-  return [key, val];
-}
-
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
-  // tabs-only guard against footer/nav/reco contamination
+  // ADD: avoid footer/nav/reco contamination
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
   const out = {};
   const $c = $(container);
 
-  // Tables
   $c.find('table').each((_, tbl)=>{
-    if (isPartsOrAccessoryTable($, tbl)) return; // skip parts/accessories tables inside tabs
+    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -2134,7 +2064,6 @@ function extractSpecsFromContainer($, container){
     });
   });
 
-  // Definition lists
   $c.find('dl').each((_, dl)=>{
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
@@ -2146,30 +2075,21 @@ function extractSpecsFromContainer($, container){
     }
   });
 
-  // List / paragraph pairs like "Key: Value"
-  $c.find('li, p').each((_, el)=>{
-    const t = cleanup($(el).text());
-    if (!t || t.length < 3 || t.length > 300) return;
-
-    // Standard "Key: Value" or "Key - Value"
-    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
-    if (m){
-      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-      const v = m[2];
+  $c.find('li').each((_, li)=>{
+    const t = cleanup($(li).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
       if (k && v && !out[k]) out[k]=v;
-      return;
     }
-
-    // NEW (tabs-only): ALL-CAPS label + value (Magento/industrial spec style)
-    const uv = parseUpperSpecLine(t);
-    if (uv && !out[uv[0]]) out[uv[0]] = uv[1];
   });
 
-  // Common 2-column "label/value" rows inside grids
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
     const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] ||= b;
+    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
   });
 
   return out;
@@ -2179,7 +2099,7 @@ function collectManualsFromContainer($, container, baseUrl, sinkSet){
   const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr("href") || "");
+    const href = String($(el).attr('href') || "");
     const full = abs(baseUrl, href);
     if (!full) return;
     const L = full.toLowerCase();
@@ -2476,10 +2396,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
       const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
 
-      const specNames = ['spec','specs','specification','specifications','technical specifications','technical data','tech specs','tech data','details','product details'];
+      const specNames = ['specification','specifications','technical specifications','tech specs','details'];
       const featNames = ['features','features/benefits','benefits','key features','highlights'];
-      const downNames = ['downloads','documents','technical resources','resources','downloads & manuals'];
-      const descNames = ['overview','description','product details','details','about'];
+      const downNames = ['downloads','documents','technical resources','resources'];
+      const descNames = ['overview','description','product details','details'];
 
       const addSpecs   = {};
       const addManuals = new Set();
@@ -2539,70 +2459,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   }
   // === end Dojo/dijit pre-pass ===
 
-    // === ADD-ONLY: generic lazy tab fragments (Bootstrap/React/etc.) ===
-  try {
-    const lazyUrls = discoverLazyTabUrls($, baseUrl);
-    if (lazyUrls.length) {
-      const headers = { "User-Agent": "MedicalExIngest/1.7" };
-      if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
-      const frags = await hydrateLazyFragments(lazyUrls, RENDER_API_URL, headers);
-
-      const addSpecs   = {};
-      const addManuals = new Set();
-      const addFeatures= [];
-      let addDesc = "";
-
-      for (const frag of frags) {
-        const $p = cheerio.load(frag.html || "");
-        // Specs
-        Object.assign(addSpecs, extractSpecsFromContainer($p, $p.root()));
-        try {
-          // also harvest script-embedded specs from fragment
-          const jsonExtras = extractSpecsFromScripts($p, $p.root());
-          Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
-        } catch {}
-        // Features
-        addFeatures.push(...extractFeaturesFromContainer($p, $p.root()));
-        // Manuals
-        collectManualsFromContainer($p, $p.root(), baseUrl, addManuals);
-        ($p('a[href$=".pdf"], a[href*=".pdf"]') || []).each((_, el)=> {
-          const href = String($p(el).attr("href")||"");
-          if (href) addManuals.add(abs(baseUrl, href));
-        });
-        // Description (prefer the longest)
-        const d = extractDescriptionFromContainer($p, $p.root());
-        if (d && d.length > (addDesc || "").length) addDesc = d;
-      }
-
-      if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
-      if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
-
-      if (addFeatures.length) {
-        const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
-        for (const f of addFeatures) {
-          const k = String(f).toLowerCase();
-          if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-          if (norm.features_raw.length >= 20) break;
-        }
-      }
-
-      if (addManuals.size) {
-        const have = new Set((norm.manuals || []));
-        for (const u of addManuals) {
-          if (!have.has(u)) { (norm.manuals ||= []).push(u); have.add(u); }
-        }
-      }
-    }
-  } catch (_) { /* non-fatal */ }
-  // === end generic lazy fragments ===
-
-  const specPanes   = resolveAllPanes($, [
-    'spec','specs','specification','specifications','technical specifications','technical data','tech specs','tech data','details','product details',
-    'size & weight','size and weight'
-  ]);
-  const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation','downloads & manuals' ]);
+  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
+  const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
   const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
-  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details','about' ]);
+  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
 
   const addSpecs = {};
   for (const el of specPanes) {
