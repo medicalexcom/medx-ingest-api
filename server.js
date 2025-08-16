@@ -1,4 +1,4 @@
-// medx-ingest-api/server.js
+/* medx-ingest-api/server.js */
 import express from "express";
 import cors from "cors";
 import * as cheerio from "cheerio";
@@ -316,10 +316,8 @@ app.get("/ingest", async (req, res) => {
     }
     // === end Compass-only additions ===
 
-    /* ==== MEDX ADD-ONLY: Final spec enrichment pass v1 ==== */
-    // Adds derived fields (e.g., overall_width/height/depth from a single "Dimensions: WxDxH" string)
+    /* ==== MEDX ADD-ONLY: final spec enrichment before sanitize v1 ==== */
     try { norm.specs = enrichSpecsWithDerived(norm.specs || {}); } catch {}
-    /* ==== /MEDX ADD-ONLY END ==== */
 
     if (wantMd) {
       const $ = cheerio.load(html);
@@ -425,14 +423,29 @@ function extractNormalized(baseUrl, html, opts) {
 
   let specs    = Object.keys(mergedSD.specs || {}).length ? mergedSD.specs : extractSpecsSmart($);
 
-  /* ==== MEDX ADD-ONLY: Specs JSON extras v1 ==== */
+  /* ==== MEDX ADD-ONLY: merge extras from embedded JSON v1 ==== */
   try {
     const extraJsonSpecs = extractSpecsFromScripts($);
-    if (Object.keys(extraJsonSpecs).length) {
-      specs = mergeSpecsAdditive(specs, extraJsonSpecs); // additive fill; existing keys win
+    if (extraJsonSpecs && Object.keys(extraJsonSpecs).length) {
+      specs = mergeSpecsAdditive(specs, extraJsonSpecs);
     }
   } catch {}
-  /* ==== /MEDX ADD-ONLY END ==== */
+
+  /* ==== MEDX ADD-ONLY: merge JSON-LD specs from all Product nodes v1 ==== */
+  try {
+    const jsonldAll = extractJsonLdAllProductSpecs($);
+    if (jsonldAll && Object.keys(jsonldAll).length) {
+      specs = mergeSpecsAdditive(specs, jsonldAll);
+    }
+  } catch {}
+
+  /* ==== MEDX ADD-ONLY: global K:V sweep to fill remaining gaps v1 ==== */
+  try {
+    const globalPairs = extractAllSpecPairs($);
+    if (globalPairs && Object.keys(globalPairs).length) {
+      specs = mergeSpecsAdditive(specs, globalPairs);
+    }
+  } catch {}
 
   let features = (mergedSD.features && mergedSD.features.length) ? mergedSD.features : extractFeaturesSmart($);
 
@@ -642,6 +655,7 @@ function mergeProductSD(a={}, b={}, c={}){
 
   return { name, description, brand, images, specs, features: feats };
 }
+
 /* === Images === */
 function pickLargestFromSrcset(srcset) {
   if (!srcset) return "";
@@ -660,7 +674,6 @@ function pickLargestFromSrcset(srcset) {
     return String(srcset).split(",").map(s => s.trim().split(/\s+/)[0]).filter(Boolean)[0] || "";
   }
 }
-
 function inferSizeFromUrl(u) {
   try {
     const out = { w: 0, h: 0 };
@@ -684,6 +697,339 @@ function inferSizeFromUrl(u) {
   } catch { return { w: 0, h: 0 }; }
 }
 
+/* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
+/* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
+
+// Canonical names for common spec keys (lowercased text → canonical snake_case key)
+const SPEC_SYNONYMS = new Map([
+  // Dimensions & size
+  ["dimensions", "dimensions"],
+  ["overall dimensions", "overall_dimensions"],
+  ["overall size", "overall_dimensions"],
+  ["overall width", "overall_width"],
+  ["overall height", "overall_height"],
+  ["overall length", "overall_length"],
+  ["overall depth", "overall_depth"],
+  ["width", "width"],
+  ["height", "height"],
+  ["length", "length"],
+  ["depth", "depth"],
+  ["seat width", "seat_width"],
+  ["seat depth", "seat_depth"],
+  ["seat height", "seat_height"],
+  ["back height", "back_height"],
+  ["arm height", "arm_height"],
+  ["handle height", "handle_height"],
+
+  // Weight/capacity
+  ["weight capacity", "weight_capacity"],
+  ["max weight", "weight_capacity"],
+  ["maximum weight", "weight_capacity"],
+  ["capacity", "weight_capacity"],
+  ["user weight capacity", "weight_capacity"],
+  ["product weight", "product_weight"],
+  ["unit weight", "product_weight"],
+  ["shipping weight", "shipping_weight"],
+  ["packaged weight", "shipping_weight"],
+
+  // Other frequent keys
+  ["sku", "sku"],
+  ["mpn", "mpn"],
+  ["model", "model"],
+  ["model number", "model"],
+  ["upc", "gtin12"],
+  ["gtin", "gtin14"],
+  ["color", "color"],
+  ["material", "material"],
+  ["warranty", "warranty"],
+  ["category", "category"],
+  ["brand", "brand"],
+  ["manufacturer", "manufacturer"]
+]);
+
+function canonicalizeSpecKey(k = "") {
+  const base = String(k).trim().replace(/\s+/g, " ");
+  const lower = base.toLowerCase();
+
+  // Quick synonym lookup
+  if (SPEC_SYNONYMS.has(lower)) return SPEC_SYNONYMS.get(lower);
+
+  // Heuristics → snake_case
+  return lower
+    .replace(/[^\p{L}\p{N}\s/.-]+/gu, "")
+    .replace(/\//g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeUnitsInText(v = "") {
+  // Normalize common units typography
+  return String(v)
+    // inch mark to "in"
+    .replace(/(\d)\s*["”]/g, "$1 in")
+    // feet mark to "ft"
+    .replace(/(\d)\s*[\'’]/g, "$1 ft")
+    // pound variants to lb
+    .replace(/\b(pounds?|lbs?)\b/gi, "lb")
+    // ounce to oz
+    .replace(/\b(ounces?)\b/gi, "oz")
+    // millimeter to mm, centimeter to cm, kilogram to kg, gram to g
+    .replace(/\b(millimet(er|re)s?)\b/gi, "mm")
+    .replace(/\b(centimet(er|re)s?)\b/gi, "cm")
+    .replace(/\b(kilograms?)\b/gi, "kg")
+    .replace(/\b(grams?)\b/gi, "g")
+    // tidy spaces
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Try to parse WxDxH or similar patterns; returns { width, depth, height, unit } when possible
+function parseDimensionsBlock(v = "") {
+  const t = normalizeUnitsInText(v).toLowerCase();
+
+  // 1) "W x D x H" with unit repeated or trailing
+  // Examples: "20 in W x 18 in D x 35 in H", "20 x 18 x 35 in"
+  let m = t.match(
+    /\b(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\b/
+  );
+  if (m) {
+    const w = parseFloat(m[1]), d = parseFloat(m[3]), h = parseFloat(m[5]);
+    const unit = (m[2] || m[4] || m[6] || "in").toLowerCase();
+    return { width: w, depth: d, height: h, unit };
+  }
+  return null;
+}
+
+function enrichSpecsWithDerived(specs = {}) {
+  const out = { ...specs };
+
+  // 1) Expand overall_dimensions into components if parsable
+  const candidates = [
+    "overall_dimensions",
+    "dimensions",
+    "overall_size",
+  ];
+  for (const key of candidates) {
+    const val = out[key];
+    if (val && typeof val === "string") {
+      const dims = parseDimensionsBlock(val);
+      if (dims) {
+        const u = dims.unit;
+        if (dims.width  != null && out["overall_width"]  == null) out["overall_width"]  = `${dims.width} ${u}`;
+        if (dims.depth  != null && out["overall_depth"]  == null) out["overall_depth"]  = `${dims.depth} ${u}`;
+        if (dims.height != null && out["overall_height"] == null) out["overall_height"] = `${dims.height} ${u}`;
+      }
+    }
+  }
+
+  // 2) Normalize units for dimension-like values (adds-only)
+  const DIM_KEYS = [
+    "overall_width","overall_height","overall_length","overall_depth",
+    "width","height","length","depth",
+    "seat_width","seat_height","seat_depth","back_height","arm_height","handle_height",
+    "product_weight","shipping_weight","weight_capacity"
+  ];
+  for (const k of DIM_KEYS) {
+    if (out[k] && typeof out[k] === "string") {
+      out[k] = normalizeUnitsInText(out[k]);
+    }
+  }
+
+  return out;
+}
+
+// Merge two specs objects where `primary` wins on conflicts (additive).
+function mergeSpecsAdditive(primary = {}, secondary = {}) {
+  const merged = { ...secondary, ...primary };
+  return enrichSpecsWithDerived(merged);
+}
+
+/* ==== MEDX ADD-ONLY: Pluck JSON-like objects from JS v1 ==== */
+function pluckJsonObjectsFromJs(txt, maxBlocks = 3) {
+  const out = [];
+  let i = 0, n = txt.length;
+  const pushBlock = (start, openChar, closeChar) => {
+    let depth = 0, j = start, inStr = false, esc = false;
+    const isQuote = c => c === '"' || c === "'";
+    let quote = null;
+
+    while (j < n) {
+      const c = txt[j];
+      if (inStr) {
+        if (esc) { esc = false; }
+        else if (c === '\\') { esc = true; }
+        else if (c === quote) { inStr = false; quote = null; }
+      } else {
+        if (isQuote(c)) { inStr = true; quote = c; }
+        else if (c === openChar) depth++;
+        else if (c === closeChar) {
+          depth--;
+          if (depth === 0) {
+            out.push(txt.slice(start, j + 1));
+            return j + 1;
+          }
+        }
+      }
+      j++;
+    }
+    return start; // failed to close
+  };
+
+  while (i < n && out.length < maxBlocks) {
+    const ch = txt[i];
+    if (ch === '{' || ch === '[') {
+      const next = pushBlock(i, ch, ch === '{' ? '}' : ']');
+      if (next > i) { i = next; continue; }
+    }
+    i++;
+  }
+  return out;
+}
+
+/* ================== Specs: pull from embedded JSON (ADD-ONLY) ================== */
+/* ==== MEDX ADD-ONLY: extract specs from scripts v1 ==== */
+function extractSpecsFromScripts($, container /* optional */) {
+  const scope = container ? $(container) : $;
+  const out = {};
+
+  const pushKV = (name, value) => {
+    const k = canonicalizeSpecKey(name);
+    const v = cleanup(String(value || ""));
+    if (!k || !v) return;
+    if (!out[k]) out[k] = v; // first occurrence wins; DOM/SD will win later via merge order
+  };
+
+  const visit = (node) => {
+    if (node == null) return;
+    if (typeof node === "string") return;
+
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+
+    if (typeof node === "object") {
+      const nameLike  = node.name || node.label || node.title || node.displayName || node.key || node.property;
+      const valueLike = node.value || node.displayValue || node.val || node.text || node.content || node.description;
+      if (nameLike && (valueLike != null && valueLike !== "")) pushKV(nameLike, valueLike);
+
+      const containers = [
+        "specs","specifications","technicalSpecifications","attributes","attributeGroups",
+        "productAttributes","properties","features","details","data","dataSheet","Specification","Specifications",
+        "custom_fields","customFields","customfields"
+      ];
+      containers.forEach(c => { if (node[c]) visit(node[c]); });
+
+      // BigCommerce/BCData shapes
+      if (node.product && (node.product.attributes || node.product.custom_fields)) {
+        visit(node.product.attributes || []);
+        visit(node.product.custom_fields || []);
+      }
+
+      Object.values(node).forEach(visit);
+    }
+  };
+
+  // 1) Strict JSON blobs
+  scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).contents().text();
+    if (!raw || !raw.trim()) return;
+    try { visit(JSON.parse(raw.trim())); } catch {}
+  });
+
+  // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
+  scope.find("script").each((_, el) => {
+    const txt = String($(el).contents().text() || "");
+    if (!txt || txt.length < 40) return;
+    if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
+
+    const blocks = pluckJsonObjectsFromJs(txt, 5);
+    for (const block of blocks) {
+      try { visit(JSON.parse(block)); } catch {}
+    }
+  });
+
+  const canon = {};
+  Object.entries(out).forEach(([k, v]) => {
+    const ck = canonicalizeSpecKey(k);
+    if (!canon[ck]) canon[ck] = normalizeUnitsInText(v);
+  });
+
+  return enrichSpecsWithDerived(canon);
+}
+
+/* ==== MEDX ADD-ONLY: JSON-LD extras from all Product nodes v1 ==== */
+function extractJsonLdAllProductSpecs($){
+  const nodes = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const raw = $(el).contents().text();
+      if (!raw || !raw.trim()) return;
+      const parsed = JSON.parse(raw.trim());
+      (Array.isArray(parsed) ? parsed : [parsed]).forEach(obj => {
+        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
+        else nodes.push(obj);
+      });
+    } catch {}
+  });
+  const prods = nodes.filter(n => String(n && n['@type'] || '').toLowerCase().includes('product'));
+  const merged = {};
+  for (const p of prods) {
+    const specs = schemaPropsToSpecs(
+      p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
+    );
+    Object.assign(merged, specs);
+  }
+  return merged;
+}
+
+/* ==== MEDX ADD-ONLY: Global spec sweep v1 ==== */
+function extractAllSpecPairs($){
+  const out = {};
+  // 1) Any table that looks like a spec table (>=3 rows with short header cells)
+  $('table').each((_, tbl)=>{
+    let hits = 0;
+    const local = {};
+    $(tbl).find('tr').each((__, tr)=>{
+      const cells = $(tr).find('th,td');
+      if (cells.length >= 2) {
+        const k = cleanup($(cells[0]).text());
+        const v = cleanup($(cells[1]).text());
+        if (k && v && k.length <= 80 && v.length <= 400) {
+          local[canonicalizeSpecKey(k)] = v;
+          hits++;
+        }
+      }
+    });
+    if (hits >= 3) Object.assign(out, local);
+  });
+
+  // 2) Definition lists
+  $('dl').each((_, dl)=>{
+    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
+    if (dts.length === dds.length && dts.length >= 3){
+      for (let i=0;i<dts.length;i++){
+        const k=cleanup($(dts[i]).text());
+        const v=cleanup($(dds[i]).text());
+        if (k && v) out[canonicalizeSpecKey(k)] = v;
+      }
+    }
+  });
+
+  // 3) Colon/hyphen pairs in main/product areas
+  $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
+    const t = cleanup($(el).text());
+    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
+    if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
+  });
+
+  const norm = {};
+  for (const [k,v] of Object.entries(out)) norm[k] = normalizeUnitsInText(v);
+  return enrichSpecsWithDerived(norm);
+}
+
+/* === Images continued === */
 function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
   const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
@@ -945,7 +1291,6 @@ function extractManuals($, baseUrl, name, rawHtml, opts){
 
   return arr;
 }
-
 function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   const out = new Set();
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
@@ -974,125 +1319,6 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   }
   return Array.from(out);
 }
-
-/* ==== MEDX ADD-ONLY: Specs canonicalization & enrichment v1 ==== */
-// Canonical names for common spec keys (lowercased text → canonical snake_case key)
-const SPEC_SYNONYMS = new Map([
-  // Dimensions & size
-  ["dimensions", "dimensions"],
-  ["overall dimensions", "overall_dimensions"],
-  ["overall size", "overall_dimensions"],
-  ["overall width", "overall_width"],
-  ["overall height", "overall_height"],
-  ["overall length", "overall_length"],
-  ["overall depth", "overall_depth"],
-  ["width", "width"],
-  ["height", "height"],
-  ["length", "length"],
-  ["depth", "depth"],
-  ["seat width", "seat_width"],
-  ["seat depth", "seat_depth"],
-  ["seat height", "seat_height"],
-  ["back height", "back_height"],
-  ["arm height", "arm_height"],
-  ["handle height", "handle_height"],
-  // Weight/capacity
-  ["weight capacity", "weight_capacity"],
-  ["max weight", "weight_capacity"],
-  ["maximum weight", "weight_capacity"],
-  ["capacity", "weight_capacity"],
-  ["user weight capacity", "weight_capacity"],
-  ["product weight", "product_weight"],
-  ["unit weight", "product_weight"],
-  ["shipping weight", "shipping_weight"],
-  ["packaged weight", "shipping_weight"],
-  // Other frequent keys
-  ["sku", "sku"],
-  ["mpn", "mpn"],
-  ["model", "model"],
-  ["model number", "model"],
-  ["upc", "gtin12"],
-  ["gtin", "gtin14"],
-  ["color", "color"],
-  ["material", "material"],
-  ["warranty", "warranty"],
-  ["category", "category"],
-  ["brand", "brand"],
-  ["manufacturer", "manufacturer"]
-]);
-
-function canonicalizeSpecKey(k = "") {
-  const base = String(k).trim().replace(/\s+/g, " ");
-  const lower = base.toLowerCase();
-  if (SPEC_SYNONYMS.has(lower)) return SPEC_SYNONYMS.get(lower);
-  return lower
-    .replace(/[^\p{L}\p{N}\s/.-]+/gu, "")
-    .replace(/\//g, "_")
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-function normalizeUnitsInText(v = "") {
-  return String(v)
-    .replace(/(\d)\s*["”]/g, "$1 in")
-    .replace(/(\d)\s*[\'’]/g, "$1 ft")
-    .replace(/\b(pounds?|lbs?)\b/gi, "lb")
-    .replace(/\b(ounces?)\b/gi, "oz")
-    .replace(/\b(millimet(er|re)s?)\b/gi, "mm")
-    .replace(/\b(centimet(er|re)s?)\b/gi, "cm")
-    .replace(/\b(kilograms?)\b/gi, "kg")
-    .replace(/\b(grams?)\b/gi, "g")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-function parseDimensionsBlock(v = "") {
-  const t = normalizeUnitsInText(v).toLowerCase();
-  const m = t.match(/\b(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\b/);
-  if (m) {
-    const w = parseFloat(m[1]), d = parseFloat(m[3]), h = parseFloat(m[5]);
-    const unit = (m[2] || m[4] || m[6] || "in").toLowerCase();
-    return { width: w, depth: d, height: h, unit };
-  }
-  return null;
-}
-
-function enrichSpecsWithDerived(specs = {}) {
-  const out = { ...specs };
-  const candidates = ["overall_dimensions","dimensions","overall_size"];
-  for (const key of candidates) {
-    const val = out[key];
-    if (val && typeof val === "string") {
-      const dims = parseDimensionsBlock(val);
-      if (dims) {
-        const u = dims.unit;
-        if (dims.width  != null && out["overall_width"]  == null) out["overall_width"]  = `${dims.width} ${u}`;
-        if (dims.depth  != null && out["overall_depth"]  == null) out["overall_depth"]  = `${dims.depth} ${u}`;
-        if (dims.height != null && out["overall_height"] == null) out["overall_height"] = `${dims.height} ${u}`;
-      }
-    }
-  }
-  const DIM_KEYS = [
-    "overall_width","overall_height","overall_length","overall_depth",
-    "width","height","length","depth",
-    "seat_width","seat_height","seat_depth","back_height","arm_height","handle_height",
-    "product_weight","shipping_weight","weight_capacity"
-  ];
-  for (const k of DIM_KEYS) {
-    if (out[k] && typeof out[k] === "string") {
-      out[k] = normalizeUnitsInText(out[k]);
-    }
-  }
-  return out;
-}
-
-function mergeSpecsAdditive(primary = {}, secondary = {}) {
-  const merged = { ...secondary, ...primary };
-  return enrichSpecsWithDerived(merged);
-}
-/* ==== /MEDX ADD-ONLY END ==== */
-
 /* === Specs (scoped → dense block → global) === */
 function extractSpecsSmart($){
   let specPane = resolveTabPane($, [
@@ -1194,56 +1420,6 @@ function deriveSpecsFromParagraphs($){
     });
   return out;
 }
-
-/* ==== MEDX ADD-ONLY: Specs from embedded JSON v1 ==== */
-function extractSpecsFromScripts($, container /* optional */) {
-  const scope = container ? $(container) : $;
-  const out = {};
-  const pushKV = (name, value) => {
-    const k = canonicalizeSpecKey(name);
-    const v = cleanup(String(value || ""));
-    if (!k || !v) return;
-    if (!out[k]) out[k] = v;
-  };
-  const visit = (node) => {
-    if (node == null) return;
-    if (typeof node === "string") return;
-    if (Array.isArray(node)) { node.forEach(visit); return; }
-    if (typeof node === "object") {
-      const nameLike  = node.name || node.label || node.title || node.displayName || node.key || node.property;
-      const valueLike = node.value || node.displayValue || node.val || node.text || node.content || node.description;
-      if (nameLike && (valueLike != null && valueLike !== "")) pushKV(nameLike, valueLike);
-      const containers = [
-        "specs","specifications","technicalSpecifications","attributes","attributeGroups",
-        "productAttributes","properties","features","details","data","dataSheet","Specification","Specifications"
-      ];
-      containers.forEach(c => { if (node[c]) visit(node[c]); });
-      Object.values(node).forEach(visit);
-    }
-  };
-  scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
-    const raw = $(el).contents().text();
-    if (!raw || !raw.trim()) return;
-    try { visit(JSON.parse(raw.trim())); } catch {}
-  });
-  scope.find("script").each((_, el) => {
-    const txt = String($(el).contents().text() || "");
-    if (!txt || txt.length < 20) return;
-    if (!/[{\[]/.test(txt)) return;
-    if (!/\b(spec|attribute|technical|dimensions?)\b/i.test(txt)) return;
-    try {
-      const m = txt.match(/({[\s\S]+})|(\[[\s\S]+\])/);
-      if (m) visit(JSON.parse(m[0]));
-    } catch {}
-  });
-  const canon = {};
-  Object.entries(out).forEach(([k, v]) => {
-    const ck = canonicalizeSpecKey(k);
-    if (!canon[ck]) canon[ck] = normalizeUnitsInText(v);
-  });
-  return enrichSpecsWithDerived(canon);
-}
-/* ==== /MEDX ADD-ONLY END ==== */
 
 /* === Features === */
 function extractFeaturesSmart($){
@@ -1372,9 +1548,7 @@ function resolveTabPane($, names){
   return pane;
 }
 
-/* ===== Dojo/dijit TabContainer helpers (for role=tab + dojo ids) ===== */
-
-// Parse Dojo/ARIA tabs inside a <div role="tablist"> and map each tab -> panel/html/text
+/* ===== Dojo/dijit TabContainer helpers ===== */
 function parseDojoTabs($, baseUrl, tablistRoot) {
   const out = [];
   const $root = tablistRoot ? $(tablistRoot) : $('[role="tablist"]').first();
@@ -1385,14 +1559,12 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
     const tabId = $tab.attr('id') || '';
     const title = (String($tab.attr('title') || '').trim()) || (String($tab.text() || '').trim());
 
-    // prefer aria-controls; dojo fallback: extract after "tablist_"
     let paneId = $tab.attr('aria-controls') || '';
     if (!paneId && tabId && tabId.includes('tablist_')) {
       paneId = tabId.slice(tabId.indexOf('tablist_') + 'tablist_'.length);
     }
     if (!paneId) return;
 
-    // find panel by id or aria-labelledby
     let $panel;
     try {
       $panel = $(`#${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(paneId) : paneId}`);
@@ -1404,7 +1576,6 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
     const html = $panel.html() || '';
     const text = (String($panel.text() || '')).replace(/\s+/g,' ').trim();
 
-    // Support Dojo ContentPane lazy loading (href or data-dojo-props)
     let href = $panel.attr('href') || $panel.attr('data-href') || '';
     if (!href) {
       const props = $panel.attr('data-dojo-props') || '';
@@ -1425,8 +1596,6 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
   return out;
 }
 
-// If a tab was lazy (no html but has href), render/fetch it once and fill html/text.
-// Uses your existing Render API + token.
 async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   if (!tabs || !tabs.length || !renderApiUrl) return tabs || [];
   const base = renderApiUrl.replace(/\/+$/,'');
@@ -1437,7 +1606,6 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     if (!tt.html && tt.href) {
       try {
         const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
-        // Reuse our robust retrier
         const { html } = await fetchWithRetry(url, { headers });
         const $p = cheerio.load(html);
         tt.html = $p.root().html() || '';
@@ -1449,7 +1617,6 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   return out;
 }
 
-// Convenience: merge texts from a preferred tab order into one block (optional)
 function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Features','Downloads']) {
   const rank = t => {
     const i = order.findIndex(x => x && t && x.toLowerCase() === t.toLowerCase());
@@ -1763,11 +1930,10 @@ function firstGoodParagraph($){
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
-  // === Dojo/dijit TabContainer pre-pass (handles <span class="tabLabel" role="tab"> etc.) ===
+  // === Dojo/dijit TabContainer pre-pass ===
   try {
     const dojoTabs0 = parseDojoTabs($, baseUrl);
     if (dojoTabs0.length) {
-      // hydrate any lazy tabs (ContentPane with href)
       const headers = { "User-Agent": "MedicalExIngest/1.7" };
       if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
       const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
@@ -1785,22 +1951,16 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       for (const t of dojoTabs) {
         if (!t.html && !t.text) continue;
         const $p = cheerio.load(t.html || "");
-        // route by tab title
         const title = String(t.title || '').toLowerCase();
 
         if (specNames.some(n => title.includes(n))) {
           Object.assign(addSpecs, extractSpecsFromContainer($p, $p.root()));
-        }
-
-        /* ==== MEDX ADD-ONLY: JSON specs inside Dojo tab v1 ==== */
-        if (specNames.some(n => title.includes(n))) {
+          /* ==== MEDX ADD-ONLY: specs-from-scripts in Dojo tab v1 ==== */
           try {
             const jsonExtras = extractSpecsFromScripts($p, $p.root());
             Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
           } catch {}
         }
-        /* ==== /MEDX ADD-ONLY END ==== */
-
         if (featNames.some(n => title.includes(n))) {
           addFeatures.push(...extractFeaturesFromContainer($p, $p.root()));
         }
@@ -1847,16 +2007,14 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
 
   const addSpecs = {};
-  for (const el of specPanes) Object.assign(addSpecs, extractSpecsFromContainer($, el));
-
-  /* ==== MEDX ADD-ONLY: JSON specs inside spec panes v1 ==== */
   for (const el of specPanes) {
+    Object.assign(addSpecs, extractSpecsFromContainer($, el));
+    /* ==== MEDX ADD-ONLY: specs-from-scripts inside spec panes v1 ==== */
     try {
       const jsonExtras = extractSpecsFromScripts($, el);
       Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
     } catch {}
   }
-  /* ==== /MEDX ADD-ONLY END ==== */
 
   const addManuals = new Set();
   for (const el of manualPanes) collectManualsFromContainer($, el, baseUrl, addManuals);
@@ -2056,7 +2214,7 @@ function harvestCompassOverview($){
 }
 
 function harvestCompassSpecs($){
-  const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-details, .product-detail, section');
+  const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .product-details, .product-detail, section');
   const out = {};
   panels.each((_, panel)=>{
     const $p = $(panel);
