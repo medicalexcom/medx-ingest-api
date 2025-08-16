@@ -2254,7 +2254,7 @@ function harvestCompassOverview($){
 
     $p.find('p').each((__, el)=> push($(el).text()));
     $p.find('ul li, ol li').each((__, el)=>{
-      const t = cleanup($(el).text()));
+      const t = cleanup($(el).text());
       if (t && t.length <= 220) parts.push(`• ${t}`);
     });
 
