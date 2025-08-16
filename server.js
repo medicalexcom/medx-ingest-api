@@ -1683,7 +1683,7 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
 function extractSpecsSmart($){
   let specPane = resolveTabPane($, [
     'technical specifications','technical specification',
-    'tech specs','specifications','specification','details'
+    'tech specs','specifications','specification','details','size & weight','size and weight' // ADDED names for spec tabs
   ]);
   // ADD: Make spec pane selection “footer-aware”
   if (specPane && (isFooterOrNav($, specPane) || isRecoBlock($, specPane))) {
@@ -1744,6 +1744,17 @@ function extractSpecsSmart($){
   });
 
   return out;
+}
+
+/* ======= TABS-ONLY helper: parse ALL-CAPS spec lines inside panes ======= */
+function parseUpperSpecLine(t = "") {
+  const s = cleanup(t);
+  const m = s.match(/^([A-Z][A-Z0-9\s/%°.\-]{2,50})\s{1,}(.{2,300})$/);
+  if (!m) return null;
+  const key = canonicalizeSpecKey(m[1]);
+  const val = normalizeUnitsInText(m[2]);
+  if (!key || !val) return null;
+  return [key, val];
 }
 
 function extractSpecsFromDensestBlock($){
@@ -1831,11 +1842,14 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
+  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights','what’s in the box','whats in the box','includes']);
   if (featPane){
     const $c = $(featPane);
     $c.find('li').each((_, li)=> pushIfGood($(li).text()));
     $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
+    // EXTRA (TABS-ONLY): also capture lists directly following headings like "Features" or "What's in the Box"
+    const extra = extractListAfterHeadingInContainer($, $c, /\b(features|what'?s in the box|includes)\b/i, 20);
+    extra.forEach(pushIfGood);
   }
 
   const seen = new Set();
@@ -1912,7 +1926,8 @@ function resolveTabPane($, names){
   });
 
   if (!pane){
-    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
+    // EXTENDED pane classes (Magento/WordPress selectors added)
+    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items').each((_, el)=>{
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
       if (heading && nameRe.test(heading)) { pane = el; return false; }
     });
@@ -2009,6 +2024,23 @@ function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Fea
     .join('\n');
 }
 
+/* ===== NEW helper: list after heading (TABS-ONLY use) ===== */
+function extractListAfterHeadingInContainer($, container, re, max = 20) {
+  const out = [];
+  $(container).find('h1,h2,h3,h4,h5,strong,b').each((_, h) => {
+    const t = cleanup($(h).text());
+    if (!t || !re.test(t)) return;
+    const $ul = $(h).nextAll('ul,ol').first();
+    $ul.find('li').each((i, li) => {
+      const s = cleanup($(li).text());
+      if (s && s.length >= 7 && s.length <= 220) out.push(s);
+      if (out.length >= max) return false;
+    });
+    if (out.length >= max) return false;
+  });
+  return out;
+}
+
 function resolveAllPanes($, names){
   const out = new Set();
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
@@ -2032,7 +2064,8 @@ function resolveAllPanes($, names){
     }
   });
 
-  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
+  // EXTENDED selectors for Magento 2 + generic platforms
+  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
@@ -2075,15 +2108,23 @@ function extractSpecsFromContainer($, container){
     }
   });
 
-  $c.find('li').each((_, li)=>{
-    const t = cleanup($(li).text());
-    if (!t || t.length < 3 || t.length > 250) return;
-    const m = t.split(/[:\-–]\s+/);
-    if (m.length >= 2){
-      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-      const v = m.slice(1).join(': ').trim();
+  // LI & P pairs + ALL-CAPS stack within the tab container
+  $c.find('li, p').each((_, el)=>{
+    const t = cleanup($(el).text());
+    if (!t || t.length < 3 || t.length > 300) return;
+
+    // classic "k: v" / "k - v"
+    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
+    if (m){
+      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m[2];
       if (k && v && !out[k]) out[k]=v;
+      return;
     }
+
+    // NEW: ALL-CAPS label followed by value (e.g., "WAVELENGTH RANGE 200-1000nm")
+    const uv = parseUpperSpecLine(t);
+    if (uv && !out[uv[0]]) out[uv[0]] = uv[1];
   });
 
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
@@ -2098,12 +2139,32 @@ function extractSpecsFromContainer($, container){
 function collectManualsFromContainer($, container, baseUrl, sinkSet){
   const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr('href') || "");
+
+  // Anchors with various attributes and non-direct PDF routes
+  $(container).find('a').each((_, el)=>{
+    const $el = $(el);
+    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file') || "";
+    const txt  = cleanup($el.text() || $el.attr('aria-label') || "");
     const full = abs(baseUrl, href);
+    const L = (txt + " " + (full || "")).toLowerCase();
     if (!full) return;
-    const L = full.toLowerCase();
-    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
+    if ((/\.pdf(?:[?#].*)?$/i.test(full) || /document|view|download|asset|file/i.test(full)) && allowRe.test(L) && !blockRe.test(L)) {
+      sinkSet.add(full);
+    }
+  });
+
+  // onclick handlers opening PDF
+  $(container).find('a[onclick], button[onclick]').each((_, el)=>{
+    const s = String($(el).attr('onclick') || '');
+    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
+    if (m) sinkSet.add(abs(baseUrl, m[0]));
+  });
+
+  // Embedded PDFs
+  $(container).find('object[type="application/pdf"], embed[type="application/pdf"], iframe[src*=".pdf"]').each((_, el)=>{
+    const $el = $(el);
+    const u = $el.attr('data') || $el.attr('src') || "";
+    if (u) sinkSet.add(abs(baseUrl, u));
   });
 }
 
@@ -2123,6 +2184,12 @@ function extractFeaturesFromContainer($, container){
 
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
+
+  // EXTRA (TABS-ONLY): lists right after headings "Features" / "What's in the box"
+  if (items.length < 5) {
+    const extra = extractListAfterHeadingInContainer($, $c, /\b(features|what'?s in the box|includes)\b/i, 20);
+    extra.forEach(pushIfGood);
+  }
 
   const seen = new Set();
   const out = [];
@@ -2396,10 +2463,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
       const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
 
-      const specNames = ['specification','specifications','technical specifications','tech specs','details'];
-      const featNames = ['features','features/benefits','benefits','key features','highlights'];
+      const specNames = ['specification','specifications','technical specifications','tech specs','details','size & weight','size and weight']; // ADDED
+      const featNames = ['features','features/benefits','benefits','key features','highlights','what’s in the box','whats in the box','includes']; // ADDED
       const downNames = ['downloads','documents','technical resources','resources'];
-      const descNames = ['overview','description','product details','details'];
+      const descNames = ['overview','description','product details','details','product information']; // ADDED
 
       const addSpecs   = {};
       const addManuals = new Set();
@@ -2459,10 +2526,11 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   }
   // === end Dojo/dijit pre-pass ===
 
-  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
+  // EXTENDED pane-name sets for generic platforms
+  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details','size & weight','size and weight' ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
-  const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
-  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
+  const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights','what’s in the box','whats in the box','includes' ]);
+  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details','product information' ]);
 
   const addSpecs = {};
   for (const el of specPanes) {
