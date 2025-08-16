@@ -21,14 +21,8 @@ app.get("/healthz", (_, res) => res.json({ ok: true }));
  */
 app.get("/ingest", async (req, res) => {
   try {
-    const rawUrl = String(req.query.url || "");
-    if (!rawUrl) return res.status(400).json({ error: "Missing url param" });
-
-    // Accept BOTH raw and pre-encoded URLs without double-encoding
-    const targetUrl = safeDecodeOnce(rawUrl);
-    if (!/^https?:\/\//i.test(targetUrl)) {
-      return res.status(400).json({ error: "Invalid url param" });
-    }
+    const url = String(req.query.url || "");
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Missing or invalid url param" });
     if (!RENDER_API_URL) return res.status(500).json({ error: "RENDER_API_URL not set" });
 
     const selector = req.query.selector ? `&selector=${encodeURIComponent(String(req.query.selector))}` : "";
@@ -36,8 +30,8 @@ app.get("/ingest", async (req, res) => {
     const timeout = req.query.timeout != null ? `&timeout=${encodeURIComponent(String(req.query.timeout))}` : "";
     const mode = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=fast";
 
-    const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
-    const headers = { "User-Agent": "MedicalExIngest/1.2" };
+    const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(url)}${selector}${wait}${timeout}${mode}`;
+    const headers = { "User-Agent": "MedicalExIngest/1.1" };
     if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
 
     // Retry renderer 3x (handles cold starts & flaky nav)
@@ -57,7 +51,7 @@ app.get("/ingest", async (req, res) => {
     }
     if (!html) return res.status(502).json({ error: "Render API failed", body: `status=${lastStatus} body=${lastBody.slice(0,280)}` });
 
-    const norm = extractNormalized(targetUrl, html);
+    const norm = extractNormalized(url, html);
     if (!norm.name_raw && (!norm.description_raw || norm.description_raw.length < 10)) {
       return res.status(422).json({ error: "No extractable product data (JSON-LD/DOM empty)." });
     }
@@ -86,7 +80,7 @@ function extractNormalized(baseUrl, html) {
   let brand = cleanup(jsonld.brand || "");
   if (!brand) brand = inferBrandFromName(name);
 
-  // Description (also mine tab panes)
+  // Description
   const description_raw = cleanup(
     jsonld.description ||
     pickBestDescriptionBlock($) ||
@@ -95,7 +89,7 @@ function extractNormalized(baseUrl, html) {
     ""
   );
 
-  const images = extractImages($, jsonld, og, baseUrl, name, html);
+  const images = extractImages($, jsonld, og, baseUrl, name);
   const manuals = extractManuals($, baseUrl);
   const specs = Object.keys(jsonld.specs || {}).length ? jsonld.specs : extractSpecTable($);
   const features = jsonld.features && jsonld.features.length ? jsonld.features : extractFeatureList($);
@@ -151,18 +145,14 @@ function schemaPropsToSpecs(props){
 }
 
 function pickBestDescriptionBlock($){
-  // Common product description containers + tab panes
   const candidates = [
     '[itemprop="description"]',
-    '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description',
-    '.tab-content, .tabs-content, .panel, [role="tabpanel"], #tabs'
+    '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description'
   ].join(', ');
 
   let text = "";
   $(candidates).each((_, el) => {
-    // concatenate paragraphs within a candidate for richer text
-    let t = $(el).find('p, li').map((__, n)=>$(n).text()).get().join(' ');
-    t = cleanup(t || $(el).text());
+    const t = cleanup($(el).text());
     if (t && t.length > text.length) text = t;
   });
 
@@ -184,8 +174,8 @@ function inferBrandFromName(name){
   return "";
 }
 
-/* === IMAGE EXTRACTION & SCORING (handles lazy + regex sweep + filters junk) === */
-function extractImages($, jsonld, og, baseUrl, name, rawHtml){
+/* === IMAGE EXTRACTION & SCORING (handles lazy + filters junk) === */
+function extractImages($, jsonld, og, baseUrl, name){
   const set = new Set();
   const push = (u)=> { if (u) set.add(abs(baseUrl,u)); };
 
@@ -200,6 +190,7 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
       $el.attr("src"),
       $el.attr("data-src"),
       $el.attr("data-zoom-image"),
+      // pick first URL from srcset
       pickFirstFromSrcset($el.attr("srcset")),
     ];
     cands.forEach(push);
@@ -210,22 +201,8 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
     push(pickFirstFromSrcset($(el).attr("srcset")));
   });
 
-  // background-image in inline styles
-  $('[style*="background"]').each((_, el)=>{
-    const style = String($(el).attr("style") || "");
-    const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) push(m[2]);
-  });
-
   // link rel=image_src (old pattern)
   $('link[rel="image_src"]').each((_, el)=> push($(el).attr("href")));
-
-  // Regex sweep for compass-style asset paths in raw HTML
-  if (rawHtml && /\/media\/images\/items\//i.test(rawHtml)) {
-    const re = /(https?:\/\/[^\s"'<>]+\/media\/images\/items\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-    let m;
-    while ((m = re.exec(rawHtml))) push(m[1]);
-  }
 
   // Decode, filter junk
   let arr = Array.from(set)
@@ -251,7 +228,9 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
     if (preferRe.test(L)) score += 3;
     if (codeGuess && L.includes(codeGuess.toLowerCase())) score += 3;
     if (titleTokens.some(t => L.includes(t))) score += 1;
+    // deprioritize thumbnails
     if (/thumb|small|tiny|icon|badge/.test(L)) score -= 1;
+    // prioritize bigger-looking
     if (/(_\d{3,}x\d{3,}|-?1200x|\/large\/|\/hi(res)?\/)/.test(L)) score += 1;
     return { url: u, score };
   });
@@ -273,11 +252,13 @@ function extractImages($, jsonld, og, baseUrl, name, rawHtml){
 
 function pickFirstFromSrcset(srcset){
   if (!srcset) return "";
+  // srcset: "url1 1x, url2 2x" or "url 300w, url2 600w"
   const parts = String(srcset).split(",").map(s=>s.trim().split(/\s+/)[0]).filter(Boolean);
   return parts[0] || "";
 }
 
 function guessProductCodeFromUrl(url){
+  // For compasshealthbrands, product code sits in the URL path: /item/BSCWB/...
   try {
     const m = /\/item\/([^\/?#]+)/i.exec(url);
     return m ? m[1] : "";
@@ -323,7 +304,7 @@ function extractSpecTable($){
 
 function extractFeatureList($){
   const items=[];
-  const areas = ['.features, .feature-list, ul.features, .bullet, .bullets', 'ul, ol', '.tab-content, .tabs-content'].join(', ');
+  const areas = ['.features, .feature-list, ul.features, .bullet, .bullets', 'ul, ol'].join(', ');
   $(areas).each((_, el)=>{
     $(el).find('li').each((__, li)=>{
       const txt=cleanup($(li).text());
@@ -340,17 +321,6 @@ function extractFeatureList($){
 }
 
 /* ================== Utils ================== */
-function safeDecodeOnce(s){
-  try {
-    // If it's already raw, decodeURIComponent will return the same string (no %)
-    // If it's encoded, this will properly decode it (once).
-    const decoded = decodeURIComponent(s);
-    // Guard: if decoding introduced illegal chars, fall back
-    if (!decoded || /%[0-9A-Fa-f]{2}/.test(decoded)) return s;
-    return decoded;
-  } catch { return s; }
-}
-
 function decodeHtml(s){ return s ? s.replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>') : s; }
 function cleanup(s){ return String(s||'').replace(/\s+/g,' ').trim(); }
 function abs(base, link){
