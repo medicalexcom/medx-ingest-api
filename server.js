@@ -408,10 +408,23 @@ function extractNormalized(baseUrl, html, opts) {
         if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
       });
 
-      // 2) Fallback: longest paragraph anywhere in main content
+      // ADD: skip footer/nav wrappers & legal-like text
+      if (isFooterOrNav($, el)) return;
+      
+      const elText = cleanup($(el).text() || "");
+      if (!elText) return;
+      // If it looks like footer/legal, ignore it
+      if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
+
+      // 2) Fallback: longest paragraph anywhere in main content (skip footer/nav)
       if (!best) {
-        const scope = $('main,#main,.main,#content,.content,body').first();
-        const paras = scope.find('p').map((i, el) => cleanup($(el).text())).get();
+        const scope = $('main,#main,.main,#content,.content').first(); // avoid body-wide scan
+        const paras = scope.find('p').map((i, el) => {
+          if (isFooterOrNav($, el)) return "";
+          const t = cleanup($(el).text());
+          return LEGAL_MENU_RE.test(t) ? "" : t;
+        }).get().filter(Boolean);
+      
         best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), "");
       }
       return best || "";
@@ -1337,6 +1350,9 @@ function extractSpecsSmart($){
     const scoped = extractSpecsFromContainer($, specPane);
     if (Object.keys(scoped).length) return scoped;
   }
+  if (specPane && isFooterOrNav($, specPane)) {
+  specPane = null; // ignore footer "details" containers
+  }
 
   const dense = extractSpecsFromDensestBlock($);
   if (Object.keys(dense).length) return dense;
@@ -1687,6 +1703,8 @@ function resolveAllPanes($, names){
 
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
+  // ADD: avoid footer/nav contamination
+if (isFooterOrNav($, container)) return {};
   const out = {};
   const $c = $(container);
 
@@ -1805,6 +1823,10 @@ function extractDescriptionFromContainer($, container){
 }
 /* ====== Markdown builders ====== */
 function extractDescriptionMarkdown($){
+if (isFooterOrNav($, el)) return;
+const txt = cleanup($(el).text());
+if (LEGAL_MENU_RE.test(txt) || /^©\s?\d{4}/.test(txt)) return;
+
   const candidates = [
     '[itemprop="description"]',
     '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
