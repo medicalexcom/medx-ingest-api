@@ -444,7 +444,7 @@ function extractNormalized(baseUrl, html, opts) {
 
   /* ==== MEDX ADD-ONLY: merge JSON-LD specs from all Product nodes v1 ==== */
   try {
-    const jsonldAll = extractJsonLdAllProductSpecs($);
+    const jsonldAll = extractJsonLdAllProductSpecs($); // (ADD: now internally constrained to same page)
     if (jsonldAll && Object.keys(jsonldAll).length) {
       specs = mergeSpecsAdditive(specs, jsonldAll);
     }
@@ -457,6 +457,9 @@ function extractNormalized(baseUrl, html, opts) {
       specs = mergeSpecsAdditive(specs, globalPairs);
     }
   } catch {}
+
+  // ==== ADD: prune parts/accessories noise from specs (add-only) ====
+  try { specs = prunePartsLikeSpecs(specs); } catch {}
 
   let features = (mergedSD.features && mergedSD.features.length) ? mergedSD.features : extractFeaturesSmart($);
 
@@ -478,7 +481,6 @@ function extractNormalized(baseUrl, html, opts) {
     brand
   };
 }
-
 /* ================== Structured Data Extractors ================== */
 function schemaPropsToSpecs(props){
   const out = {};
@@ -977,7 +979,7 @@ function extractSpecsFromScripts($, container /* optional */) {
   return enrichSpecsWithDerived(canon);
 }
 
-/* ==== MEDX ADD-ONLY: JSON-LD extras from all Product nodes v1 ==== */
+/* ==== MEDX ADD-ONLY: JSON-LD extras from all Product nodes v1 (ADD: now filtered to page) ==== */
 function extractJsonLdAllProductSpecs($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -991,9 +993,38 @@ function extractJsonLdAllProductSpecs($){
       });
     } catch {}
   });
+
+  // ADD: detect page canonical URL to constrain merges
+  const pageUrl =
+    $('link[rel="canonical"]').attr('href') ||
+    $('meta[property="og:url"]').attr('content') ||
+    "";
+
+  let pageHost = "";
+  let pagePath = "";
+  try {
+    const u = new URL(pageUrl);
+    pageHost = (u.hostname || "").toLowerCase();
+    pagePath = u.pathname || "";
+  } catch {}
+
   const prods = nodes.filter(n => String(n && n['@type'] || '').toLowerCase().includes('product'));
+
+  // ADD: narrow to products that belong to the same page/host if possible
+  const filtered = prods.filter(p => {
+    const url = String(p.url || p['@id'] || "");
+    if (!url) return !!pageHost ? false : true;
+    try {
+      const u = new URL(url, pageUrl || "https://example.com/");
+      if (pageHost && u.hostname.toLowerCase() !== pageHost) return false;
+      if (pagePath && u.pathname && u.pathname !== pagePath) return false;
+      return true;
+    } catch { return false; }
+  });
+
+  const chosen = filtered.length ? filtered : (prods.length ? [prods[0]] : []);
   const merged = {};
-  for (const p of prods) {
+  for (const p of chosen) {
     const specs = schemaPropsToSpecs(
       p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
     );
@@ -1002,13 +1033,13 @@ function extractJsonLdAllProductSpecs($){
   return merged;
 }
 
-/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware) ==== */
+/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware & parts-aware) ==== */
 function extractAllSpecPairs($){
   const out = {};
 
   // Tables
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl)) return; // ADD reco guard
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
     let hits = 0;
     const local = {};
     $(tbl).find('tr').each((__, tr)=>{
@@ -1368,7 +1399,7 @@ function extractSpecsSmart($){
   
   // Tables (global fallback)
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl)) return; // ADD reco guard
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -1719,6 +1750,7 @@ function extractSpecsFromContainer($, container){
   const $c = $(container);
 
   $c.find('table').each((_, tbl)=>{
+    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
@@ -1990,18 +2022,64 @@ function isFooterOrNav($, el){
 
 // ADD: recommendation/reco block detector (prevents spec leakage from “related/also viewed/etc.”)
 function isRecoBlock($, el){
-  return $(el).closest(
+  if ($(el).closest(
     '.related, .related-products, #related-products, ' +
     '.upsell, .cross-sell, .crosssell, .you-may-also-like, ' +
     '.recommended, .recommendations, .product-recommendations, .product-recs, [data-recommendations], ' +
     '.frequently-bought, .frequently-bought-together, .fbt, ' +
     '.also-viewed, .people-also-viewed, .also-bought, .customers-also-bought, ' +
     '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
-  ).length > 0;
+  ).length > 0) return true;
+
+  // ADD: extra coverage for sites using singular `.recommendation`, "co-viewed", and explicit data flags
+  if ($(el).closest('.recommendation, .co-viewed, [data-br-request-type="recommendation"]').length > 0) return true;
+
+  return false;
 }
 
 const LEGAL_MENU_RE = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|sign\s*in)\b/i;
 
+/* ===== ADD: Parts/accessory table detection & pruning (add-only) ===== */
+const PARTS_HEADER_RE = /\b(no\.?|part(?:\s*no\.?)?|item(?:\s*description)?|qty(?:\s*req\.)?|quantity|price)\b/i;
+
+function isPartsOrAccessoryTable($, tbl){
+  try {
+    // header scan
+    const header = $(tbl).find('tr').first().find('th,td')
+      .map((_,c)=>cleanup($(c).text())).get().join(' | ');
+    if (PARTS_HEADER_RE.test(header)) return true;
+
+    // row heuristics
+    let numericFirstCol = 0, itemLinks = 0, rows = 0;
+    $(tbl).find('tr').each((_, tr)=>{
+      const cells = $(tr).find('td,th');
+      if (cells.length < 2) return;
+      rows++;
+      const first = cleanup($(cells[0]).text());
+      if (/^\d+$/.test(first)) numericFirstCol++;
+      if ($(cells[1]).find('a[href*="/item/"], a[href*="/product/"]').length) itemLinks++;
+    });
+    return (rows >= 3 && numericFirstCol >= 2 && itemLinks >= 2);
+  } catch { return false; }
+}
+
+function prunePartsLikeSpecs(specs = {}){
+  const out = {};
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?)$/i;
+
+  for (const [k, v] of Object.entries(specs || {})) {
+    const key = String(k || "").trim();
+    const val = String(v || "").trim();
+    // drop empty
+    if (!key || !val) continue;
+    // drop numeric index keys (1, 2, 3…)
+    if (/^\d+$/.test(key)) continue;
+    // drop classic parts table headers masquerading as specs
+    if (BAD_KEYS.test(key)) continue;
+    out[key] = val;
+  }
+  return out;
+}
 
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
@@ -2055,7 +2133,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       }
 
       if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
-      if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...addSpecs };
+      if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
 
       if (addFeatures.length) {
         const seen = new Set((norm.features_raw || []).map(v=>String(v).toLowerCase()));
@@ -2106,7 +2184,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   }
 
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
-  if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...addSpecs };
+  if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
 
   if (addFeatures.length) {
     const seen = new Set((norm.features_raw || []).map(v=>String(v).toLowerCase()));
