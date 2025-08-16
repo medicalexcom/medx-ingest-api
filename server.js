@@ -398,6 +398,12 @@ function extractNormalized(baseUrl, html, opts) {
 
       let best = "";
       $(selectors).each((_, el) => {
+        // ADD: skip footer/nav wrappers & legal-like text
+        if (isFooterOrNav($, el)) return;
+        const elText = cleanup($(el).text() || "");
+        if (!elText) return;
+        if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
+
         const $el = $(el);
         // headings + lead + paragraphs feel like a true description
         const text = [
@@ -408,14 +414,6 @@ function extractNormalized(baseUrl, html, opts) {
         if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
       });
 
-      // ADD: skip footer/nav wrappers & legal-like text
-      if (isFooterOrNav($, el)) return;
-      
-      const elText = cleanup($(el).text() || "");
-      if (!elText) return;
-      // If it looks like footer/legal, ignore it
-      if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
-
       // 2) Fallback: longest paragraph anywhere in main content (skip footer/nav)
       if (!best) {
         const scope = $('main,#main,.main,#content,.content').first(); // avoid body-wide scan
@@ -424,7 +422,7 @@ function extractNormalized(baseUrl, html, opts) {
           const t = cleanup($(el).text());
           return LEGAL_MENU_RE.test(t) ? "" : t;
         }).get().filter(Boolean);
-      
+
         best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), "");
       }
       return best || "";
@@ -1346,12 +1344,14 @@ function extractSpecsSmart($){
     'technical specifications','technical specification',
     'tech specs','specifications','specification','details'
   ]);
+  // ADD: Make spec pane selection “footer-aware”
+  if (specPane && isFooterOrNav($, specPane)) {
+    specPane = null;
+  }
+
   if (specPane) {
     const scoped = extractSpecsFromContainer($, specPane);
     if (Object.keys(scoped).length) return scoped;
-  }
-  if (specPane && isFooterOrNav($, specPane)) {
-  specPane = null; // ignore footer "details" containers
   }
 
   const dense = extractSpecsFromDensestBlock($);
@@ -1704,7 +1704,7 @@ function resolveAllPanes($, names){
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
   // ADD: avoid footer/nav contamination
-if (isFooterOrNav($, container)) return {};
+  if (isFooterOrNav($, container)) return {};
   const out = {};
   const $c = $(container);
 
@@ -1823,10 +1823,6 @@ function extractDescriptionFromContainer($, container){
 }
 /* ====== Markdown builders ====== */
 function extractDescriptionMarkdown($){
-if (isFooterOrNav($, el)) return;
-const txt = cleanup($(el).text());
-if (LEGAL_MENU_RE.test(txt) || /^©\s?\d{4}/.test(txt)) return;
-
   const candidates = [
     '[itemprop="description"]',
     '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
@@ -1835,7 +1831,12 @@ if (LEGAL_MENU_RE.test(txt) || /^©\s?\d{4}/.test(txt)) return;
 
   let bestEl = null, bestLen = 0;
   $(candidates).each((_, el)=>{
-    const text = cleanup($(el).text());
+    // ADD: skip footer/nav & legal-like text nodes
+    if (isFooterOrNav($, el)) return;
+    const textCheck = cleanup($(el).text());
+    if (LEGAL_MENU_RE.test(textCheck) || /^©\s?\d{4}/.test(textCheck)) return;
+
+    const text = textCheck;
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
   if (!bestEl) return "";
@@ -2253,7 +2254,7 @@ function harvestCompassOverview($){
 
     $p.find('p').each((__, el)=> push($(el).text()));
     $p.find('ul li, ol li').each((__, el)=>{
-      const t = cleanup($(el).text());
+      const t = cleanup($(el).text()));
       if (t && t.length <= 220) parts.push(`• ${t}`);
     });
 
