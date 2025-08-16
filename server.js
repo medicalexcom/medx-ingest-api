@@ -312,7 +312,7 @@ app.get("/ingest", async (req, res) => {
 
     const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
     const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
-    const doHarvest  = String(req.query.harvest   || "false").toLowerCase() === "true";
+    const doHarvest  = String(req.query.harvest   ?? "true").toLowerCase() === "true"; // TABS: default ON
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
     const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
 
@@ -1608,7 +1608,7 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   // 2) onclick handlers that open PDFs
   $('a[onclick], button[onclick]').each((_, el) => {
     const s = String($(el).attr('onclick') || '');
-    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
+    const m = /https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i.exec(s);
     if (m) push(el, m[0], 3);
   });
 
@@ -1886,17 +1886,26 @@ function deriveFeaturesFromParagraphs($){
 /* === Resolve tabs === */
 function escapeRe(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
+/* ===== TABS: robust CSS id escape (Node lacks CSS.escape) ===== */
+function cssEscapeId(id = "") {
+  return String(id).replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
+}
+
 function documentQueryById($, id){
-  try { return id ? $(`#${CSS.escape(id)}`)[0] : null; }
-  catch { return id ? $(`#${id}`)[0] : null; }
+  try {
+    return id ? $(`#${cssEscapeId(id)}`)[0] : null;
+  } catch {
+    return id ? $(`#${id}`)[0] : null;
+  }
 }
 
 function resolveTabPane($, names){
-  const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
+  // TABS: fuzzy match instead of exact
+  const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
   let pane = null;
 
   $('a,button,[role="tab"]').each((_, el)=>{
-    const label = cleanup($(el).text());
+    const label = cleanup($(el).text()).replace(/\s+/g, ' ');
     if (!label || !nameRe.test(label)) return;
 
     const href = $(el).attr('href') || '';
@@ -1947,7 +1956,7 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
 
     let $panel;
     try {
-      $panel = $(`#${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(paneId) : paneId}`);
+      $panel = $(`#${cssEscapeId(paneId)}`);
     } catch {
       $panel = $(`#${paneId}`);
     }
@@ -2002,18 +2011,20 @@ function discoverLazyTabUrls($, baseUrl) {
   const urls = new Set();
 
   // Look at probable tab triggers
-  $('a[role="tab"], button[role="tab"], .tabs a, .tab a, [data-tab], [data-target], [data-remote], [data-url], [data-href]')
+  $('a[role="tab"], button[role="tab"], .tabs a, .tab a, [data-tab], [data-target], [data-remote], [data-url], [data-href], [data-content-url], [data-ajax-url]')
     .each((_, el) => {
       const $el = $(el);
-      const cand = $el.attr('data-url') || $el.attr('data-href') || $el.attr('data-remote') ||
-                   $el.attr('href') || $el.attr('data-load') || '';
+      const cand =
+        $el.attr('data-url') || $el.attr('data-href') || $el.attr('data-remote') ||
+        $el.attr('data-content-url') || $el.attr('data-ajax-url') ||
+        $el.attr('data-load') || $el.attr('href') || '';
       if (!cand) return;
 
       const u = cand.trim();
       if (!u || u === '#' || u.startsWith('javascript:')) return;
 
-      // absolute or site-relative URL → treat as remote fragment
-      if (/^https?:\/\//i.test(u) || u.startsWith('/') || /\.html?(\?|#|$)/i.test(u)) {
+      // Accept absolute or site-relative URLs
+      if (/^https?:\/\//i.test(u) || u.startsWith('/')) {
         urls.add(abs(baseUrl, u));
       }
     });
@@ -2073,7 +2084,7 @@ function resolveAllPanes($, names){
     }
   });
 
-  // Heuristic: panels/sections with matching headings (incl. Magento 2 selectors)
+  // Heuristic: panels/sections with matching headings (incl. Magento 2)
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
@@ -2168,7 +2179,7 @@ function collectManualsFromContainer($, container, baseUrl, sinkSet){
   const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr('href') || "");
+    const href = String($(el).attr("href") || "");
     const full = abs(baseUrl, href);
     if (!full) return;
     const L = full.toLowerCase();
@@ -2465,10 +2476,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
       const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
 
-      const specNames = ['specification','specifications','technical specifications','tech specs','details'];
+      const specNames = ['spec','specs','specification','specifications','technical specifications','technical data','tech specs','tech data','details','product details'];
       const featNames = ['features','features/benefits','benefits','key features','highlights'];
-      const downNames = ['downloads','documents','technical resources','resources'];
-      const descNames = ['overview','description','product details','details'];
+      const downNames = ['downloads','documents','technical resources','resources','downloads & manuals'];
+      const descNames = ['overview','description','product details','details','about'];
 
       const addSpecs   = {};
       const addManuals = new Set();
@@ -2586,12 +2597,12 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   // === end generic lazy fragments ===
 
   const specPanes   = resolveAllPanes($, [
-    'specification','specifications','technical specifications','tech specs','details',
+    'spec','specs','specification','specifications','technical specifications','technical data','tech specs','tech data','details','product details',
     'size & weight','size and weight'
   ]);
-  const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
+  const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation','downloads & manuals' ]);
   const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
-  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
+  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details','about' ]);
 
   const addSpecs = {};
   for (const el of specPanes) {
