@@ -387,7 +387,8 @@ app.get("/ingest", async (req, res) => {
           norm.description_raw = merged.join("\n");
         }
       } catch(e){
-        diag.warnings.push(`compass-overview: ${e.message||e}`);
+        const msg = e && e.message ? e.message : String(e);
+        diag.warnings.push(`compass-overview: ${msg}`);
       }
 
       // (2) Technical Specifications (union-merge; existing keys win)
@@ -397,7 +398,8 @@ app.get("/ingest", async (req, res) => {
           norm.specs = { ...(norm.specs || {}), ...compassSpecs };
         }
       } catch(e){
-        diag.warnings.push(`compass-specs: ${e.message||e}`);
+        const msg = e && e.message ? e.message : String(e);
+        diag.warnings.push(`compass-specs: ${msg}`);
       }
     }
     // === end Compass-only additions ===
@@ -818,6 +820,7 @@ function inferSizeFromUrl(u) {
     return out;
   } catch { return { w: 0, h: 0 }; }
 }
+
 /* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
 /* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
 
@@ -1203,37 +1206,49 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
   const set = new Set();
   const imgWeights = new Map();
-  const push = (u, weight = 0) => {
+
+  // NEW: track image context (main gallery vs. related/upsell) for scoring
+  const imgContext = new Map(); // url -> { inReco: bool, inMain: bool }
+  const markCtx = (absu, ctx) => {
+    const prev = imgContext.get(absu) || { inReco:false, inMain:false };
+    imgContext.set(absu, { inReco: prev.inReco || !!ctx.inReco, inMain: prev.inMain || !!ctx.inMain });
+  };
+
+  const push = (u, weight = 0, ctx = null) => {
     if (!u) return;
     const absu = abs(baseUrl, u);
     if (!absu) return;
     if (!imgWeights.has(absu)) imgWeights.set(absu, 0);
     imgWeights.set(absu, Math.max(imgWeights.get(absu), weight));
+    if (ctx) markCtx(absu, ctx);
     set.add(absu);
   };
 
-  // structured data images
-  (structured.images || []).forEach(u => push(u, 3));
+  // structured data images — prefer strongly
+  (structured.images || []).forEach(u => push(u, 8, { inMain: true }));
 
-  // gallery containers
+  // gallery containers (skip related/recommendation blocks entirely)
   const gallerySelectors = [
     '.product-media','.product__media','.product-gallery','.gallery','.media-gallery','#product-gallery','#gallery','[data-gallery]',
     '.product-images','.product-image-gallery','.pdp-gallery','.slick-slider','.slick','.swiper','.swiper-container','.carousel',
     '.owl-carousel','.fotorama','.MagicZoom','.cloudzoom-zoom','.zoomWindow','.zoomContainer','.lightbox','.thumbnails'
   ].join(', ');
   $(gallerySelectors).find('img, source').each((_, el) => {
+    if (isRecoBlock($, el)) return;
     const $el = $(el);
     const cands = [
       $el.attr('src'), $el.attr('data-src'), $el.attr('data-srcset'),
       $el.attr('data-original'), $el.attr('data-large_image'), $el.attr('data-image'),
       $el.attr('data-zoom'), pickLargestFromSrcset($el.attr('srcset')),
     ];
-    cands.forEach(u => push(u, 3));
+    cands.forEach(u => push(u, 6, { inReco:false, inMain: isMainProductNode($, el) }));
   });
 
-  if (og.image) push(og.image, 2);
+  if (og.image) push(og.image, 3, { inMain: true });
 
+  // page-wide images (skip recommendation areas)
   $("img").each((_, el) => {
+    if (isRecoBlock($, el)) return;
     const $el = $(el);
     const cands = [
       $el.attr("src"), $el.attr("data-src"), $el.attr("data-srcset"),
@@ -1241,38 +1256,45 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
       $el.attr("data-large_image"), $el.attr("data-image"),
       pickLargestFromSrcset($el.attr("srcset")),
     ];
-    cands.forEach(u => push(u, 1));
+    cands.forEach(u => push(u, 2, { inReco:false, inMain: isMainProductNode($, el) }));
   });
 
   // noscript fallbacks
   $("noscript").each((_, n)=>{
+    if (isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
     const _$ = cheerio.load(inner);
     _$("img").each((__, el)=>{
       const src = _$(el).attr("src") || _$(el).attr("data-src") || pickLargestFromSrcset(_$(el).attr("srcset"));
-      if (src) push(src, 2);
+      if (src) push(src, 3, { inReco:false, inMain: isMainProductNode($, n) });
     });
   });
 
-  $("picture source[srcset]").each((_, el) => { push(pickLargestFromSrcset($(el).attr("srcset")), 1); });
-
-  $('[style*="background"]').each((_, el) => {
-    const style = String($(el).attr("style") || "");
-    const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) push(m[2], 1);
+  // picture/srcset
+  $("picture source[srcset]").each((_, el) => {
+    if (isRecoBlock($, el)) return;
+    push(pickLargestFromSrcset($(el).attr("srcset")), 2, { inReco:false, inMain: isMainProductNode($, el) });
   });
 
-  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1));
+  // backgrounds
+  $('[style*="background"]').each((_, el) => {
+    if (isRecoBlock($, el)) return;
+    const style = String($(el).attr("style") || "");
+    const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
+    if (m && m[2]) push(m[2], 2, { inReco:false, inMain: isMainProductNode($, el) });
+  });
+
+  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1, { inMain: true }));
 
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!txt || !/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
     try {
       const obj = JSON.parse(txt);
-      deepFindImagesFromJson(obj).forEach(u => push(u, 2));
+      deepFindImagesFromJson(obj).forEach(u => push(u, 2, { inMain: true }));
     } catch {
       const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(m[1], 1);
+      let m; while ((m = re.exec(txt))) push(m[1], 1, { inMain: true });
     }
   });
 
@@ -1292,8 +1314,10 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     host.includes("motifmedical")        ? "/wp-content/uploads|/product|/images" : ""
   ].filter(Boolean).join("|"), "i");
 
+  // EXPANDED placeholder filter
   const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
+    'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
     'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
     '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/'
   ];
@@ -1321,8 +1345,14 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (allowHostRe.source.length && allowHostRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 3;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
-    if (/thumb|thumbnail|small|tiny|badge|mini|icon/.test(L)) score -= 2;
+    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3; // stronger downweight incl. swatch
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
+
+    // Context-aware penalties/bonuses
+    const ctx = imgContext.get(u) || {};
+    if (ctx.inReco) score -= 5;
+    if (ctx.inMain) score += 3;
+
     return { url: u, score };
   });
 
@@ -1545,7 +1575,6 @@ function extractManuals($, baseUrl, name, rawHtml, opts){
 
   return arr;
 }
-
 /* ================== ADD-ONLY: Enhanced manuals harvester ================== */
 function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
@@ -1678,7 +1707,7 @@ function extractSpecsSmart($){
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k=cleanup($(cells[0]).text());
-        const v=cleanup($(cells[1]).text());
+        const v=cleanup($(cells[1]).text()));
         if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return; // ADD
         const kk = k.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         if (kk && v && kk.length<80 && v.length<400) out[kk]=v;
@@ -2518,7 +2547,8 @@ function sanitizeIngestPayload(p) {
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
-  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
+  // EXPANDED bad image filter to exclude placeholders
+  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice(0, 12);
