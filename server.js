@@ -387,8 +387,7 @@ app.get("/ingest", async (req, res) => {
           norm.description_raw = merged.join("\n");
         }
       } catch(e){
-        const msg = e && e.message ? e.message : String(e);
-        diag.warnings.push(`compass-overview: ${msg}`);
+        diag.warnings.push(`compass-overview: ${e.message||e}`);
       }
 
       // (2) Technical Specifications (union-merge; existing keys win)
@@ -398,8 +397,7 @@ app.get("/ingest", async (req, res) => {
           norm.specs = { ...(norm.specs || {}), ...compassSpecs };
         }
       } catch(e){
-        const msg = e && e.message ? e.message : String(e);
-        diag.warnings.push(`compass-specs: ${msg}`);
+        diag.warnings.push(`compass-specs: ${e.message||e}`);
       }
     }
     // === end Compass-only additions ===
@@ -820,7 +818,6 @@ function inferSizeFromUrl(u) {
     return out;
   } catch { return { w: 0, h: 0 }; }
 }
-
 /* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
 /* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
 
@@ -1206,49 +1203,37 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
   const set = new Set();
   const imgWeights = new Map();
-
-  // NEW: track image context (main gallery vs. related/upsell) for scoring
-  const imgContext = new Map(); // url -> { inReco: bool, inMain: bool }
-  const markCtx = (absu, ctx) => {
-    const prev = imgContext.get(absu) || { inReco:false, inMain:false };
-    imgContext.set(absu, { inReco: prev.inReco || !!ctx.inReco, inMain: prev.inMain || !!ctx.inMain });
-  };
-
-  const push = (u, weight = 0, ctx = null) => {
+  const push = (u, weight = 0) => {
     if (!u) return;
     const absu = abs(baseUrl, u);
     if (!absu) return;
     if (!imgWeights.has(absu)) imgWeights.set(absu, 0);
     imgWeights.set(absu, Math.max(imgWeights.get(absu), weight));
-    if (ctx) markCtx(absu, ctx);
     set.add(absu);
   };
 
-  // structured data images — prefer strongly
-  (structured.images || []).forEach(u => push(u, 8, { inMain: true }));
+  // structured data images
+  (structured.images || []).forEach(u => push(u, 3));
 
-  // gallery containers (skip related/recommendation blocks entirely)
+  // gallery containers
   const gallerySelectors = [
     '.product-media','.product__media','.product-gallery','.gallery','.media-gallery','#product-gallery','#gallery','[data-gallery]',
     '.product-images','.product-image-gallery','.pdp-gallery','.slick-slider','.slick','.swiper','.swiper-container','.carousel',
     '.owl-carousel','.fotorama','.MagicZoom','.cloudzoom-zoom','.zoomWindow','.zoomContainer','.lightbox','.thumbnails'
   ].join(', ');
   $(gallerySelectors).find('img, source').each((_, el) => {
-    if (isRecoBlock($, el)) return;
     const $el = $(el);
     const cands = [
       $el.attr('src'), $el.attr('data-src'), $el.attr('data-srcset'),
       $el.attr('data-original'), $el.attr('data-large_image'), $el.attr('data-image'),
       $el.attr('data-zoom'), pickLargestFromSrcset($el.attr('srcset')),
     ];
-    cands.forEach(u => push(u, 6, { inReco:false, inMain: isMainProductNode($, el) }));
+    cands.forEach(u => push(u, 3));
   });
 
-  if (og.image) push(og.image, 3, { inMain: true });
+  if (og.image) push(og.image, 2);
 
-  // page-wide images (skip recommendation areas)
   $("img").each((_, el) => {
-    if (isRecoBlock($, el)) return;
     const $el = $(el);
     const cands = [
       $el.attr("src"), $el.attr("data-src"), $el.attr("data-srcset"),
@@ -1256,45 +1241,38 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
       $el.attr("data-large_image"), $el.attr("data-image"),
       pickLargestFromSrcset($el.attr("srcset")),
     ];
-    cands.forEach(u => push(u, 2, { inReco:false, inMain: isMainProductNode($, el) }));
+    cands.forEach(u => push(u, 1));
   });
 
   // noscript fallbacks
   $("noscript").each((_, n)=>{
-    if (isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
     const _$ = cheerio.load(inner);
     _$("img").each((__, el)=>{
       const src = _$(el).attr("src") || _$(el).attr("data-src") || pickLargestFromSrcset(_$(el).attr("srcset"));
-      if (src) push(src, 3, { inReco:false, inMain: isMainProductNode($, n) });
+      if (src) push(src, 2);
     });
   });
 
-  // picture/srcset
-  $("picture source[srcset]").each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    push(pickLargestFromSrcset($(el).attr("srcset")), 2, { inReco:false, inMain: isMainProductNode($, el) });
-  });
+  $("picture source[srcset]").each((_, el) => { push(pickLargestFromSrcset($(el).attr("srcset")), 1); });
 
-  // backgrounds
   $('[style*="background"]').each((_, el) => {
-    if (isRecoBlock($, el)) return;
     const style = String($(el).attr("style") || "");
     const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) push(m[2], 2, { inReco:false, inMain: isMainProductNode($, el) });
+    if (m && m[2]) push(m[2], 1);
   });
 
-  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1, { inMain: true }));
+  $('link[rel="image_src"]').each((_, el) => push($(el).attr("href"), 1));
 
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!txt || !/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
     try {
       const obj = JSON.parse(txt);
-      deepFindImagesFromJson(obj).forEach(u => push(u, 2, { inMain: true }));
+      deepFindImagesFromJson(obj).forEach(u => push(u, 2));
     } catch {
       const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(m[1], 1, { inMain: true });
+      let m; while ((m = re.exec(txt))) push(m[1], 1);
     }
   });
 
@@ -1314,10 +1292,8 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     host.includes("motifmedical")        ? "/wp-content/uploads|/product|/images" : ""
   ].filter(Boolean).join("|"), "i");
 
-  // EXPANDED placeholder filter
   const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
-    'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
     'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
     '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/'
   ];
@@ -1345,14 +1321,8 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (allowHostRe.source.length && allowHostRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 3;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
-    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3; // stronger downweight incl. swatch
+    if (/thumb|thumbnail|small|tiny|badge|mini|icon/.test(L)) score -= 2;
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
-
-    // Context-aware penalties/bonuses
-    const ctx = imgContext.get(u) || {};
-    if (ctx.inReco) score -= 5;
-    if (ctx.inMain) score += 3;
-
     return { url: u, score };
   });
 
@@ -1575,6 +1545,7 @@ function extractManuals($, baseUrl, name, rawHtml, opts){
 
   return arr;
 }
+
 /* ================== ADD-ONLY: Enhanced manuals harvester ================== */
 function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
@@ -1683,7 +1654,7 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
 function extractSpecsSmart($){
   let specPane = resolveTabPane($, [
     'technical specifications','technical specification',
-    'tech specs','specifications','specification','details','size & weight','size and weight' // ADDED names for spec tabs
+    'tech specs','specifications','specification','details'
   ]);
   // ADD: Make spec pane selection “footer-aware”
   if (specPane && (isFooterOrNav($, specPane) || isRecoBlock($, specPane))) {
@@ -1744,17 +1715,6 @@ function extractSpecsSmart($){
   });
 
   return out;
-}
-
-/* ======= TABS-ONLY helper: parse ALL-CAPS spec lines inside panes ======= */
-function parseUpperSpecLine(t = "") {
-  const s = cleanup(t);
-  const m = s.match(/^([A-Z][A-Z0-9\s/%°.\-]{2,50})\s{1,}(.{2,300})$/);
-  if (!m) return null;
-  const key = canonicalizeSpecKey(m[1]);
-  const val = normalizeUnitsInText(m[2]);
-  if (!key || !val) return null;
-  return [key, val];
 }
 
 function extractSpecsFromDensestBlock($){
@@ -1842,14 +1802,11 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights','what’s in the box','whats in the box','includes']);
+  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
   if (featPane){
     const $c = $(featPane);
     $c.find('li').each((_, li)=> pushIfGood($(li).text()));
     $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
-    // EXTRA (TABS-ONLY): also capture lists directly following headings like "Features" or "What's in the Box"
-    const extra = extractListAfterHeadingInContainer($, $c, /\b(features|what'?s in the box|includes)\b/i, 20);
-    extra.forEach(pushIfGood);
   }
 
   const seen = new Set();
@@ -1926,8 +1883,7 @@ function resolveTabPane($, names){
   });
 
   if (!pane){
-    // EXTENDED pane classes (Magento/WordPress selectors added)
-    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items').each((_, el)=>{
+    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
       if (heading && nameRe.test(heading)) { pane = el; return false; }
     });
@@ -2024,23 +1980,6 @@ function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Fea
     .join('\n');
 }
 
-/* ===== NEW helper: list after heading (TABS-ONLY use) ===== */
-function extractListAfterHeadingInContainer($, container, re, max = 20) {
-  const out = [];
-  $(container).find('h1,h2,h3,h4,h5,strong,b').each((_, h) => {
-    const t = cleanup($(h).text());
-    if (!t || !re.test(t)) return;
-    const $ul = $(h).nextAll('ul,ol').first();
-    $ul.find('li').each((i, li) => {
-      const s = cleanup($(li).text());
-      if (s && s.length >= 7 && s.length <= 220) out.push(s);
-      if (out.length >= max) return false;
-    });
-    if (out.length >= max) return false;
-  });
-  return out;
-}
-
 function resolveAllPanes($, names){
   const out = new Set();
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
@@ -2064,8 +2003,7 @@ function resolveAllPanes($, names){
     }
   });
 
-  // EXTENDED selectors for Magento 2 + generic platforms
-  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, .data.item.content, [data-role="content"], .product.data.items, section').each((_, el)=>{
+  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
@@ -2108,23 +2046,15 @@ function extractSpecsFromContainer($, container){
     }
   });
 
-  // LI & P pairs + ALL-CAPS stack within the tab container
-  $c.find('li, p').each((_, el)=>{
-    const t = cleanup($(el).text());
-    if (!t || t.length < 3 || t.length > 300) return;
-
-    // classic "k: v" / "k - v"
-    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
-    if (m){
-      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-      const v = m[2];
+  $c.find('li').each((_, li)=>{
+    const t = cleanup($(li).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
       if (k && v && !out[k]) out[k]=v;
-      return;
     }
-
-    // NEW: ALL-CAPS label followed by value (e.g., "WAVELENGTH RANGE 200-1000nm")
-    const uv = parseUpperSpecLine(t);
-    if (uv && !out[uv[0]]) out[uv[0]] = uv[1];
   });
 
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
@@ -2139,32 +2069,12 @@ function extractSpecsFromContainer($, container){
 function collectManualsFromContainer($, container, baseUrl, sinkSet){
   const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-
-  // Anchors with various attributes and non-direct PDF routes
-  $(container).find('a').each((_, el)=>{
-    const $el = $(el);
-    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file') || "";
-    const txt  = cleanup($el.text() || $el.attr('aria-label') || "");
+  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+    const href = String($(el).attr('href') || "");
     const full = abs(baseUrl, href);
-    const L = (txt + " " + (full || "")).toLowerCase();
     if (!full) return;
-    if ((/\.pdf(?:[?#].*)?$/i.test(full) || /document|view|download|asset|file/i.test(full)) && allowRe.test(L) && !blockRe.test(L)) {
-      sinkSet.add(full);
-    }
-  });
-
-  // onclick handlers opening PDF
-  $(container).find('a[onclick], button[onclick]').each((_, el)=>{
-    const s = String($(el).attr('onclick') || '');
-    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
-    if (m) sinkSet.add(abs(baseUrl, m[0]));
-  });
-
-  // Embedded PDFs
-  $(container).find('object[type="application/pdf"], embed[type="application/pdf"], iframe[src*=".pdf"]').each((_, el)=>{
-    const $el = $(el);
-    const u = $el.attr('data') || $el.attr('src') || "";
-    if (u) sinkSet.add(abs(baseUrl, u));
+    const L = full.toLowerCase();
+    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
   });
 }
 
@@ -2184,12 +2094,6 @@ function extractFeaturesFromContainer($, container){
 
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
-
-  // EXTRA (TABS-ONLY): lists right after headings "Features" / "What's in the box"
-  if (items.length < 5) {
-    const extra = extractListAfterHeadingInContainer($, $c, /\b(features|what'?s in the box|includes)\b/i, 20);
-    extra.forEach(pushIfGood);
-  }
 
   const seen = new Set();
   const out = [];
@@ -2463,10 +2367,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
       const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
 
-      const specNames = ['specification','specifications','technical specifications','tech specs','details','size & weight','size and weight']; // ADDED
-      const featNames = ['features','features/benefits','benefits','key features','highlights','what’s in the box','whats in the box','includes']; // ADDED
+      const specNames = ['specification','specifications','technical specifications','tech specs','details'];
+      const featNames = ['features','features/benefits','benefits','key features','highlights'];
       const downNames = ['downloads','documents','technical resources','resources'];
-      const descNames = ['overview','description','product details','details','product information']; // ADDED
+      const descNames = ['overview','description','product details','details'];
 
       const addSpecs   = {};
       const addManuals = new Set();
@@ -2526,11 +2430,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   }
   // === end Dojo/dijit pre-pass ===
 
-  // EXTENDED pane-name sets for generic platforms
-  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details','size & weight','size and weight' ]);
+  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
-  const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights','what’s in the box','whats in the box','includes' ]);
-  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details','product information' ]);
+  const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
+  const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
 
   const addSpecs = {};
   for (const el of specPanes) {
@@ -2615,8 +2518,7 @@ function sanitizeIngestPayload(p) {
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
-  // EXPANDED bad image filter to exclude placeholders
-  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
+  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice(0, 12);
