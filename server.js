@@ -1291,10 +1291,9 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const aggressive = !!(opts && opts.aggressive);
   const mainOnly   = !!(opts && (opts.mainOnly || opts.mainonly));
 
-  // allow AVIF as well; honor excludePng flag
   const allowWebExt = excludePng
-    ? /\.(?:jpe?g|webp|avif)(?:[?#].*)?$/i
-    : /\.(?:jpe?g|png|webp|avif)(?:[?#].*)?$/i;
+    ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i
+    : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
 
   const set        = new Set();
   const imgWeights = new Map();
@@ -1309,18 +1308,13 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const codeCandidates = collectCodesFromUrl(baseUrl);
   const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/uploads\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/|\/zoom\/|\/large\/|\/hi-res?\/|\/wp-content\/uploads\/)/i;
 
-  // === New: Compass-aware + placeholder hard-blockers ===
-  const COMPASS_GOOD_RE   = /compasshealthbrands\.com\/media\/images\/items\/(?!no(?:[-_ ]|%20)?image)/i;
-  const COMPASS_NOIMAGE_RE= /compasshealthbrands\.com\/media\/images\/items\/no(?:[-_ ]|%20)?image(?:[-_]?thumb)?\.(?:png|jpe?g|webp|avif)/i;
-  const MCKESSON_PPKG_RE  = /imgcdn\.mckesson\.com\/cumulusweb\/images\/item_detail\/\d+_ppkg(?:left|right|back)\d*\.jpg/i;
-
-  // Placeholder/UI filter (base + we’ll keep isBadImageUrl(); tests run on normalized URLs)
+  // Placeholder/UI filter (base + we’ll add isBadImageUrl())
   const badReBase = [
-    'logo','brandmark','favicon','sprites?','spritesheet','placeholder','no(?:[-_ ]|%20)?image(?:[-_ ]?(?:available|placeholder|thumb))?','missingimage','loader',
+    'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
     'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
-    'spinner','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
-    '\\/wcm\\/connect','/common/images/','/icons?/', '/social/', '/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/',
-    'pixel','1x1','transparent','blank\\.gif','^data:image'
+    'spinner','icon','badge','flag','cart','arrow','pdf','facebook','twitter','instagram','linkedin',
+    '\\/wcm\\/connect','/common/images/','/icons/','/social/','/share/','/static/','/cms/','/ui/','/theme/','/wp-content/themes/',
+    'pixel','1x1','transparent','blank\\.gif','data:image'
   ];
   if (!aggressive) badReBase.push('/search/','/category/','/collections/','/filters?','/banners?/');
   const badRe = new RegExp(badReBase.join('|'), 'i');
@@ -1332,26 +1326,18 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     'bigcommerce','cloudinary','imgix','scene7','mzstatic'
   ].join('|'), 'i');
 
-  // === New: safe decoder so %20 etc. don’t bypass filters ===
-  const normUrl = (u) => { try { return decodeURI(u); } catch { return u; } };
-
   const pushEl = ($el, url, baseWeight = 0) => {
     if (!url) return;
     if (/^data:/i.test(url)) return;
     const absu = abs(baseUrl, url);
     if (!absu) return;
 
-    // normalized for robust regex checks
-    const n = normUrl(absu);
-
-    if (!allowWebExt.test(n)) return;
-    if (MCKESSON_PPKG_RE.test(n)) return;                 // hard-block McKesson pack shots
-    if (COMPASS_NOIMAGE_RE.test(n)) return;               // hard-block Compass placeholders
-    if (badRe.test(n)) return;
-    if (isBadImageUrl(absu, $el)) return;                 // existing hard block for other offenders
+    if (!allowWebExt.test(absu)) return;
+    if (badRe.test(absu)) return;
+    if (isBadImageUrl(absu, $el)) return;                  // << hard block for listed offenders
 
     // prefer same site or known CDNs unless aggressive
-    if (!allowHostRe.test(n) && !isSameSiteOrCdn(baseUrl, n) && !aggressive) return;
+    if (!allowHostRe.test(absu) && !isSameSiteOrCdn(baseUrl, absu) && !aggressive) return;
 
     const ctxScore = scoreByContext($, $el[0] || $el, { mainOnly });
     if (ctxScore <= -999) return;
@@ -1366,17 +1352,19 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
     // compute score
     let score = baseWeight + ctxScore;
-    const L = n.toLowerCase();
+    const L = absu.toLowerCase();
 
-    // Prefer real Compass product images, but we already hard-blocked placeholders
-    if (COMPASS_GOOD_RE.test(L)) score += 50;
-
+    // Prefer real Compass product images, but block placeholders
+    if (/compasshealthbrands\.com\/media\/images\/items\//i.test(absu)) {
+      if (/noimage/i.test(absu)) return; // hard stop: don't add this image
+      score += 6; // strong nudge to keep PB42BARBED Angle.jpg and friends
+    }
+    
     if (preferRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 2;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
     if (/\b(thumb|thumbnail|swatch)\b/.test(L)) score -= 3;
-    if (/\.png(?:[?#]|$)/i.test(L) && excludePng) score -= 1; // prefer photos when PNG excluded
 
     const prev = imgWeights.get(absu) || 0;
     if (score > prev) imgWeights.set(absu, score);
@@ -1406,25 +1394,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
         $el.attr('data-lazy'), pickLargestFromSrcset($el.attr('srcset'))
       ];
       cands.forEach(u => pushEl($el, u, 6));
-
-      // === New: if <img> looks like a placeholder, promote wrapping <a href> ===
-      const rawSrc = $el.attr('src') || '';
-      const absSrc = abs(baseUrl, rawSrc);
-      const nSrc   = absSrc ? normUrl(absSrc) : '';
-      if (nSrc && (COMPASS_NOIMAGE_RE.test(nSrc) || /no(?:[-_ ]|%20)?image/i.test(nSrc))) {
-        const $a = $el.closest('a[href]');
-        if ($a && $a.attr('href')) pushEl($a, $a.attr('href'), COMPASS_GOOD_RE.test(normUrl(abs(baseUrl, $a.attr('href')))) ? 20 : 8);
-      }
     });
-  });
-
-  // 2.5) === New: direct <a href="...jpg"> links (many sites wrap the real asset here)
-  $('a[href]').each((_, a) => {
-    const href = $(a).attr('href');
-    if (!href) return;
-    // avoid adding obvious sprites/icons etc. by reusing pushEl filtering
-    const bonus = COMPASS_GOOD_RE.test(normUrl(abs(baseUrl, href) || '')) ? 12 : 2;
-    if (allowWebExt.test(href)) pushEl($(a), href, bonus);
   });
 
   // 3) OpenGraph / Twitter
@@ -1445,15 +1415,6 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
         $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset'))
       ];
       cands.forEach(u => pushEl($el, u, 3));
-
-      // === New: anchor promotion when <img> is placeholder
-      const rawSrc = $el.attr('src') || '';
-      const absSrc = abs(baseUrl, rawSrc);
-      const nSrc   = absSrc ? normUrl(absSrc) : '';
-      if (nSrc && (COMPASS_NOIMAGE_RE.test(nSrc) || /no(?:[-_ ]|%20)?image/i.test(nSrc))) {
-        const $a = $el.closest('a[href]');
-        if ($a && $a.attr('href')) pushEl($a, $a.attr('href'), COMPASS_GOOD_RE.test(normUrl(abs(baseUrl, $a.attr('href')))) ? 15 : 6);
-      }
     });
 
   // 6) Background images (main scope)
@@ -1503,17 +1464,17 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   // 10) Script blobs & raw HTML (last resort)
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
-    if (!/\.(?:jpe?g|png|webp|avif)\b/i.test(txt)) return;
+    if (!/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
     try {
       const obj = JSON.parse(txt);
       deepFindImagesFromJson(obj).forEach(u => pushEl($(el), u, 2));
     } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp|avif))(?:\?[^"'<>]*)?/ig;
+      const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
       let m; while ((m = re.exec(txt))) pushEl($(el), m[1], 1);
     }
   });
   if (rawHtml) {
-    const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp|avif))(?:\?[^"'<>]*)?/ig;
+    const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
     let m; while ((m = re.exec(rawHtml))) pushEl($.root(), m[1], 0);
   }
 
