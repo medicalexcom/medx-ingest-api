@@ -253,16 +253,15 @@ function findMainProductScope($) {
 
 function scoreByContext($, node, { mainOnly=false } = {}) {
   if (isRecoBlock($, node) || isFooterOrNav($, node)) return -999;
+
+  // If we don't have a meaningful DOM node (e.g., $.root() from regex/OG/JSON-LD),
+  // treat as neutral so mainonly doesn't discard it.
+  const isRootish = !node || node === $.root()[0];
+  if (isRootish) return 1; // neutral-positive so it survives gating
+
   const inMain = isMainProductNode($, node);
   if (mainOnly) return inMain ? 2 : -999;
   return inMain ? 2 : 0;
-}
-
-function keyForImageDedup(url) {
-  const u = String(url||"");
-  const base = u.split("/").pop().split("?")[0];
-  const size = (u.match(/(\d{2,5})x(\d{2,5})/) || []).slice(1).join("x");
-  return size ? `${base}#${size}` : base;
 }
 
 function dedupeImageObjs(cands, limit = 12) {
@@ -1398,20 +1397,18 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (isRecoBlock($, container)) return;
   
     // include anchors (MagicZoom/CloudZoom etc.)
-    $(container).find('img, source, a').each((__, el) => {
+    $(container).find('img, source, a').each((__, el) => {      
       const $el = $(el);
       const isAnchor = $el.is('a');
-  
       const cands = [
         $el.attr('src'), $el.attr('data-src'), $el.attr('data-original'),
         $el.attr('data-zoom'), $el.attr('data-zoom-image'),
         $el.attr('data-image'), $el.attr('data-large_image'),
         $el.attr('data-lazy'), pickLargestFromSrcset($el.attr('srcset')),
-        isAnchor ? $el.attr('href') : '' // << pull full-size from <a href="...Angle.jpg">
+        isAnchor ? $el.attr('href') : '' // ← this is where Compass hides the full-size Angle.jpg
       ];
-  
       cands.forEach(u => pushEl($el, u, 6));
-    });
+      });
   });
 
   // 3) OpenGraph / Twitter
@@ -1422,19 +1419,17 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   $('link[rel="preload"][as="image"]').each((_, el) => pushEl($(el), $(el).attr('href'), 3));
 
   // 5) Main-scope images (context-gated)
-  $('main, #main, .main, article, .product, .product-detail, .product-details')
-    .find('img, source, picture source, a').each((_, el) => {
-      if (isRecoBlock($, el)) return;
-      const $el = $(el);
-      const isAnchor = $el.is('a');
-  
-      const cands = [
-        $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
-        $el.attr('data-original'), $el.attr('data-image'),
-        $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset')),
-        isAnchor ? $el.attr('href') : ''
-      ];
-      cands.forEach(u => pushEl($el, u, 3));
+  .find('img, source, picture source, a').each((_, el) => {
+    if (isRecoBlock($, el)) return;
+    const $el = $(el);
+    const isAnchor = $el.is('a');
+    const cands = [
+      $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
+      $el.attr('data-original'), $el.attr('data-image'),
+      $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset')),
+      isAnchor ? $el.attr('href') : ''
+    ];
+    cands.forEach(u => pushEl($el, u, 3));
     });
 
   // 6) Background images (main scope)
@@ -1662,6 +1657,19 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
       let m; while ((m = re.exec(txt))) push(el, m[1], 1);
     }
   });
+
+  // Compass-only fallback: grab direct anchors to item images if we still have none or very few
+  try {
+    if (isCompassHost(baseUrl) && set.size < 2) {
+      $('a[href]').each((_, a) => {
+        const href = String($(a).attr('href') || '');
+        if (/\/media\/images\/items\/[^?#]+\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(href) && !/noimage/i.test(href)) {
+          pushEl($(a), href, 7); // strong weight; these are the real PDP angles
+        }
+      });
+    }
+  } catch {}
+
 
   // --- final ranking & dedupe ---
   const scored = Array.from(set.entries())
