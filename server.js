@@ -203,9 +203,6 @@ function isCompassPlaceholder(u){
   catch { return false; }
 }
 
-// inside pushEl(), right after you compute absu
-if (isCompassPlaceholder(absu)) return; // hard block
-
 function getRegistrableDomain(host) {
   try {
     const parts = String(host||"").toLowerCase().split(".").filter(Boolean);
@@ -1577,23 +1574,33 @@ function harvestCompassItemImages($, baseUrl, rawHtml){
 }
 
 function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
-  const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
-  const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
-  const mainOnly  = !!(opts && (opts.mainOnly || opts.mainonly));
-  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
+  const excludePng = (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
+  const mainOnly   = !!(opts && (opts.mainOnly || opts.mainonly));
+  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i
+                                 : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
 
   const scope = findMainProductScope($);
-  const set = new Map(); // url -> score
+  const scores = new Map(); // url -> score
 
   const push = (node, url, baseScore = 0) => {
     if (!url) return;
     const u = decodeHtml(abs(baseUrl, url));
     if (!u || !allowWebExt.test(u)) return;
+    if (isBadImageUrl(u)) return;
     if (!isSameSiteOrCdn(baseUrl, u)) return;
+
     const ctx = scoreByContext($, node, { mainOnly });
     if (ctx <= -999) return;
-    const cur = set.get(u) || 0;
-    set.set(u, Math.max(cur, baseScore + ctx));
+
+    let score = baseScore + ctx;
+
+    // Prefer Compass real product images (but never placeholders)
+    if (/compasshealthbrands\.com\/media\/images\/items\//i.test(u)) {
+      if (/noimage/i.test(u)) return;
+      score += 6;
+    }
+
+    scores.set(u, Math.max(scores.get(u) || 0, score));
   };
 
   // 1) Gallery/media in main scope
@@ -1601,8 +1608,9 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     .find('img, source').each((_, el) => {
       const $el = $(el);
       const cands = [
-        $el.attr('src'), $el.attr('data-src'), $el.attr('data-original'), $el.attr('data-zoom'),
-        $el.attr('data-zoom-image'), $el.attr('data-image'), $el.attr('data-large_image'),
+        $el.attr('src'), $el.attr('data-src'), $el.attr('data-original'),
+        $el.attr('data-zoom'), $el.attr('data-zoom-image'),
+        $el.attr('data-image'), $el.attr('data-large_image'),
         pickLargestFromSrcset($el.attr('srcset'))
       ];
       cands.forEach(u => push(el, u, 6));
@@ -1631,61 +1639,59 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
   });
 
   // 5) JSON blobs
-  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(t => t.length > 2);
-  const codes = collectCodesFromUrl(baseUrl);
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
     try {
       const obj = JSON.parse(txt);
-      const arr = deepFindImagesFromJson(obj, []);
-      for (const u of arr) {
-        const L = String(u||'').toLowerCase();
-        const hit = (codes.some(c => L.includes(c)) ? 2 : 0) + (titleTokens.some(t => L.includes(t)) ? 1 : 0);
-        push(el, u, hit ? 3 + hit : 1);
-      }
+      deepFindImagesFromJson(obj, []).forEach(u => push(el, u, 2));
     } catch {
       const re = /(https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp))(?:\?[^"'<>]*)?/ig;
       let m; while ((m = re.exec(txt))) push(el, m[1], 1);
     }
   });
 
-// --- final ranking & dedupe (REPLACE your existing block from here to return) ---
-const seen = new Set();
-let out = [];
-for (const s of scored) {
-  const baseRaw = s.url.split("/").pop().split("?")[0];
-  let baseKey = baseRaw.toLowerCase();
-  try { baseKey = decodeURIComponent(baseRaw).toLowerCase(); } catch {}
-  if (isCompassPlaceholder(s.url)) continue; // final guard
-  if (seen.has(baseKey)) continue;
-  seen.add(baseKey);
-  out.push({ url: s.url });
-  if (out.length >= 12) break;
-}
+  // Rank & dedupe by basename; drop Compass placeholders
+  const scored = Array.from(scores.entries())
+    .map(([url, score]) => ({ url, score }))
+    .sort((a, b) => b.score - a.score);
 
-// --- Compass fix-up: harvest real item images and merge, replacing placeholders if any ---
-try {
-  if (isCompassHost(baseUrl)) {
-    const compImgs = harvestCompassItemImages($, baseUrl, rawHtml);
-    if (compImgs.length) {
-      const have = new Set(out.map(o => {
-        let b = (o.url || '').split('/').pop().split('?')[0];
-        try { b = decodeURIComponent(b); } catch {}
-        return b.toLowerCase();
-      }));
-      for (const u of compImgs) {
-        let k = u.split('/').pop().split('?')[0];
-        try { k = decodeURIComponent(k); } catch {}
-        k = k.toLowerCase();
-        if (!have.has(k)) { out.push({ url: u }); have.add(k); }
-        if (out.length >= 12) break;
+  const seen = new Set();
+  const out  = [];
+  for (const s of scored) {
+    const baseRaw = s.url.split('/').pop().split('?')[0];
+    let baseKey = baseRaw.toLowerCase();
+    try { baseKey = decodeURIComponent(baseRaw).toLowerCase(); } catch {}
+    if (isCompassPlaceholder(s.url)) continue;
+    if (seen.has(baseKey)) continue;
+    seen.add(baseKey);
+    out.push({ url: s.url });
+    if (out.length >= 12) break;
+  }
+
+  // Compass merge: add any additional real item images found elsewhere in the page
+  try {
+    if (isCompassHost(baseUrl)) {
+      const compImgs = harvestCompassItemImages($, baseUrl, rawHtml) || [];
+      if (compImgs.length) {
+        const have = new Set(out.map(o => {
+          let b = (o.url || '').split('/').pop().split('?')[0];
+          try { b = decodeURIComponent(b); } catch {}
+          return b.toLowerCase();
+        }));
+        for (const u of compImgs) {
+          let k = u.split('/').pop().split('?')[0];
+          try { k = decodeURIComponent(k); } catch {}
+          k = k.toLowerCase();
+          if (!have.has(k)) { out.push({ url: u }); have.add(k); }
+          if (out.length >= 12) break;
+        }
       }
     }
-  }
-} catch {}
+  } catch {}
 
-return out;
+  return out;
+}
 
 function fallbackImagesFromMain($, baseUrl, og, opts){
   const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
