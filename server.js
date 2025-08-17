@@ -1353,6 +1353,13 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     // compute score
     let score = baseWeight + ctxScore;
     const L = absu.toLowerCase();
+
+    // Prefer real Compass product images, but block placeholders
+    if (/compasshealthbrands\.com\/media\/images\/items\//i.test(absu)) {
+      if (/noimage/i.test(absu)) return; // hard stop: don't add this image
+      score += 6; // strong nudge to keep PB42BARBED Angle.jpg and friends
+    }
+    
     if (preferRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 2;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
@@ -1483,9 +1490,11 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const seen = new Set();
   const out  = [];
   for (const s of scored) {
-    const base = s.url.split("/").pop().split("?")[0];
-    if (seen.has(base)) continue;
-    seen.add(base);
+    const baseRaw = s.url.split("/").pop().split("?")[0];
+    let baseKey = baseRaw.toLowerCase();
+    try { baseKey = decodeURIComponent(baseRaw).toLowerCase(); } catch {}
+    if (seen.has(baseKey)) continue;
+    seen.add(baseKey);
     out.push({ url: s.url });
     if (out.length >= 12) break;
   }
@@ -2670,7 +2679,7 @@ function sanitizeIngestPayload(p) {
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
   // EXPANDED bad image filter to exclude placeholders
-  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/|\/rbslider\/|\/theme_options\/|\/wysiwyg\/.*(banner|payment|footer)|imgcdn\.mckesson\.com\/cumulusweb\/images\/item_detail\/\d+_ppkg(?:left|right|back)\d*\.jpg)/i;
+  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no[-_]?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/|\/rbslider\/|\/theme_options\/|\/wysiwyg\/.*(?:banner|payment|footer)|imgcdn\.mckesson\.com\/cumulusweb\/images\/item_detail\/\d+_ppkg(?:left|right|back)\d*\.jpg|compasshealthbrands\.com\/media\/images\/items\/noimage)/i;
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice(0, 12);
