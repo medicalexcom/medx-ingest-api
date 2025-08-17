@@ -1419,6 +1419,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   $('link[rel="preload"][as="image"]').each((_, el) => pushEl($(el), $(el).attr('href'), 3));
 
   // 5) Main-scope images (context-gated)
+  $('main, #main, .main, article, .product, .product-detail, .product-details')
   .find('img, source, picture source, a').each((_, el) => {
     if (isRecoBlock($, el)) return;
     const $el = $(el);
@@ -1658,13 +1659,13 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     }
   });
 
-  // Compass-only fallback: grab direct anchors to item images if we still have none or very few
+  // Compass-only fallback: if we still have ~no images, sweep anchors for real item images
   try {
-    if (isCompassHost(baseUrl) && set.size < 2) {
+    if (isCompassHost(baseUrl) && scores.size < 2) {
       $('a[href]').each((_, a) => {
         const href = String($(a).attr('href') || '');
         if (/\/media\/images\/items\/[^?#]+\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(href) && !/noimage/i.test(href)) {
-          pushEl($(a), href, 7); // strong weight; these are the real PDP angles
+           push(a, href, 7); // strong weight
         }
       });
     }
@@ -1672,9 +1673,9 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
 
 
   // --- final ranking & dedupe ---
-  const scored = Array.from(set.entries())
-    .map(([url, score]) => ({ url, score }))
-    .sort((a, b) => b.score - a.score);
+  const scored = Array.from(scores.entries())
+     .map(([url, score]) => ({ url, score }))
+     .map(([url, score]) => ({ url, score }))
 
   const seen = new Set();
   let out = [];
