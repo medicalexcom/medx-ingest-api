@@ -194,15 +194,6 @@ function isBadImageUrl(u, $el){
 }
 
 /* ================== ADD-ONLY helpers for image/CDN/manual capture ================== */
-function isCompassHost(u){
-  try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); }
-  catch { return false; }
-}
-function isCompassPlaceholder(u){
-  try { return isCompassHost(u) && /\/media\/images\/items\/noimage/i.test(u); }
-  catch { return false; }
-}
-
 function getRegistrableDomain(host) {
   try {
     const parts = String(host||"").toLowerCase().split(".").filter(Boolean);
