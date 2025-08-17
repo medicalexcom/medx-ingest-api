@@ -203,17 +203,11 @@ const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`ingest-api listening on :${port}`));
 
 /* env + knobs (unchanged behavior) */
-export const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim();
-export const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
-export const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
-
-export const DEFAULT_RENDER_TIMEOUT_MS = parseInt(process.env.RENDER_TIMEOUT_MS || "20000", 10);
-export const MAX_TOTAL_TIMEOUT_MS      = parseInt(process.env.TOTAL_TIMEOUT_MS  || "30000", 10);
-export const MAX_HTML_BYTES            = parseInt(process.env.MAX_HTML_BYTES    || "3000000", 10);
-export const CACHE_TTL_MS              = parseInt(process.env.CACHE_TTL_MS      || "180000", 10);
-export const CACHE_MAX_ITEMS           = parseInt(process.env.CACHE_MAX_ITEMS   || "100", 10);
-export const ENABLE_CACHE              = String(process.env.ENABLE_CACHE        || "true").toLowerCase() === "true";
-export const ENABLE_BASIC_SSRF_GUARD   = String(process.env.ENABLE_SSRF_GUARD   || "true").toLowerCase() === "true";
+export {
+  RENDER_API_URL, RENDER_API_TOKEN, MIN_IMG_PX_ENV, EXCLUDE_PNG_ENV,
+  DEFAULT_RENDER_TIMEOUT_MS, MAX_TOTAL_TIMEOUT_MS, MAX_HTML_BYTES,
+  CACHE_TTL_MS, CACHE_MAX_ITEMS, ENABLE_CACHE, ENABLE_BASIC_SSRF_GUARD
+};
 
 import net from "node:net";
 import { URL } from "node:url";
