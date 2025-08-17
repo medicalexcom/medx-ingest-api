@@ -1396,14 +1396,20 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   ].join(', ');
   $(gallerySelectors).each((_, container) => {
     if (isRecoBlock($, container)) return;
-    $(container).find('img, source').each((__, el) => {
+  
+    // include anchors (MagicZoom/CloudZoom etc.)
+    $(container).find('img, source, a').each((__, el) => {
       const $el = $(el);
+      const isAnchor = $el.is('a');
+  
       const cands = [
         $el.attr('src'), $el.attr('data-src'), $el.attr('data-original'),
         $el.attr('data-zoom'), $el.attr('data-zoom-image'),
         $el.attr('data-image'), $el.attr('data-large_image'),
-        $el.attr('data-lazy'), pickLargestFromSrcset($el.attr('srcset'))
+        $el.attr('data-lazy'), pickLargestFromSrcset($el.attr('srcset')),
+        isAnchor ? $el.attr('href') : '' // << pull full-size from <a href="...Angle.jpg">
       ];
+  
       cands.forEach(u => pushEl($el, u, 6));
     });
   });
@@ -1417,13 +1423,16 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
   // 5) Main-scope images (context-gated)
   $('main, #main, .main, article, .product, .product-detail, .product-details')
-    .find('img, source, picture source').each((_, el) => {
+    .find('img, source, picture source, a').each((_, el) => {
       if (isRecoBlock($, el)) return;
       const $el = $(el);
+      const isAnchor = $el.is('a');
+  
       const cands = [
         $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
         $el.attr('data-original'), $el.attr('data-image'),
-        $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset'))
+        $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset')),
+        isAnchor ? $el.attr('href') : ''
       ];
       cands.forEach(u => pushEl($el, u, 3));
     });
@@ -1489,6 +1498,18 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     let m; while ((m = re.exec(rawHtml))) pushEl($.root(), m[1], 0);
   }
 
+  // Compass-only fallback: if nothing good yet, sweep anchors for real item images
+  try {
+    if (set.size === 0 && isCompassHost(baseUrl)) {
+      $('a[href]').each((_, a) => {
+        const href = String($(a).attr('href') || '');
+        if (/\/media\/images\/items\/[^?#]+\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(href) && !/noimage/i.test(href)) {
+          pushEl($(a), href, 7); // strong weight, it's likely the main Angle/Front image
+        }
+      });
+    }
+  } catch {}
+  
   // Score + dedupe by basename
   const scored = Array.from(set).map(u => {
     let score = imgWeights.get(u) || 0;
