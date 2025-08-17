@@ -101,9 +101,6 @@ import { URL as NodeURL } from "node:url";
 import net from "node:net";
 
 /* ================== Generic ================== */
-export const cid = () => crypto.randomBytes(6).toString("hex");
-export const now = () => Date.now();
-export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 export function safeDecodeOnce(s){
   try {
