@@ -2679,7 +2679,26 @@ function sanitizeIngestPayload(p) {
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
   // EXPANDED bad image filter to exclude placeholders
-  const badImg = /(logo|brandmark|favicon|sprite|placeholder|no[-_]?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/|\/rbslider\/|\/theme_options\/|\/wysiwyg\/.*(?:banner|payment|footer)|imgcdn\.mckesson\.com\/cumulusweb\/images\/item_detail\/\d+_ppkg(?:left|right|back)\d*\.jpg|compasshealthbrands\.com\/media\/images\/items\/noimage)/i;
+  const badImg = new RegExp([
+    // Common UI/placeholder buckets (bounded)
+    '(?:^|[\\/_.-])(logo|brandmark|favicon|sprite)(?:[\\/_.-]|$)',
+    '(?:^|[\\/_.-])(placeholder|no[-_]?image|missingimage|coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp)(?:[\\/_.-]|$)',
+    '(?:^|[\\/_.-])swatch(?:[\\/_.-]|$)',
+    // Safer icon(s) boundary to avoid "miconazole"
+    '(?:^|[\\/_.-])icons?(?:[\\/_.-]|$)',
+    // Social / theme paths
+    '\\/common\\/images\\/',
+    '\\/icons\\/',
+    '\\/wp-content\\/themes\\/',
+    '\\/rbslider\\/',
+    '\\/theme_options\\/',
+    '\\/wysiwyg\\/[^?#]*(?:banner|payment|footer)',
+    // (Optional) thumbnails (safe forms only)
+    '(?:[\\/_.-]thumb(?:nail)?s?(?:[\\/_.-]|$))',
+    // Reported vendor-specific offenders
+    'imgcdn\\.mckesson\\.com\\/CumulusWeb\\/Images\\/Item_Detail\\/\\d+_ppkg(?:left|right|back)\\d*\\.jpg',
+    'compasshealthbrands\\.com\\/media\\/images\\/items\\/noimage'
+  ].join('|'), 'i');
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice(0, 12);
