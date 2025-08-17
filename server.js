@@ -147,6 +147,52 @@ function isMarketingOrUiImage($, $el, url){
   return false;
 }
 
+/* === NEW: Site- & pattern-specific bad image URL filter (ADD-ONLY) === */
+function isBadImageUrl(u, $el){
+  if (!u) return true;
+  let url = String(u).trim();
+  try { url = decodeURIComponent(url); } catch {}
+  url = url.toLowerCase();
+
+  // Universal placeholders / UI
+  if (/\/(placeholder|no[-_]?image|missingimage|blank|spacer|pixel|loader|preloader)\b/.test(url)) return true;
+  if (/\b(logo|brandmark|favicon|sprite|icon|social|facebook|twitter|instagram|linkedin)\b/.test(url)) return true;
+
+  // Banners / promos / theme builder assets
+  if (/\/(banner|banners|promo|promotions?|slides?|slider|rbslider|theme_options)\//.test(url)) return true;
+  if (/\/wysiwyg\/.*(banner|payment|footer)/.test(url)) return true;
+
+  // Payments / trust badges
+  if (/\/(payment|payments|trust|badge|badges|seals?)\//.test(url)) return true;
+
+  // Specific reported offenders
+  if (/unicosci\.com\/media\/wysiwyg\/footer-image\/payment\.png/.test(url)) return true;
+  if (/unicosci\.com\/media\/aw_rbslider\/slides\//.test(url)) return true;
+  if (/unicosci\.com\/media\/theme_options\/websites\//.test(url)) return true;
+  if (/compasshealthbrands\.com\/media\/images\/items\/noimage/i.test(url)) return true;
+
+  // McKesson packaging-angle variants
+  if (/imgcdn\.mckesson\.com\/cumulusweb\/images\/item_detail\/\d+_ppkg(?:left|right|back)\d*\.jpg/.test(url)) return true;
+
+  // Thumbs / swatches
+  if (/\b(thumb|thumbnail|swatch)\b/.test(url)) return true;
+
+  // Very small via query params (e.g., ?w=120 or ?height=150)
+  try {
+    const qs = new URL(u).searchParams;
+    const w = parseInt(qs.get('w') || qs.get('width') || qs.get('size') || '0', 10);
+    const h = parseInt(qs.get('h') || qs.get('height') || '0', 10);
+    if ((w && w < 300) || (h && h < 300)) return true;
+  } catch {}
+
+  // Element hints
+  if ($el && $el.length){
+    const hint = (String($el.attr('class')||'') + ' ' + String($el.attr('alt')||'') + ' ' + String($el.attr('title')||'')).toLowerCase();
+    if (/\b(payment|visa|mastercard|paypal|klarna|afterpay|trust|secure|badge|banner|hero)\b/.test(hint)) return true;
+  }
+  return false;
+}
+
 /* ================== ADD-ONLY helpers for image/CDN/manual capture ================== */
 function getRegistrableDomain(host) {
   try {
@@ -1262,7 +1308,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const codeCandidates = collectCodesFromUrl(baseUrl);
   const preferRe = /(\/media\/images\/items\/|\/images\/(products?|catalog)\/|\/uploads\/|\/products?\/|\/product\/|\/pdp\/|\/assets\/product|\/product-images?\/|\/commerce\/products?\/|\/zoom\/|\/large\/|\/hi-res?\/|\/wp-content\/uploads\/)/i;
 
-  // Expanded placeholder/UI filter (kept and strengthened)
+  // Placeholder/UI filter (base + we’ll add isBadImageUrl())
   const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
     'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
@@ -1273,49 +1319,45 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   if (!aggressive) badReBase.push('/search/','/category/','/collections/','/filters?','/banners?/');
   const badRe = new RegExp(badReBase.join('|'), 'i');
 
-  // Restrict site/cdn when sensible
+  // Same-site/CDN allow
   const allowHostRe = new RegExp([
-    safeHostname(baseUrl).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-    'cdn','cloudfront','akamai','akamaized','azureedge','fastly','shopifycdn','bigcommerce','cdn\\.shopify'
+    getRegistrableDomain(safeHostname(baseUrl)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    'cdn','cloudfront','akamai','akamaized','azureedge','fastly','shopifycdn','cdn\\.shopify','myshopify',
+    'bigcommerce','cloudinary','imgix','scene7','mzstatic'
   ].join('|'), 'i');
 
   const pushEl = ($el, url, baseWeight = 0) => {
     if (!url) return;
-    if (/^data:/i.test(url)) return; // inline placeholders
+    if (/^data:/i.test(url)) return;
     const absu = abs(baseUrl, url);
     if (!absu) return;
 
-    // file type & placeholder/UI gate
     if (!allowWebExt.test(absu)) return;
     if (badRe.test(absu)) return;
+    if (isBadImageUrl(absu, $el)) return;                  // << hard block for listed offenders
 
-    // hard UI/marketing cuts
-    if (isMarketingOrUiImage($, $el, absu)) return;
-    if (looksLikeSwatch($el, absu)) return;
-
-    // same-site/CDN preference
+    // prefer same site or known CDNs unless aggressive
     if (!allowHostRe.test(absu) && !isSameSiteOrCdn(baseUrl, absu) && !aggressive) return;
 
-    // context score (and optional main-only gate)
-    const ctxScore = scoreByContext($, $el[0], { mainOnly });
+    const ctxScore = scoreByContext($, $el[0] || $el, { mainOnly });
     if (ctxScore <= -999) return;
 
-    // size from attributes/styles (when present)
-    const wAttr = getAttrNumeric($el, 'width');
-    const hAttr = getAttrNumeric($el, 'height');
-    const style = String($el.attr('style') || '');
+    // quick size gate from attrs/styles (cheaper than URL parsing)
+    const wAttr = $el && $el.length ? getAttrNumeric($el, 'width') : 0;
+    const hAttr = $el && $el.length ? getAttrNumeric($el, 'height') : 0;
+    const style = $el && $el.length ? String($el.attr('style')||'') : '';
     const wCss  = parseCssPx(style);
     const maxSide = Math.max(wAttr, hAttr, wCss);
     if (maxSide && maxSide < minPx) return;
 
-    // compute combined score
+    // compute score
     let score = baseWeight + ctxScore;
     const L = absu.toLowerCase();
     if (preferRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 2;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
-    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3;
+    if (/\b(thumb|thumbnail|swatch)\b/.test(L)) score -= 3;
 
     const prev = imgWeights.get(absu) || 0;
     if (score > prev) imgWeights.set(absu, score);
@@ -1323,13 +1365,10 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     set.add(absu);
   };
 
-  // 1) Structured data images — strongest preference
-  (structured.images || []).forEach(u => {
-    const $root = $.root();
-    pushEl($root, u, 8);
-  });
+  // 1) Structured data images: strongest
+  (structured.images || []).forEach(u => pushEl($.root(), u, 8));
 
-  // 2) Product gallery/media areas (skip related/upsell via isRecoBlock)
+  // 2) Product gallery/media areas (skip reco)
   const gallerySelectors = [
     '.product-media','.product__media','.product-gallery','#product-gallery','[data-gallery]',
     '.product-images','.product-image-gallery','.pdp-gallery',
@@ -1337,7 +1376,6 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     '.owl-carousel','.fotorama','.MagicZoom','.cloudzoom-zoom','.zoomWindow','.zoomContainer',
     '.lightbox','.thumbnails'
   ].join(', ');
-
   $(gallerySelectors).each((_, container) => {
     if (isRecoBlock($, container)) return;
     $(container).find('img, source').each((__, el) => {
@@ -1352,36 +1390,59 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     });
   });
 
-  // 3) OpenGraph (secondary)
+  // 3) OpenGraph / Twitter
   if (og.image) pushEl($.root(), og.image, 3);
+  const tw = $('meta[name="twitter:image"]').attr('content'); if (tw) pushEl($.root(), tw, 2);
 
-  // 4) General main area images (context-gated & filtered)
-  $('main, #main, .main, article, .product, .product-detail, .product-details').find('img, source').each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const $el = $(el);
-    const cands = [
-      $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
-      $el.attr('data-original'), $el.attr('data-image'),
-      $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset'))
-    ];
-    cands.forEach(u => pushEl($el, u, 3));
+  // 4) Preloads (often main gallery)
+  $('link[rel="preload"][as="image"]').each((_, el) => pushEl($(el), $(el).attr('href'), 3));
+
+  // 5) Main-scope images (context-gated)
+  $('main, #main, .main, article, .product, .product-detail, .product-details')
+    .find('img, source, picture source').each((_, el) => {
+      if (isRecoBlock($, el)) return;
+      const $el = $(el);
+      const cands = [
+        $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
+        $el.attr('data-original'), $el.attr('data-image'),
+        $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset'))
+      ];
+      cands.forEach(u => pushEl($el, u, 3));
+    });
+
+  // 6) Background images (main scope)
+  $('main, #main, .main, article, .product, .product-detail, .product-details')
+    .find('[style*="background"]').each((_, el) => {
+      const $el = $(el);
+      const style = String($el.attr("style") || "");
+      const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
+      if (m && m[2]) pushEl($el, m[2], 2);
+    });
+
+  // 7) CSS <style> url(...) (low weight, still filtered)
+  $('style').each((_, el) => {
+    const css = String($(el).contents().text() || '');
+    if (!/url\(/i.test(css)) return;
+    const re = /url\((['"]?)([^'")]+)\1\)/ig;
+    let m; while ((m = re.exec(css))) pushEl($(el), m[2], 1);
   });
 
-  // 5) <picture> sources
-  $('picture source[srcset]').each((_, el) => {
+  // 8) JSON-in-attributes (galleries stored as JSON on data-*)
+  $('[data-gallery],[data-images],[data-photoswipe],[data-zoom-gallery],[data-media]').each((_, el) => {
     const $el = $(el);
-    pushEl($el, pickLargestFromSrcset($el.attr('srcset')), 3);
+    ['data-gallery','data-images','data-photoswipe','data-zoom-gallery','data-media'].forEach(attr => {
+      const raw = $el.attr(attr);
+      if (!raw) return;
+      const s = String(raw).trim();
+      if (!/^[\[{]/.test(s)) return;
+      try {
+        const obj = JSON.parse(s);
+        deepFindImagesFromJson(obj).forEach(u => pushEl($el, u, 3));
+      } catch {}
+    });
   });
 
-  // 6) Background images in main scope
-  $('main, #main, .main, article, .product, .product-detail, .product-details').find('[style*="background"]').each((_, el) => {
-    const $el = $(el);
-    const style = String($el.attr("style") || "");
-    const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
-    if (m && m[2]) pushEl($el, m[2], 2);
-  });
-
-  // 7) <noscript> fallbacks
+  // 9) noscript fallbacks
   $('noscript').each((_, n) => {
     if (isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
@@ -1393,7 +1454,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     });
   });
 
-  // 8) JSON blobs or raw HTML URL sweeps (last resort; still filtered)
+  // 10) Script blobs & raw HTML (last resort)
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!/\.(?:jpe?g|png|webp)\b/i.test(txt)) return;
@@ -1410,12 +1471,12 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     let m; while ((m = re.exec(rawHtml))) pushEl($.root(), m[1], 0);
   }
 
-  // Rank + dedupe by filename (keep highest score variant)
+  // Score + dedupe by basename
   const scored = Array.from(set).map(u => {
     let score = imgWeights.get(u) || 0;
     const ctx = imgContext.get(u) || {};
-    if (ctx.inReco) score -= 5;     // extra penalty if any reco context leaked through
-    if (ctx.inMain) score += 3;     // bonus for true main product context
+    if (ctx.inReco) score -= 5;
+    if (ctx.inMain) score += 3;
     return { url: decodeHtml(u), score };
   }).sort((a,b) => b.score - a.score);
 
