@@ -253,15 +253,16 @@ function findMainProductScope($) {
 
 function scoreByContext($, node, { mainOnly=false } = {}) {
   if (isRecoBlock($, node) || isFooterOrNav($, node)) return -999;
-
-  // If we don't have a meaningful DOM node (e.g., $.root() from regex/OG/JSON-LD),
-  // treat as neutral so mainonly doesn't discard it.
-  const isRootish = !node || node === $.root()[0];
-  if (isRootish) return 1; // neutral-positive so it survives gating
-
   const inMain = isMainProductNode($, node);
   if (mainOnly) return inMain ? 2 : -999;
   return inMain ? 2 : 0;
+}
+
+function keyForImageDedup(url) {
+  const u = String(url||"");
+  const base = u.split("/").pop().split("?")[0];
+  const size = (u.match(/(\d{2,5})x(\d{2,5})/) || []).slice(1).join("x");
+  return size ? `${base}#${size}` : base;
 }
 
 function dedupeImageObjs(cands, limit = 12) {
@@ -1395,20 +1396,16 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   ].join(', ');
   $(gallerySelectors).each((_, container) => {
     if (isRecoBlock($, container)) return;
-  
-    // include anchors (MagicZoom/CloudZoom etc.)
-    $(container).find('img, source, a').each((__, el) => {      
+    $(container).find('img, source').each((__, el) => {
       const $el = $(el);
-      const isAnchor = $el.is('a');
       const cands = [
         $el.attr('src'), $el.attr('data-src'), $el.attr('data-original'),
         $el.attr('data-zoom'), $el.attr('data-zoom-image'),
         $el.attr('data-image'), $el.attr('data-large_image'),
-        $el.attr('data-lazy'), pickLargestFromSrcset($el.attr('srcset')),
-        isAnchor ? $el.attr('href') : '' // ← this is where Compass hides the full-size Angle.jpg
+        $el.attr('data-lazy'), pickLargestFromSrcset($el.attr('srcset'))
       ];
       cands.forEach(u => pushEl($el, u, 6));
-      });
+    });
   });
 
   // 3) OpenGraph / Twitter
@@ -1420,17 +1417,15 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
   // 5) Main-scope images (context-gated)
   $('main, #main, .main, article, .product, .product-detail, .product-details')
-  .find('img, source, picture source, a').each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const $el = $(el);
-    const isAnchor = $el.is('a');
-    const cands = [
-      $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
-      $el.attr('data-original'), $el.attr('data-image'),
-      $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset')),
-      isAnchor ? $el.attr('href') : ''
-    ];
-    cands.forEach(u => pushEl($el, u, 3));
+    .find('img, source, picture source').each((_, el) => {
+      if (isRecoBlock($, el)) return;
+      const $el = $(el);
+      const cands = [
+        $el.attr('src'), $el.attr('data-src'), $el.attr('data-lazy'),
+        $el.attr('data-original'), $el.attr('data-image'),
+        $el.attr('data-zoom-image'), pickLargestFromSrcset($el.attr('srcset'))
+      ];
+      cands.forEach(u => pushEl($el, u, 3));
     });
 
   // 6) Background images (main scope)
@@ -1494,18 +1489,6 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     let m; while ((m = re.exec(rawHtml))) pushEl($.root(), m[1], 0);
   }
 
-  // Compass-only fallback: if nothing good yet, sweep anchors for real item images
-  try {
-    if (set.size === 0 && isCompassHost(baseUrl)) {
-      $('a[href]').each((_, a) => {
-        const href = String($(a).attr('href') || '');
-        if (/\/media\/images\/items\/[^?#]+\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(href) && !/noimage/i.test(href)) {
-          pushEl($(a), href, 7); // strong weight, it's likely the main Angle/Front image
-        }
-      });
-    }
-  } catch {}
-  
   // Score + dedupe by basename
   const scored = Array.from(set).map(u => {
     let score = imgWeights.get(u) || 0;
@@ -1659,23 +1642,10 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     }
   });
 
-  // Compass-only fallback: if we still have ~no images, sweep anchors for real item images
-  try {
-    if (isCompassHost(baseUrl) && scores.size < 2) {
-      $('a[href]').each((_, a) => {
-        const href = String($(a).attr('href') || '');
-        if (/\/media\/images\/items\/[^?#]+\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(href) && !/noimage/i.test(href)) {
-           push(a, href, 7); // strong weight
-        }
-      });
-    }
-  } catch {}
-
-
   // --- final ranking & dedupe ---
-  const scored = Array.from(scores.entries())
-     .map(([url, score]) => ({ url, score }))
-     .map(([url, score]) => ({ url, score }))
+  const scored = Array.from(set.entries())
+    .map(([url, score]) => ({ url, score }))
+    .sort((a, b) => b.score - a.score);
 
   const seen = new Set();
   let out = [];
@@ -2302,6 +2272,248 @@ function resolveAllPanes($, names){
   return Array.from(out);
 }
 
+/* ================== ADD-ONLY: Tab title normalization ================== */
+const TAB_SYNONYMS = {
+  overview: ['overview','description','product description','product details','details','about','info','information'],
+  specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','dimensions','sizing'],
+  features: ['features','key features','highlights','benefits','features/benefits'],
+  downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
+};
+
+function normTabTitle(s=''){
+  const t = String(s).toLowerCase().replace(/\s+/g,' ').trim();
+  const hit = (list)=> list.some(x => t.includes(x));
+  if (hit(TAB_SYNONYMS.overview)) return 'overview';
+  if (hit(TAB_SYNONYMS.specs))    return 'specs';
+  if (hit(TAB_SYNONYMS.features)) return 'features';
+  if (hit(TAB_SYNONYMS.downloads))return 'downloads';
+  return '';
+}
+
+function firstNonEmpty(...xs){ for (const x of xs){ const v=cleanup(x); if (v) return v; } return ''; }
+
+/* ================== ADD-ONLY: Remote/lazy content discovery ================== */
+function paneRemoteHref($, panel){
+  const $p = $(panel);
+  // Direct attributes used by many themes/libs
+  const attrs = ['data-url','data-href','data-content-url','data-remote','data-src','data-load','data-fragment','data-include','data-file','hx-get','hx-get-url'];
+  for (const a of attrs){
+    const v = $p.attr(a); if (v) return v;
+  }
+  // Dojo already handled elsewhere, but keep a fallback
+  const dojo = $p.attr('data-dojo-props') || '';
+  const m = /href\s*:\s*['"]([^'"]+)['"]/.exec(dojo);
+  if (m) return m[1];
+
+  // Sometimes panel has a single anchor to the real content
+  const a = $p.find('a[href]').first().attr('href');
+  if (a && /\.(html?|php|aspx|jsp)(?:[?#].*)?$/i.test(a)) return a;
+
+  return '';
+}
+
+/* ================== ADD-ONLY: Generic tab/accordion candidate collector ================== */
+function collectTabCandidates($, baseUrl){
+  const out = [];
+
+  // 1) ARIA/role-based tabs
+  $('[role="tablist"]').each((_, tl)=>{
+    $(tl).find('[role="tab"]').each((__, tab)=>{
+      const $tab = $(tab);
+      const title = cleanup($tab.attr('aria-label') || $tab.attr('title') || $tab.text());
+      const controls = $tab.attr('aria-controls') || '';
+      let $panel = controls ? $(documentQueryById($, controls)) : $();
+      if (!$panel || !$panel.length){
+        // try labelledby reverse
+        const id = $tab.attr('id');
+        if (id) $panel = $(`[role="tabpanel"][aria-labelledby="${id}"]`).first();
+      }
+      if ($panel && $panel.length){
+        out.push({
+          title,
+          type: 'aria',
+          el: $panel[0],
+          html: $panel.html() || '',
+          text: cleanup($panel.text() || ''),
+          href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
+        });
+      }
+    });
+  });
+
+  // 2) Classic .tabs / .tab-pane / .accordion variants
+  const paneSel = [
+    '.tab-pane','.tabs-panel','[role="tabpanel"]','.accordion-content','.accordion-item .content',
+    '.panel','.panel-body','.product-tabs .tab-content > *','.tabs-content > *','section[data-tab]'
+  ].join(', ');
+  $(paneSel).each((_, el)=>{
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+    const $el = $(el);
+    // Heading inside panel or previous sibling heading acts as the title
+    const title = firstNonEmpty(
+      $el.attr('data-title'),
+      $el.attr('aria-label'),
+      $el.prev('h1,h2,h3,h4,h5,button,a').first().text(),
+      $el.find('h1,h2,h3,h4,h5').first().text(),
+      // some themes echo tab name in class (e.g., "tab-description")
+      ($el.attr('class')||'').replace(/[-_]/g,' ').split(/\s+/).find(w => /desc|overview|spec|feature|download/i.test(w)) || ''
+    );
+    out.push({
+      title,
+      type: 'panel',
+      el,
+      html: $el.html() || '',
+      text: cleanup($el.text() || ''),
+      href: paneRemoteHref($, el) ? abs(baseUrl, paneRemoteHref($, el)) : ''
+    });
+  });
+
+  // 3) Fallback: tab triggers (a/button) that point to #id panels
+  $('a[data-target], button[data-target], a[data-tab], button[data-tab], a[href^="#tab"], a[href^="#panel"]').each((_, t)=>{
+    const $t = $(t);
+    const title = cleanup($t.text() || $t.attr('aria-label') || $t.attr('title') || '');
+    const target = $t.attr('data-target') || $t.attr('data-tab') || $t.attr('href') || '';
+    if (!target || !target.startsWith('#')) return;
+    const $panel = $(target).first();
+    if (!$panel.length) return;
+    out.push({
+      title,
+      type: 'trigger',
+      el: $panel[0],
+      html: $panel.html() || '',
+      text: cleanup($panel.text() || ''),
+      href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
+    });
+  });
+
+  // De-dupe by panel element id or index
+  const seen = new Set();
+  const uniq = [];
+  out.forEach((p, i)=>{
+    const id = (p.el && $(p.el).attr('id')) || `idx:${i}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    uniq.push(p);
+  });
+  return uniq;
+}
+
+/* ================== ADD-ONLY: Hydrate generic remote panes ================== */
+async function hydrateRemotePanes(cands, renderApiUrl, headers = {}){
+  if (!cands || !cands.length) return cands;
+  const base = (renderApiUrl || '').replace(/\/+$/,'');
+  const out = [];
+  for (const c of cands){
+    const copy = { ...c };
+    if ((!copy.html || copy.html.length < 40) && copy.href){
+      try{
+        const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=fast`;
+        const { html } = await fetchWithRetry(url, { headers });
+        copy.html = html || '';
+        copy.text = cleanup(cheerio.load(html).root().text() || '');
+      }catch{}
+    }
+    out.push(copy);
+  }
+  return out;
+}
+
+/* ================== ADD-ONLY: Rank/merge tabs into buckets ================== */
+function bucketizeTabs(cands){
+  const buckets = { overview: [], specs: [], features: [], downloads: [] };
+  for (const c of cands){
+    const norm = normTabTitle(c.title);
+    if (norm && buckets[norm]) buckets[norm].push(c);
+    else {
+      // Heuristic fallback by content
+      const t = (c.text || '').toLowerCase();
+      if (/dimension|width|height|depth|weight|spec/i.test(t)) buckets.specs.push(c);
+      else if (/feature|benefit|highlight/i.test(t)) buckets.features.push(c);
+      else if (/manual|ifu|instruction|datasheet|spec\s*sheet|brochure|pdf/i.test(t)) buckets.downloads.push(c);
+      else buckets.overview.push(c);
+    }
+  }
+  return buckets;
+}
+
+/* ================== ADD-ONLY: Extract from buckets using your existing parsers ================== */
+function extractFromBuckets($, buckets, baseUrl){
+  const add = { desc: '', specs: {}, features: [], manuals: new Set(), images: new Set() };
+
+  const collectImgs = (html) => {
+    if (!html) return;
+    const _$ = cheerio.load(html);
+    _$('.accordion-content, .tab-pane, [role="tabpanel"], section, div, article')
+      .find('img, source').each((_, n)=>{
+        const src = _$(n).attr('src') || _$(n).attr('data-src') || pickLargestFromSrcset(_$(n).attr('srcset')) || '';
+        if (src) add.images.add(abs(baseUrl, src));
+      });
+  };
+
+  // Overview/Description
+  for (const pane of buckets.overview){
+    const $p = cheerio.load(pane.html || '');
+    const d = extractDescriptionFromContainer($p, $p.root());
+    if (d && d.length > (add.desc || '').length) add.desc = d;
+    collectImgs(pane.html);
+  }
+
+  // Specs
+  for (const pane of buckets.specs){
+    const $p = cheerio.load(pane.html || '');
+    Object.assign(add.specs, extractSpecsFromContainer($p, $p.root()));
+    try {
+      const jsonExtras = extractSpecsFromScripts($p, $p.root());
+      Object.assign(add.specs, mergeSpecsAdditive(jsonExtras, {}));
+    } catch {}
+    collectImgs(pane.html);
+  }
+
+  // Features
+  for (const pane of buckets.features){
+    const $p = cheerio.load(pane.html || '');
+    add.features.push(...extractFeaturesFromContainer($p, $p.root()));
+    collectImgs(pane.html);
+  }
+
+  // Manuals
+  for (const pane of buckets.downloads){
+    const $p = cheerio.load(pane.html || '');
+    collectManualsFromContainer($p, $p.root(), baseUrl, add.manuals);
+    $p('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+      const href = String($p(el).attr('href')||'');
+      if (href) add.manuals.add(abs(baseUrl, href));
+    });
+    collectImgs(pane.html);
+  }
+
+  return add;
+}
+
+/* ================== ADD-ONLY: Images from panes → filtered list ================== */
+function finalizePaneImages(paneImgSet, baseUrl, opts){
+  const arr = Array.from(paneImgSet || []);
+  const filtered = filterAndRankExtraPaneImages(arr, baseUrl, opts);
+  return filtered;
+}
+
+/* ================== ADD-ONLY: Unified Tab Harvester (entry point) ================== */
+async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
+  const cands0 = collectTabCandidates($, baseUrl);
+  const cands  = await hydrateRemotePanes(cands0, renderApiUrl, headers);
+  const buckets= bucketizeTabs(cands);
+  const add    = extractFromBuckets($, buckets, baseUrl);
+
+  const images = finalizePaneImages(add.images, baseUrl, opts);
+  return {
+    desc: add.desc,
+    specs: prunePartsLikeSpecs(add.specs || {}),
+    features: dedupeList(add.features || []).slice(0, 20),
+    manuals: dedupeManualUrls(Array.from(add.manuals || [])),
+    images
+  };
+}
+
 /* ================== Tab/Accordion Harvester ================== */
 function extractSpecsFromContainer($, container){
   // ADD: avoid footer/nav/reco contamination
@@ -2644,6 +2856,45 @@ function prunePartsLikeSpecs(specs = {}){
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
+
+  // === ADD-ONLY: Unified tab/accordion harvester (runs before Dojo pre-pass) ===
+  try {
+    const headers = { "User-Agent": "MedicalExIngest/1.7" };
+    if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
+    const uni = await unifiedTabHarvest($, baseUrl, RENDER_API_URL, headers, opts);
+
+    if (uni.desc && uni.desc.length > (norm.description_raw || '').length) {
+      norm.description_raw = mergeDescriptions(norm.description_raw || "", uni.desc);
+    }
+    if (uni.specs && Object.keys(uni.specs).length) {
+      norm.specs = { ...(norm.specs || {}), ...uni.specs };
+    }
+    if (uni.features && uni.features.length) {
+      const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+      for (const f of uni.features) {
+        const k = String(f).toLowerCase();
+        if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
+        if (norm.features_raw.length >= 20) break;
+      }
+    }
+    if (uni.manuals && uni.manuals.length) {
+      const have = new Set(norm.manuals || []);
+      for (const u of uni.manuals) {
+        if (!have.has(u)) { (norm.manuals ||= []).push(u); have.add(u); }
+      }
+    }
+    if (uni.images && uni.images.length) {
+      const haveBase = new Set((norm.images || []).map(o => (o.url||'').split('/').pop().split('?')[0]));
+      for (const u of uni.images) {
+        const b = u.split('/').pop().split('?')[0];
+        if (!haveBase.has(b)) { (norm.images ||= []).push({ url: u }); haveBase.add(b); }
+        if (norm.images.length >= 12) break;
+      }
+    }
+  } catch (e) {
+    // non-fatal: continue with existing Dojo + resolveAllPanes logic
+  }
+  // === end Unified harvester ===
 
   // === Dojo/dijit TabContainer pre-pass ===
   try {
