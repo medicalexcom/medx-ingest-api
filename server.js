@@ -1909,9 +1909,12 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
 /* === Specs (scoped → dense block → global) === */
 function extractSpecsSmart($){
   let specPane = resolveTabPane($, [
-    'technical specifications','technical specification',
-    'tech specs','specifications','specification','details'
-  ]);
+  'technical specifications','technical specification',
+  'tech specs','specifications','specification',
+  'size & weight','size and weight','dimensions','dimension','sizing',
+  'details'
+]);
+
   // ADD: Make spec pane selection “footer-aware”
   if (specPane && (isFooterOrNav($, specPane) || isRecoBlock($, specPane))) {
     specPane = null;
@@ -2119,14 +2122,19 @@ function documentQueryById($, id){
 }
 
 function resolveTabPane($, names){
-  const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
+  const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
   let pane = null;
 
   $('a,button,[role="tab"]').each((_, el)=>{
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
 
-    const href = $(el).attr('href') || '';
+    let href = $(el).attr('href') || '';
+    if (!href && $(el).is('[role="tab"]')) {
+      const innerA = $(el).find('a[href^="#"]').first().attr('href');
+      if (innerA) href = innerA;
+    }
+    
     const controls = $(el).attr('aria-controls') || '';
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
@@ -2275,7 +2283,7 @@ function resolveAllPanes($, names){
 /* ================== ADD-ONLY: Tab title normalization ================== */
 const TAB_SYNONYMS = {
   overview: ['overview','description','product description','product details','details','about','info','information'],
-  specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','dimensions','sizing'],
+  specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
   features: ['features','key features','highlights','benefits','features/benefits'],
   downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
 };
@@ -2967,7 +2975,11 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
   }
   // === end Dojo/dijit pre-pass ===
 
-  const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
+  const specPanes   = resolveAllPanes($, [
+    'specification','specifications','technical specifications','tech specs',
+    'size & weight','size and weight','dimensions','dimension','sizing',
+    'details'
+  ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
   const featurePanes= resolveAllPanes($, [ 'features','features/benefits','benefits','key features','highlights' ]);
   const descPanes   = resolveAllPanes($, [ 'overview','description','product details','details' ]);
