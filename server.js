@@ -1,10 +1,4 @@
 /* medx-ingest-api/server.js */
-import express from "express";
-import cors from "cors";
-import * as cheerio from "cheerio";
-import crypto from "node:crypto";
-import { URL } from "node:url";
-import net from "node:net";
 
 import {
   RENDER_API_URL, RENDER_API_TOKEN, MIN_IMG_PX_ENV, EXCLUDE_PNG_ENV,
