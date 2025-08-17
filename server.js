@@ -1348,7 +1348,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (isBadImageUrl(absu, $el)) return;                  // << hard block for listed offenders
 
     // prefer same site or known CDNs unless aggressive
-    if (!allowHostRe.test(absu) && !isSameSiteOrCdn(baseUrl, absu) && !aggressive) return;
+    if (!aggressive && !isSameSiteOrCdn(baseUrl, absu) && !/\/media\/images\/items\//i.test(absu)) return;
 
     const ctxScore = scoreByContext($, $el[0] || $el, { mainOnly });
     if (ctxScore <= -999) return;
@@ -1642,28 +1642,28 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     }
   });
 
-  // Rank & dedupe by basename; drop Compass placeholders
-  const scored = Array.from(scores.entries())
+  // --- final ranking & dedupe ---
+  const scored = Array.from(set.entries())
     .map(([url, score]) => ({ url, score }))
     .sort((a, b) => b.score - a.score);
 
   const seen = new Set();
-  const out  = [];
+  let out = [];
   for (const s of scored) {
-    const baseRaw = s.url.split('/').pop().split('?')[0];
-    let baseKey = baseRaw.toLowerCase();
-    try { baseKey = decodeURIComponent(baseRaw).toLowerCase(); } catch {}
-    if (isCompassPlaceholder(s.url)) continue;
+    if (isCompassPlaceholder(s.url)) continue; // final guard
+    let baseKey = s.url.split("/").pop().split("?")[0];
+    try { baseKey = decodeURIComponent(baseKey); } catch {}
+    baseKey = baseKey.toLowerCase();
     if (seen.has(baseKey)) continue;
     seen.add(baseKey);
     out.push({ url: s.url });
     if (out.length >= 12) break;
   }
 
-  // Compass merge: add any additional real item images found elsewhere in the page
+  // --- Compass fix-up: merge real /media/images/items/* images if we have room
   try {
     if (isCompassHost(baseUrl)) {
-      const compImgs = harvestCompassItemImages($, baseUrl, rawHtml) || [];
+      const compImgs = harvestCompassItemImages($, baseUrl, rawHtml);
       if (compImgs.length) {
         const have = new Set(out.map(o => {
           let b = (o.url || '').split('/').pop().split('?')[0];
@@ -1683,6 +1683,7 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
 
   return out;
 }
+
 
 function fallbackImagesFromMain($, baseUrl, og, opts){
   const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
