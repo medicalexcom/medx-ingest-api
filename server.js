@@ -203,7 +203,6 @@ const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`ingest-api listening on :${port}`));
 
 /* env + knobs (unchanged behavior) */
-export const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim();
 export const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim();
 export const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
 export const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
