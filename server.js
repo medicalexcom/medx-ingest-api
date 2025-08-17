@@ -1,27 +1,203 @@
-// src/config.js
-export const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
-export const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
-export const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
-export const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
+/* medx-ingest-api/server.js */
+import express from "express";
+import cors from "cors";
+import * as cheerio from "cheerio";
+import crypto from "node:crypto";
+import { URL } from "node:url";
+import net from "node:net";
+
+/* ================== Config via env ================== */
+const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
+const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
+const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
+const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
 
 // Hardening & performance knobs
-export const DEFAULT_RENDER_TIMEOUT_MS = parseInt(process.env.RENDER_TIMEOUT_MS || "20000", 10);
-export const MAX_TOTAL_TIMEOUT_MS      = parseInt(process.env.TOTAL_TIMEOUT_MS  || "30000", 10);
-export const MAX_HTML_BYTES            = parseInt(process.env.MAX_HTML_BYTES    || "3000000", 10); // ~3MB
-export const CACHE_TTL_MS              = parseInt(process.env.CACHE_TTL_MS      || "180000", 10); // 3 min
-export const CACHE_MAX_ITEMS           = parseInt(process.env.CACHE_MAX_ITEMS   || "100", 10);
-export const ENABLE_CACHE              = String(process.env.ENABLE_CACHE        || "true").toLowerCase() === "true";
-export const ENABLE_BASIC_SSRF_GUARD   = String(process.env.ENABLE_SSRF_GUARD   || "true").toLowerCase() === "true";
+const DEFAULT_RENDER_TIMEOUT_MS = parseInt(process.env.RENDER_TIMEOUT_MS || "20000", 10);
+const MAX_TOTAL_TIMEOUT_MS      = parseInt(process.env.TOTAL_TIMEOUT_MS  || "30000", 10);
+const MAX_HTML_BYTES            = parseInt(process.env.MAX_HTML_BYTES    || "3000000", 10); // ~3MB safety cap
+const CACHE_TTL_MS              = parseInt(process.env.CACHE_TTL_MS      || "180000", 10); // 3 min
+const CACHE_MAX_ITEMS           = parseInt(process.env.CACHE_MAX_ITEMS   || "100", 10);
+const ENABLE_CACHE              = String(process.env.ENABLE_CACHE        || "true").toLowerCase() === "true";
+const ENABLE_BASIC_SSRF_GUARD   = String(process.env.ENABLE_SSRF_GUARD   || "true").toLowerCase() === "true";
 
-export const PORT = process.env.PORT || 8080;
+/* ================== App setup ================== */
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
 
-// src/cache.js
-import { ENABLE_CACHE, CACHE_TTL_MS, CACHE_MAX_ITEMS } from "./config.js";
+app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
+app.get("/healthz", (_, res) => res.json({ ok: true }));
 
+/* ================== Utilities ================== */
+function cid() { return crypto.randomBytes(6).toString("hex"); }
+function now() { return Date.now(); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function safeDecodeOnce(s){
+  try {
+    const decoded = decodeURIComponent(s);
+    if (!decoded || /%[0-9A-Fa-f]{2}/.test(decoded)) return s;
+    return decoded;
+  } catch { return s; }
+}
+
+function cleanup(s){ return String(s||'').replace(/\s+/g,' ').trim(); }
+function decodeHtml(s){
+  return s
+    ? s.replace(/&amp;/g,'&')
+         .replace(/&quot;/g,'"')
+         .replace(/&#39;/g,"'")
+         .replace(/&lt;/g,'<')
+         .replace(/&gt;/g,'>')
+    : s;
+}
+
+function isHttpUrl(u){
+  try {
+    const x = new URL(u);
+    return x.protocol === "http:" || x.protocol === "https:";
+  } catch { return false; }
+}
+
+function safeHostname(u){
+  try { return new URL(u).hostname; } catch { return ""; }
+}
+
+function isIp(host){ return net.isIP(host) !== 0; }
+
+function isPrivateIp(ip){
+  if (!isIp(ip)) return false;
+  const v4 = ip.split(".").map(n => parseInt(n,10));
+  if (v4.length === 4){
+    const [a,b] = v4;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 127) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  if (ip.includes(":")){
+    const lower = ip.toLowerCase();
+    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
+    if (lower === "::1") return true;
+    if (lower.startsWith("fe80")) return true;
+  }
+  return false;
+}
+
+function isLikelyDangerousHost(host){
+  const lower = String(host || "").toLowerCase();
+  if (!lower) return true;
+  if (lower === "localhost") return true;
+  if (lower.endsWith(".local") || lower.endsWith(".localhost")) return true;
+  if (isPrivateIp(lower)) return true;
+  return false;
+}
+
+function abs(base, link){
+  try {
+    if (!link) return link;
+    if (/^https?:\/\//i.test(link)) return link;
+    const u = new URL(base);
+    if (link.startsWith('//')) return u.protocol + link;
+    if (link.startsWith('/'))  return u.origin + link;
+    const basePath = u.pathname.endsWith('/') ? u.pathname : u.pathname.replace(/\/[^\/]*$/,'/');
+    return u.origin + basePath + link;
+  } catch(e){ return link; }
+}
+
+/* ================== ADD-ONLY helpers for image/CDN/manual capture ================== */
+function getRegistrableDomain(host) {
+  try {
+    const parts = String(host||"").toLowerCase().split(".").filter(Boolean);
+    if (parts.length <= 2) return parts.join(".");
+    const twoPartTLD = new Set(["co.uk","org.uk","gov.uk","ac.uk","com.au","net.au","co.jp"]);
+    const last2 = parts.slice(-2).join(".");
+    const last3 = parts.slice(-3).join(".");
+    return twoPartTLD.has(last2) ? last3 : last2;
+  } catch { return String(host||"").toLowerCase(); }
+}
+
+function isSameSiteOrCdn(baseUrl, otherUrl) {
+  try {
+    const a = new URL(baseUrl);
+    const b = new URL(otherUrl);
+    const aReg = getRegistrableDomain(a.hostname);
+    const bReg = getRegistrableDomain(b.hostname);
+    if (a.hostname === b.hostname) return true;
+    if (aReg && bReg && aReg === bReg) return true;
+    if (/(cdn|cloudfront|akamai|akamaized|azureedge|fastly|shopifycdn|bigcommerce|mzstatic|cdn.shopify)/i.test(b.hostname)) return true;
+    return false;
+  } catch { return false; }
+}
+
+function isMainProductNode($, el) {
+  const $el = $(el);
+  if (!$el || !$el.length) return false;
+  if ($el.closest('[itemscope][itemtype*="Product" i]').length) return true;
+  if ($el.closest('.product, .product-page, .product-detail, .product-details, #product, [id*="product" i]').length) return true;
+  if ($el.closest('.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery]').length) return true;
+  return $el.closest('main,#main,.main,#content,.content,article').length > 0;
+}
+
+function findMainProductScope($) {
+  const scopes = [
+    '[itemscope][itemtype*="Product" i]',
+    '.product, .product-detail, .product-details, #product',
+    '.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery]',
+    'main, #main, .main, #content, .content, article'
+  ];
+  for (const sel of scopes) {
+    const $hit = $(sel).first();
+    if ($hit && $hit.length) return $hit;
+  }
+  return $.root();
+}
+
+function scoreByContext($, node, { mainOnly=false } = {}) {
+  if (isRecoBlock($, node) || isFooterOrNav($, node)) return -999;
+  const inMain = isMainProductNode($, node);
+  if (mainOnly) return inMain ? 2 : -999;
+  return inMain ? 2 : 0;
+}
+
+function keyForImageDedup(url) {
+  const u = String(url||"");
+  const base = u.split("/").pop().split("?")[0];
+  const size = (u.match(/(\d{2,5})x(\d{2,5})/) || []).slice(1).join("x");
+  return size ? `${base}#${size}` : base;
+}
+
+function dedupeImageObjs(cands, limit = 12) {
+  const seen = new Set();
+  const out = [];
+  for (const c of cands) {
+    const k = keyForImageDedup(c.url);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ url: c.url });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function dedupeManualUrls(urls) {
+  const seen = new Set();
+  const out = [];
+  for (const u of urls) {
+    const k = u.replace(/#.*$/,'').trim();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+/* ================== HTML cache (TTL + naive LRU) ================== */
 const htmlCache = new Map(); // key -> { html, expires, last }
-const now = () => Date.now();
 
-export function cacheGet(key){
+function cacheGet(key){
   if (!ENABLE_CACHE) return null;
   const hit = htmlCache.get(key);
   if (!hit) return null;
@@ -33,7 +209,7 @@ export function cacheGet(key){
   return hit.html;
 }
 
-export function cacheSet(key, html){
+function cacheSet(key, html){
   if (!ENABLE_CACHE) return;
   if (htmlCache.size >= CACHE_MAX_ITEMS){
     let oldestK = null, oldestT = Infinity;
@@ -45,10 +221,8 @@ export function cacheSet(key, html){
   htmlCache.set(key, { html, expires: now() + CACHE_TTL_MS, last: now() });
 }
 
-// src/fetchers.js
-import { DEFAULT_RENDER_TIMEOUT_MS, MAX_HTML_BYTES } from "./config.js";
-
-export async function fetchWithRetry(endpoint, { headers, attempts=3, timeoutMs=DEFAULT_RENDER_TIMEOUT_MS, initialBackoff=600 }) {
+/* ================== Robust fetch with retry/timeout ================== */
+async function fetchWithRetry(endpoint, { headers, attempts=3, timeoutMs=DEFAULT_RENDER_TIMEOUT_MS, initialBackoff=600 }) {
   let lastErr = null, lastStatus = 0, lastBody = "";
   for (let i=1, delay=initialBackoff; i<=attempts; i++, delay = Math.floor(delay * 1.8)) {
     const ctrl = new AbortController();
@@ -71,7 +245,7 @@ export async function fetchWithRetry(endpoint, { headers, attempts=3, timeoutMs=
     }
     if (i < attempts){
       const jitter = Math.floor(Math.random()*0.3*delay);
-      await new Promise(r => setTimeout(r, delay + jitter));
+      await sleep(delay + jitter);
     }
   }
   const err = new Error(`Render API failed: status=${lastStatus} body=${String(lastBody).slice(0,280)}`);
@@ -79,7 +253,7 @@ export async function fetchWithRetry(endpoint, { headers, attempts=3, timeoutMs=
   throw err;
 }
 
-export async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEOUT_MS } = {}) {
+async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEOUT_MS } = {}) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(new Error("direct-timeout")), timeoutMs);
   try {
@@ -97,40 +271,6 @@ export async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDE
   }
 }
 
-// src/server.js
-import express from "express";
-import cors from "cors";
-import * as cheerio from "cheerio";
-import crypto from "node:crypto";
-
-import {
-  RENDER_API_URL, RENDER_API_TOKEN, MIN_IMG_PX_ENV, EXCLUDE_PNG_ENV,
-  MAX_TOTAL_TIMEOUT_MS, PORT, ENABLE_BASIC_SSRF_GUARD
-} from "./config.js";
-import { cacheGet, cacheSet } from "./cache.js";
-import { fetchWithRetry, fetchDirectHtml } from "./fetchers.js";
-import {
-  // net/url & small utils
-  isHttpUrl, safeHostname, isLikelyDangerousHost,
-  // core extractors / helpers
-  extractNormalized, augmentFromTabs,
-  sanitizeIngestPayload, enrichSpecsWithDerived,
-  extractDescriptionMarkdown, textToMarkdown, objectToMarkdownTable,
-  isCompass, harvestCompassOverview, harvestCompassSpecs
-} from "./core.js";
-
-/* ================== App setup ================== */
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
-
-app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
-app.get("/healthz", (_, res) => res.json({ ok: true }));
-
-/* ================== local tiny utils ================== */
-const now = () => Date.now();
-const cid = () => crypto.randomBytes(6).toString("hex");
-
 /* ================== Ingest route ================== */
 /**
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
@@ -138,7 +278,7 @@ const cid = () => crypto.randomBytes(6).toString("hex");
  * &harvest=true&sanitize=true
  * &markdown=true
  * &debug=true
- * &mainonly=true
+ * &mainonly=true   <-- ADD-ONLY flag to restrict to main product scope
  */
 app.get("/ingest", async (req, res) => {
   const started = now();
@@ -150,7 +290,7 @@ app.get("/ingest", async (req, res) => {
     const rawUrl = String(req.query.url || "");
     if (!rawUrl) return res.status(400).json({ error: "Missing url param" });
 
-    const targetUrl = safeDecodeOnceOnce(rawUrl); // tiny wrapper below to match original behavior
+    const targetUrl = safeDecodeOnce(rawUrl);
     if (!isHttpUrl(targetUrl)) return res.status(400).json({ error: "Invalid url param" });
 
     const host = safeHostname(targetUrl);
@@ -174,7 +314,7 @@ app.get("/ingest", async (req, res) => {
     const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
     const doHarvest  = String(req.query.harvest   || "false").toLowerCase() === "true";
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
-    const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true";
+    const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
 
@@ -184,9 +324,9 @@ app.get("/ingest", async (req, res) => {
     const cacheKey = `render:${endpoint}`;
     let html = cacheGet(cacheKey);
     let fetched = false;
-
     if (!html){
       const t0 = now();
+
       let rendered = "";
       try {
         const r = await fetchWithRetry(endpoint, { headers });
@@ -208,12 +348,13 @@ app.get("/ingest", async (req, res) => {
       html = rendered;
       cacheSet(cacheKey, html);
       fetched = true;
+
     } else {
       diag.timings.cacheHit = true;
     }
 
     const t1 = now();
-    let norm = extractNormalized(targetUrl, html, { minImgPx, excludePng, aggressive, diag, mainOnly });
+    let norm = extractNormalized(targetUrl, html, { minImgPx, excludePng, aggressive, diag, mainOnly }); // ADD-ONLY pass mainOnly
     diag.timings.extractMs = now() - t1;
 
     if (!norm.name_raw && (!norm.description_raw || norm.description_raw.length < 10)) {
@@ -222,14 +363,15 @@ app.get("/ingest", async (req, res) => {
 
     if (doHarvest) {
       const t2 = now();
-      norm = await augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng, mainOnly });
+      norm = await augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng, mainOnly }); // ADD-ONLY propagate
       diag.timings.harvestMs = now() - t2;
     }
 
-    // Compass-only additive harvest (keeps your existing data intact)
+    // === Compass-only additive harvest (keeps your existing data intact) ===
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
 
+      // (1) Overview: full paragraphs + bullets (merged once)
       try {
         const compassOverview = harvestCompassOverview($);
         if (compassOverview) {
@@ -249,6 +391,7 @@ app.get("/ingest", async (req, res) => {
         diag.warnings.push(`compass-overview: ${msg}`);
       }
 
+      // (2) Technical Specifications (union-merge; existing keys win)
       try {
         const compassSpecs = harvestCompassSpecs($);
         if (Object.keys(compassSpecs).length) {
@@ -259,8 +402,9 @@ app.get("/ingest", async (req, res) => {
         diag.warnings.push(`compass-specs: ${msg}`);
       }
     }
+    // === end Compass-only additions ===
 
-    // final spec enrichment (adds-only) before sanitize
+    /* ==== MEDX ADD-ONLY: final spec enrichment before sanitize v1 ==== */
     try { norm.specs = enrichSpecsWithDerived(norm.specs || {}); } catch {}
 
     if (wantMd) {
@@ -296,164 +440,8 @@ app.get("/ingest", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`ingest-api listening on :${PORT}`));
-
-/* local helper to mimic original safeDecodeOnce */
-function safeDecodeOnceOnce(s){
-  try {
-    const decoded = decodeURIComponent(s);
-    if (!decoded || /%[0-9A-Fa-f]{2}/.test(decoded)) return s;
-    return decoded;
-  } catch { return s; }
-}
-
-// src/core.js
-import * as cheerio from "cheerio";
-import { MIN_IMG_PX_ENV, EXCLUDE_PNG_ENV } from "./config.js";
-import net from "node:net";
-
-/* ================== Small shared utils ================== */
-export function cleanup(s){ return String(s||'').replace(/\s+/g,' ').trim(); }
-export function decodeHtml(s){
-  return s
-    ? s.replace(/&amp;/g,'&')
-         .replace(/&quot;/g,'"')
-         .replace(/&#39;/g,"'")
-         .replace(/&lt;/g,'<')
-         .replace(/&gt;/g,'>')
-    : s;
-}
-export function isHttpUrl(u){
-  try {
-    const x = new URL(u);
-    return x.protocol === "http:" || x.protocol === "https:";
-  } catch { return false; }
-}
-export function safeHostname(u){
-  try { return new URL(u).hostname; } catch { return ""; }
-}
-function isIp(host){ return net.isIP(host) !== 0; }
-function isPrivateIp(ip){
-  if (!isIp(ip)) return false;
-  const v4 = ip.split(".").map(n => parseInt(n,10));
-  if (v4.length === 4){
-    const [a,b] = v4;
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 127) return true;
-    if (a === 169 && b === 254) return true;
-  }
-  if (ip.includes(":")){
-    const lower = ip.toLowerCase();
-    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
-    if (lower === "::1") return true;
-    if (lower.startsWith("fe80")) return true;
-  }
-  return false;
-}
-export function isLikelyDangerousHost(host){
-  const lower = String(host || "").toLowerCase();
-  if (!lower) return true;
-  if (lower === "localhost") return true;
-  if (lower.endsWith(".local") || lower.endsWith(".localhost")) return true;
-  if (isPrivateIp(lower)) return true;
-  return false;
-}
-export function abs(base, link){
-  try {
-    if (!link) return link;
-    if (/^https?:\/\//i.test(link)) return link;
-    const u = new URL(base);
-    if (link.startsWith('//')) return u.protocol + link;
-    if (link.startsWith('/'))  return u.origin + link;
-    const basePath = u.pathname.endsWith('/') ? u.pathname : u.pathname.replace(/\/[^\/]*$/,'/');
-    return u.origin + basePath + link;
-  } catch(e){ return link; }
-}
-
-/* ================== Image/CDN/manual helpers ================== */
-function getRegistrableDomain(host) {
-  try {
-    const parts = String(host||"").toLowerCase().split(".").filter(Boolean);
-    if (parts.length <= 2) return parts.join(".");
-    const twoPartTLD = new Set(["co.uk","org.uk","gov.uk","ac.uk","com.au","net.au","co.jp"]);
-    const last2 = parts.slice(-2).join(".");
-    const last3 = parts.slice(-3).join(".");
-    return twoPartTLD.has(last2) ? last3 : last2;
-  } catch { return String(host||"").toLowerCase(); }
-}
-function isSameSiteOrCdn(baseUrl, otherUrl) {
-  try {
-    const a = new URL(baseUrl);
-    const b = new URL(otherUrl);
-    const aReg = getRegistrableDomain(a.hostname);
-    const bReg = getRegistrableDomain(b.hostname);
-    if (a.hostname === b.hostname) return true;
-    if (aReg && bReg && aReg === bReg) return true;
-    if (/(cdn|cloudfront|akamai|akamaized|azureedge|fastly|shopifycdn|bigcommerce|mzstatic|cdn.shopify)/i.test(b.hostname)) return true;
-    return false;
-  } catch { return false; }
-}
-function isMainProductNode($, el) {
-  const $el = $(el);
-  if (!$el || !$el.length) return false;
-  if ($el.closest('[itemscope][itemtype*="Product" i]').length) return true;
-  if ($el.closest('.product, .product-page, .product-detail, .product-details, #product, [id*="product" i]').length) return true;
-  if ($el.closest('.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery]').length) return true;
-  return $el.closest('main,#main,.main,#content,.content,article').length > 0;
-}
-function findMainProductScope($) {
-  const scopes = [
-    '[itemscope][itemtype*="Product" i]',
-    '.product, .product-detail, .product-details, #product',
-    '.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery]',
-    'main, #main, .main, #content, .content, article'
-  ];
-  for (const sel of scopes) {
-    const $hit = $(sel).first();
-    if ($hit && $hit.length) return $hit;
-  }
-  return $.root();
-}
-function scoreByContext($, node, { mainOnly=false } = {}) {
-  if (isRecoBlock($, node) || isFooterOrNav($, node)) return -999;
-  const inMain = isMainProductNode($, node);
-  if (mainOnly) return inMain ? 2 : -999;
-  return inMain ? 2 : 0;
-}
-function keyForImageDedup(url) {
-  const u = String(url||"");
-  const base = u.split("/").pop().split("?")[0];
-  const size = (u.match(/(\d{2,5})x(\d{2,5})/) || []).slice(1).join("x");
-  return size ? `${base}#${size}` : base;
-}
-function dedupeImageObjs(cands, limit = 12) {
-  const seen = new Set();
-  const out = [];
-  for (const c of cands) {
-    const k = keyForImageDedup(c.url);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push({ url: c.url });
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-function dedupeManualUrls(urls) {
-  const seen = new Set();
-  const out = [];
-  for (const u of urls) {
-    const k = u.replace(/#.*$/,'').trim();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(k);
-  }
-  return out;
-}
-
-/* ================== Normalization pivot ================== */
-export function extractNormalized(baseUrl, html, opts) {
+/* ================== Normalization ================== */
+function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
   const $ = cheerio.load(html);
 
@@ -480,27 +468,33 @@ export function extractNormalized(baseUrl, html, opts) {
     product: extractOgProductMeta($)
   };
 
+  // ==== FIX: define name and brand before using them ====
   const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) brand = inferBrandFromName(name);
+  // =====================================================
 
   let description_raw = cleanup(
     mergedSD.description || (() => {
+      // 1) Prefer obvious description containers
       const selectors = [
         '[itemprop="description"]',
         '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
         '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
+        // generic safety net: any node with "description/details/overview/copy" in id or class
         '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
       ].join(', ');
 
       let best = "";
       $(selectors).each((_, el) => {
+        // ADD: skip footer/nav wrappers & legal-like text
         if (isFooterOrNav($, el)) return;
         const elText = cleanup($(el).text() || "");
         if (!elText) return;
         if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
 
         const $el = $(el);
+        // headings + lead + paragraphs feel like a true description
         const text = [
           $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
           $el.find('p').map((i, n) => $(n).text()).get().join(' ')
@@ -509,8 +503,9 @@ export function extractNormalized(baseUrl, html, opts) {
         if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
       });
 
+      // 2) Fallback: longest paragraph anywhere in main content (skip footer/nav)
       if (!best) {
-        const scope = $('main,#main,.main,#content,.content').first();
+        const scope = $('main,#main,.main,#content,.content').first(); // avoid body-wide scan
         const paras = scope.find('p').map((i, el) => {
           if (isFooterOrNav($, el)) return "";
           const t = cleanup($(el).text());
@@ -526,6 +521,7 @@ export function extractNormalized(baseUrl, html, opts) {
   const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
   const manuals = extractManuals($, baseUrl, name, html, opts);
 
+  /* ==== ADD-ONLY: merge extra images/manuals from enhanced passes ==== */
   try {
     const extraImgs = extractImagesPlus($, mergedSD, og, baseUrl, name, html, opts);
     if (extraImgs && extraImgs.length) {
@@ -545,27 +541,35 @@ export function extractNormalized(baseUrl, html, opts) {
       manuals.length = 0; combined.forEach(x => manuals.push(x));
     }
   } catch {}
+  /* ==== END ADD-ONLY ==== */
 
-  let specs = Object.keys(mergedSD.specs || {}).length ? mergedSD.specs : extractSpecsSmart($);
+  let specs    = Object.keys(mergedSD.specs || {}).length ? mergedSD.specs : extractSpecsSmart($);
 
+  /* ==== MEDX ADD-ONLY: merge extras from embedded JSON v1 ==== */
   try {
     const extraJsonSpecs = extractSpecsFromScripts($);
     if (extraJsonSpecs && Object.keys(extraJsonSpecs).length) {
       specs = mergeSpecsAdditive(specs, extraJsonSpecs);
     }
   } catch {}
+
+  /* ==== MEDX ADD-ONLY: merge JSON-LD specs from all Product nodes v1 ==== */
   try {
-    const jsonldAll = extractJsonLdAllProductSpecs($);
+    const jsonldAll = extractJsonLdAllProductSpecs($); // (ADD: now internally constrained to same page)
     if (jsonldAll && Object.keys(jsonldAll).length) {
       specs = mergeSpecsAdditive(specs, jsonldAll);
     }
   } catch {}
+
+  /* ==== MEDX ADD-ONLY: global K:V sweep to fill remaining gaps v1 ==== */
   try {
     const globalPairs = extractAllSpecPairs($);
     if (globalPairs && Object.keys(globalPairs).length) {
       specs = mergeSpecsAdditive(specs, globalPairs);
     }
   } catch {}
+
+  // ==== ADD: prune parts/accessories noise from specs (add-only) ====
   try { specs = prunePartsLikeSpecs(specs); } catch {}
 
   let features = (mergedSD.features && mergedSD.features.length) ? mergedSD.features : extractFeaturesSmart($);
@@ -588,8 +592,7 @@ export function extractNormalized(baseUrl, html, opts) {
     brand
   };
 }
-
-/* ===== Structured Data extractors (start) ===== */
+/* ================== Structured Data Extractors ================== */
 function schemaPropsToSpecs(props){
   const out = {};
   try{
@@ -601,6 +604,7 @@ function schemaPropsToSpecs(props){
   }catch{}
   return out;
 }
+
 function extractJsonLd($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -663,6 +667,7 @@ function extractJsonLd($){
     images
   };
 }
+
 function extractMicrodataProduct($){
   const out = { specs: {}, images: [], features: [] };
   const $prod = $('[itemscope][itemtype*="Product"]').first();
@@ -708,6 +713,7 @@ function extractMicrodataProduct($){
 
   return out;
 }
+
 function extractRdfaProduct($){
   const out = { specs: {}, images: [], features: [] };
   const $prod = $('[typeof*="Product"]').first();
@@ -743,6 +749,7 @@ function extractRdfaProduct($){
 
   return out;
 }
+
 function extractOgProductMeta($){
   const out = {};
   $('meta[property^="product:"]').each((_, el)=>{
@@ -754,6 +761,7 @@ function extractOgProductMeta($){
   });
   return out;
 }
+
 function mergeProductSD(a={}, b={}, c={}){
   const pick = (x,y)=> x && String(x).trim() ? x : y;
   const name        = pick(a.name,        pick(b.name,        c.name));
@@ -772,7 +780,7 @@ function mergeProductSD(a={}, b={}, c={}){
   return { name, description, brand, images, specs, features: feats };
 }
 
-/* === misc helpers used later === */
+/* === Images === */
 function pickLargestFromSrcset(srcset) {
   if (!srcset) return "";
   try {
@@ -813,15 +821,384 @@ function inferSizeFromUrl(u) {
   } catch { return { w: 0, h: 0 }; }
 }
 
-/* ===== Brand inference fallback ===== */
-function inferBrandFromName(name){
-  const first = (String(name||"").trim().split(/\s+/)[0] || "");
-  if (/^(the|a|an|with|and|for|of|by|pro|basic)$/i.test(first)) return "";
-  if (/^[A-Z][A-Za-z0-9\-]+$/.test(first)) return first;
-  return "";
+/* ================== Specs: canonicalization & enrichment (ADD-ONLY) ================== */
+/* ==== MEDX ADD-ONLY: specs canonicalization & enrichment v1 ==== */
+
+// Canonical names for common spec keys (lowercased text → canonical snake_case key)
+const SPEC_SYNONYMS = new Map([
+  // Dimensions & size
+  ["dimensions", "dimensions"],
+  ["overall dimensions", "overall_dimensions"],
+  ["overall size", "overall_dimensions"],
+  ["overall width", "overall_width"],
+  ["overall height", "overall_height"],
+  ["overall length", "overall_length"],
+  ["overall depth", "overall_depth"],
+  ["width", "width"],
+  ["height", "height"],
+  ["length", "length"],
+  ["depth", "depth"],
+  ["seat width", "seat_width"],
+  ["seat depth", "seat_depth"],
+  ["seat height", "seat_height"],
+  ["back height", "back_height"],
+  ["arm height", "arm_height"],
+  ["handle height", "handle_height"],
+
+  // Weight/capacity
+  ["weight capacity", "weight_capacity"],
+  ["max weight", "weight_capacity"],
+  ["maximum weight", "weight_capacity"],
+  ["capacity", "weight_capacity"],
+  ["user weight capacity", "weight_capacity"],
+  ["product weight", "product_weight"],
+  ["unit weight", "product_weight"],
+  ["shipping weight", "shipping_weight"],
+  ["packaged weight", "shipping_weight"],
+
+  // Other frequent keys
+  ["sku", "sku"],
+  ["mpn", "mpn"],
+  ["model", "model"],
+  ["model number", "model"],
+  ["upc", "gtin12"],
+  ["gtin", "gtin14"],
+  ["color", "color"],
+  ["material", "material"],
+  ["warranty", "warranty"],
+  ["category", "category"],
+  ["brand", "brand"],
+  ["manufacturer", "manufacturer"]
+]);
+
+function canonicalizeSpecKey(k = "") {
+  const base = String(k).trim().replace(/\s+/g, " ");
+  const lower = base.toLowerCase();
+
+  // Quick synonym lookup
+  if (SPEC_SYNONYMS.has(lower)) return SPEC_SYNONYMS.get(lower);
+
+  // Heuristics → snake_case
+  return lower
+    .replace(/[^\p{L}\p{N}\s/.-]+/gu, "")
+    .replace(/\//g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
-/* ======= Images (main) ======= */
+function normalizeUnitsInText(v = "") {
+  // Normalize common units typography
+  return String(v)
+    // inch mark to "in"
+    .replace(/(\d)\s*["”]/g, "$1 in")
+    // feet mark to "ft"
+    .replace(/(\d)\s*[\'’]/g, "$1 ft")
+    // pound variants to lb
+    .replace(/\b(pounds?|lbs?)\b/gi, "lb")
+    // ounce to oz
+    .replace(/\b(ounces?)\b/gi, "oz")
+    // millimeter to mm, centimeter to cm, kilogram to kg, gram to g
+    .replace(/\b(millimet(er|re)s?)\b/gi, "mm")
+    .replace(/\b(centimet(er|re)s?)\b/gi, "cm")
+    .replace(/\b(kilograms?)\b/gi, "kg")
+    .replace(/\b(grams?)\b/gi, "g")
+    // tidy spaces
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Try to parse WxDxH or similar patterns; returns { width, depth, height, unit } when possible
+function parseDimensionsBlock(v = "") {
+  const t = normalizeUnitsInText(v).toLowerCase();
+
+  // 1) "W x D x H" with unit repeated or trailing
+  // Examples: "20 in W x 18 in D x 35 in H", "20 x 18 x 35 in"
+  let m = t.match(
+    /\b(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\b/
+  );
+  if (m) {
+    const w = parseFloat(m[1]), d = parseFloat(m[3]), h = parseFloat(m[5]);
+    const unit = (m[2] || m[4] || m[6] || "in").toLowerCase();
+    return { width: w, depth: d, height: h, unit };
+  }
+  return null;
+}
+
+function enrichSpecsWithDerived(specs = {}) {
+  const out = { ...specs };
+
+  // 1) Expand overall_dimensions into components if parsable
+  const candidates = [
+    "overall_dimensions",
+    "dimensions",
+    "overall_size",
+  ];
+  for (const key of candidates) {
+    const val = out[key];
+    if (val && typeof val === "string") {
+      const dims = parseDimensionsBlock(val);
+      if (dims) {
+        const u = dims.unit;
+        if (dims.width  != null && out["overall_width"]  == null) out["overall_width"]  = `${dims.width} ${u}`;
+        if (dims.depth  != null && out["overall_depth"]  == null) out["overall_depth"]  = `${dims.depth} ${u}`;
+        if (dims.height != null && out["overall_height"] == null) out["overall_height"] = `${dims.height} ${u}`;
+      }
+    }
+  }
+
+  // 2) Normalize units for dimension-like values (adds-only)
+  const DIM_KEYS = [
+    "overall_width","overall_height","overall_length","overall_depth",
+    "width","height","length","depth",
+    "seat_width","seat_height","seat_depth","back_height","arm_height","handle_height",
+    "product_weight","shipping_weight","weight_capacity"
+  ];
+  for (const k of DIM_KEYS) {
+    if (out[k] && typeof out[k] === "string") {
+      out[k] = normalizeUnitsInText(out[k]);
+    }
+  }
+
+  return out;
+}
+
+// Merge two specs objects where `primary` wins on conflicts (additive).
+function mergeSpecsAdditive(primary = {}, secondary = {}) {
+  const merged = { ...secondary, ...primary };
+  return enrichSpecsWithDerived(merged);
+}
+
+/* ==== MEDX ADD-ONLY: Pluck JSON-like objects from JS v1 ==== */
+function pluckJsonObjectsFromJs(txt, maxBlocks = 3) {
+  const out = [];
+  let i = 0, n = txt.length;
+  const pushBlock = (start, openChar, closeChar) => {
+    let depth = 0, j = start, inStr = false, esc = false;
+    const isQuote = c => c === '"' || c === "'";
+    let quote = null;
+
+    while (j < n) {
+      const c = txt[j];
+      if (inStr) {
+        if (esc) { esc = false; }
+        else if (c === '\\') { esc = true; }
+        else if (c === quote) { inStr = false; quote = null; }
+      } else {
+        if (isQuote(c)) { inStr = true; quote = c; }
+        else if (c === openChar) depth++;
+        else if (c === closeChar) {
+          depth--;
+          if (depth === 0) {
+            out.push(txt.slice(start, j + 1));
+            return j + 1;
+          }
+        }
+      }
+      j++;
+    }
+    return start; // failed to close
+  };
+
+  while (i < n && out.length < maxBlocks) {
+    const ch = txt[i];
+    if (ch === '{' || ch === '[') {
+      const next = pushBlock(i, ch, ch === '{' ? '}' : ']');
+      if (next > i) { i = next; continue; }
+    }
+    i++;
+  }
+  return out;
+}
+
+/* ================== Specs: pull from embedded JSON (ADD-ONLY) ================== */
+/* ==== MEDX ADD-ONLY: extract specs from scripts v1 (with reco-path guard) ==== */
+function extractSpecsFromScripts($, container /* optional */) {
+  const scope = container ? $(container) : $;
+  if (container && (isFooterOrNav($, container) || isRecoBlock($, container))) return {};
+
+  const out = {};
+  const RECO_PATH_RE = /(related|recommend|upsell|cross|also(view|bought)|similar|fbt|suggest)/i;
+
+  const pushKV = (name, value) => {
+    const k = canonicalizeSpecKey(name);
+    const v = cleanup(String(value || ""));
+    if (!k || !v) return;
+    if (!out[k]) out[k] = v; // first occurrence wins; DOM/SD will win later via merge order
+  };
+
+  const visit = (node, path = "") => {
+    if (node == null) return;
+    if (typeof node === "string") return;
+
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) visit(node[i], `${path}[${i}]`);
+      return;
+    }
+
+    if (typeof node === "object") {
+      // If path looks like recommendations, skip collecting KV from this subtree
+      const looksReco = RECO_PATH_RE.test(path);
+      const nameLike  = node.name || node.label || node.title || node.displayName || node.key || node.property;
+      const valueLike = node.value || node.displayValue || node.val || node.text || node.content || node.description;
+      if (!looksReco && nameLike && (valueLike != null && valueLike !== "")) pushKV(nameLike, valueLike);
+
+      const containers = [
+        "specs","specifications","technicalSpecifications","attributes","attributeGroups",
+        "productAttributes","properties","features","details","data","dataSheet","Specification","Specifications",
+        "custom_fields","customFields","customfields"
+      ];
+      containers.forEach(c => { if (node[c]) visit(node[c], `${path}.${c}`); });
+
+      // BigCommerce/BCData shapes
+      if (node.product && (node.product.attributes || node.product.custom_fields)) {
+        visit(node.product.attributes || [], `${path}.product.attributes`);
+        visit(node.product.custom_fields || [], `${path}.product.custom_fields`);
+      }
+
+      // Recurse into other fields with path context
+      for (const [k, v] of Object.entries(node)) visit(v, `${path}.${k}`);
+    }
+  };
+
+  // 1) Strict JSON blobs
+  scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
+    if (isRecoBlock($, el)) return;
+    const raw = $(el).contents().text();
+    if (!raw || !raw.trim()) return;
+    try { visit(JSON.parse(raw.trim()), "$"); } catch {}
+  });
+
+  // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
+  scope.find("script").each((_, el) => {
+    if (isRecoBlock($, el)) return;
+    const txt = String($(el).contents().text() || "");
+    if (!txt || txt.length < 40) return;
+    if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
+
+    const blocks = pluckJsonObjectsFromJs(txt, 5);
+    for (const block of blocks) {
+      try { visit(JSON.parse(block), "$"); } catch {}
+    }
+  });
+
+  const canon = {};
+  Object.entries(out).forEach(([k, v]) => {
+    const ck = canonicalizeSpecKey(k);
+    if (!canon[ck]) canon[ck] = normalizeUnitsInText(v);
+  });
+
+  return enrichSpecsWithDerived(canon);
+}
+
+/* ==== MEDX ADD-ONLY: JSON-LD extras from all Product nodes v1 (ADD: now filtered to page) ==== */
+function extractJsonLdAllProductSpecs($){
+  const nodes = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const raw = $(el).contents().text();
+      if (!raw || !raw.trim()) return;
+      const parsed = JSON.parse(raw.trim());
+      (Array.isArray(parsed) ? parsed : [parsed]).forEach(obj => {
+        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
+        else nodes.push(obj);
+      });
+    } catch {}
+  });
+
+  // ADD: detect page canonical URL to constrain merges
+  const pageUrl =
+    $('link[rel="canonical"]').attr('href') ||
+    $('meta[property="og:url"]').attr('content') ||
+    "";
+
+  let pageHost = "";
+  let pagePath = "";
+  try {
+    const u = new URL(pageUrl);
+    pageHost = (u.hostname || "").toLowerCase();
+    pagePath = u.pathname || "";
+  } catch {}
+
+  const prods = nodes.filter(n => String(n && n['@type'] || '').toLowerCase().includes('product'));
+
+  // ADD: narrow to products that belong to the same page/host if possible
+  const filtered = prods.filter(p => {
+    const url = String(p.url || p['@id'] || "");
+    if (!url) return !!pageHost ? false : true;
+    try {
+      const u = new URL(url, pageUrl || "https://example.com/");
+      if (pageHost && u.hostname.toLowerCase() !== pageHost) return false;
+      if (pagePath && u.pathname && u.pathname !== pagePath) return false;
+      return true;
+    } catch { return false; }
+  });
+
+  const chosen = filtered.length ? filtered : (prods.length ? [prods[0]] : []);
+  const merged = {};
+  for (const p of chosen) {
+    const specs = schemaPropsToSpecs(
+      p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
+    );
+    Object.assign(merged, specs);
+  }
+  return merged;
+}
+
+/* ==== MEDX ADD-ONLY: Global spec sweep v1 (now reco-aware & parts-aware) ==== */
+function extractAllSpecPairs($){
+  const out = {};
+
+  // Tables
+  $('table').each((_, tbl)=>{
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
+    let hits = 0;
+    const local = {};
+    $(tbl).find('tr').each((__, tr)=>{
+      const cells = $(tr).find('th,td');
+      if (cells.length >= 2) {
+        const k = cleanup($(cells[0]).text());
+        const v = cleanup($(cells[1]).text());
+        // ADD: ignore legal/menu rows
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return;
+        if (k.length <= 80 && v.length <= 400) {
+          local[canonicalizeSpecKey(k)] = v;
+          hits++;
+        }
+      }
+    });
+    if (hits >= 3) Object.assign(out, local);
+  });
+
+  // Definition lists
+  $('dl').each((_, dl)=>{
+    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return; // ADD reco guard
+    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
+    if (dts.length === dds.length && dts.length >= 3){
+      for (let i=0;i<dts.length;i++){
+        const k=cleanup($(dts[i]).text());
+        const v=cleanup($(dds[i]).text());
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue; // ADD
+        out[canonicalizeSpecKey(k)] = v;
+      }
+    }
+  });
+
+  // Colon/hyphen pairs in main/product areas (keep scope, but still guard)
+  $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
+    const t = cleanup($(el).text());
+    if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
+    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
+    if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
+  });
+
+  const norm = {};
+  for (const [k,v] of Object.entries(out)) norm[k] = normalizeUnitsInText(v);
+  return enrichSpecsWithDerived(norm);
+}
+
+/* === Images continued === */
 function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
   const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
@@ -830,7 +1207,8 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const set = new Set();
   const imgWeights = new Map();
 
-  const imgContext = new Map();
+  // NEW: track image context (main gallery vs. related/upsell) for scoring
+  const imgContext = new Map(); // url -> { inReco: bool, inMain: bool }
   const markCtx = (absu, ctx) => {
     const prev = imgContext.get(absu) || { inReco:false, inMain:false };
     imgContext.set(absu, { inReco: prev.inReco || !!ctx.inReco, inMain: prev.inMain || !!ctx.inMain });
@@ -846,8 +1224,10 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     set.add(absu);
   };
 
+  // structured data images — prefer strongly
   (structured.images || []).forEach(u => push(u, 8, { inMain: true }));
 
+  // gallery containers (skip related/recommendation blocks entirely)
   const gallerySelectors = [
     '.product-media','.product__media','.product-gallery','.gallery','.media-gallery','#product-gallery','#gallery','[data-gallery]',
     '.product-images','.product-image-gallery','.pdp-gallery','.slick-slider','.slick','.swiper','.swiper-container','.carousel',
@@ -866,6 +1246,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
 
   if (og.image) push(og.image, 3, { inMain: true });
 
+  // page-wide images (skip recommendation areas)
   $("img").each((_, el) => {
     if (isRecoBlock($, el)) return;
     const $el = $(el);
@@ -878,6 +1259,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     cands.forEach(u => push(u, 2, { inReco:false, inMain: isMainProductNode($, el) }));
   });
 
+  // noscript fallbacks
   $("noscript").each((_, n)=>{
     if (isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
@@ -888,11 +1270,13 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     });
   });
 
+  // picture/srcset
   $("picture source[srcset]").each((_, el) => {
     if (isRecoBlock($, el)) return;
     push(pickLargestFromSrcset($(el).attr("srcset")), 2, { inReco:false, inMain: isMainProductNode($, el) });
   });
 
+  // backgrounds
   $('[style*="background"]').each((_, el) => {
     if (isRecoBlock($, el)) return;
     const style = String($(el).attr("style") || "");
@@ -930,6 +1314,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     host.includes("motifmedical")        ? "/wp-content/uploads|/product|/images" : ""
   ].filter(Boolean).join("|"), "i");
 
+  // EXPANDED placeholder filter
   const badReBase = [
     'logo','brandmark','favicon','sprite','placeholder','no-?image','missingimage','loader',
     'coming[-_]?soon','image[-_]?coming[-_]?soon','awaiting','spacer','blank','default','dummy','sample','temp',
@@ -960,9 +1345,10 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (allowHostRe.source.length && allowHostRe.test(L)) score += 2;
     if (codeCandidates.some(c => c && L.includes(c))) score += 3;
     if (titleTokens.some(t => t.length > 2 && L.includes(t))) score += 1;
-    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3;
+    if (/thumb|thumbnail|small|tiny|badge|mini|icon|swatch/.test(L)) score -= 3; // stronger downweight incl. swatch
     if (/(_\d{3,}x\d{3,}|-?\d{3,}x\d{3,}|(\?|&)(w|width|h|height|size)=\d{3,})/.test(L)) score += 1;
 
+    // Context-aware penalties/bonuses
     const ctx = imgContext.get(u) || {};
     if (ctx.inReco) score -= 5;
     if (ctx.inMain) score += 3;
@@ -984,7 +1370,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   return out;
 }
 
-/* Enhanced image harvester (CDN + main scope) */
+/* ================== ADD-ONLY: Enhanced image harvester (CDN + main scope) ================== */
 function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
   const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
   const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
@@ -992,7 +1378,7 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
   const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
 
   const scope = findMainProductScope($);
-  const set = new Map();
+  const set = new Map(); // url -> score
 
   const push = (node, url, baseScore = 0) => {
     if (!url) return;
@@ -1005,6 +1391,7 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     set.set(u, Math.max(cur, baseScore + ctx));
   };
 
+  // 1) Gallery/media in main scope
   scope.find('.product-media, .product__media, .product-gallery, #product-gallery, [data-gallery], .slick, .swiper, .carousel, .fotorama')
     .find('img, source').each((_, el) => {
       const $el = $(el);
@@ -1016,9 +1403,11 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
       cands.forEach(u => push(el, u, 6));
     });
 
+  // 2) Preloads & social metas
   $('link[rel="preload"][as="image"]').each((_, el) => push(el, $(el).attr('href'), 3));
   const tw = $('meta[name="twitter:image"]').attr('content'); if (tw) push($.root(), tw, 2);
 
+  // 3) General main-scope images
   scope.find('img, source, picture source').each((_, el) => {
     const $el = $(el);
     const cands = [
@@ -1029,12 +1418,14 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     cands.forEach(u => push(el, u, 3));
   });
 
+  // 4) Backgrounds in main scope
   scope.find('[style*="background"]').each((_, el) => {
     const style = String($(el).attr('style') || '');
     const m = style.match(/url\((['"]?)([^'")]+)\1\)/i);
     if (m && m[2]) push(el, m[2], 2);
   });
 
+  // 5) JSON blobs
   const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(t => t.length > 2);
   const codes = collectCodesFromUrl(baseUrl);
   $('script').each((_, el) => {
@@ -1054,6 +1445,7 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     }
   });
 
+  // Size gating & sort by score
   const scored = Array.from(set.entries())
     .filter(([u]) => {
       const { w, h } = inferSizeFromUrl(u);
@@ -1081,6 +1473,7 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
     push(pickLargestFromSrcset($(el).attr('srcset')));
   });
 
+  // noscript fallbacks in main area
   $('main, #main, .main, article').first().find('noscript').each((_, n)=>{
     const inner = $(n).html() || "";
     const _$ = cheerio.load(inner);
@@ -1112,7 +1505,8 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
   }
   return out;
 }
-/* ===== Manuals ===== */
+
+/* === Manuals === */
 function extractManuals($, baseUrl, name, rawHtml, opts){
   const urls = new Set();
   const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
@@ -1181,10 +1575,10 @@ function extractManuals($, baseUrl, name, rawHtml, opts){
 
   return arr;
 }
-
+/* ================== ADD-ONLY: Enhanced manuals harvester ================== */
 function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
-  const urls = new Map();
+  const urls = new Map(); // url -> score
   const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
 
@@ -1203,6 +1597,7 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
 
   const scope = findMainProductScope($);
 
+  // 1) Direct anchors with wider attribute coverage
   scope.find('a').each((_, el) => {
     const $el = $(el);
     const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
@@ -1210,17 +1605,20 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) push(el, href, 4);
   });
 
+  // 2) onclick handlers that open PDFs
   $('a[onclick], button[onclick]').each((_, el) => {
     const s = String($(el).attr('onclick') || '');
     const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
     if (m) push(el, m[0], 3);
   });
 
+  // 3) PDF in <object>/<embed>/<iframe>
   $('object[type="application/pdf"], embed[type="application/pdf"], iframe[src*=".pdf"]').each((_, el) => {
     const $el = $(el);
     push(el, $el.attr('data') || $el.attr('src') || '', 5);
   });
 
+  // 4) JSON blobs (documents arrays)
   $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
     if (!/\.(pdf)\b/i.test(txt) && !/documents?|downloads?|resources?/i.test(txt)) return;
@@ -1237,6 +1635,7 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     }
   });
 
+  // 5) Last-resort: global anchors with strong text hints
   $('a[href*=".pdf"], a[download]').each((_, el) => {
     const $el = $(el);
     const href = $el.attr('href') || '';
@@ -1280,257 +1679,13 @@ function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
   }
   return Array.from(out);
 }
-
-/* ===== Specs & features (incl. canonicalization/enrichment) ===== */
-const SPEC_SYNONYMS = new Map([
-  ["dimensions","dimensions"],["overall dimensions","overall_dimensions"],["overall size","overall_dimensions"],
-  ["overall width","overall_width"],["overall height","overall_height"],["overall length","overall_length"],["overall depth","overall_depth"],
-  ["width","width"],["height","height"],["length","length"],["depth","depth"],
-  ["seat width","seat_width"],["seat depth","seat_depth"],["seat height","seat_height"],["back height","back_height"],["arm height","arm_height"],["handle height","handle_height"],
-  ["weight capacity","weight_capacity"],["max weight","weight_capacity"],["maximum weight","weight_capacity"],["capacity","weight_capacity"],["user weight capacity","weight_capacity"],
-  ["product weight","product_weight"],["unit weight","product_weight"],["shipping weight","shipping_weight"],["packaged weight","shipping_weight"],
-  ["sku","sku"],["mpn","mpn"],["model","model"],["model number","model"],["upc","gtin12"],["gtin","gtin14"],
-  ["color","color"],["material","material"],["warranty","warranty"],["category","category"],["brand","brand"],["manufacturer","manufacturer"]
-]);
-function canonicalizeSpecKey(k = ""){
-  const base = String(k).trim().replace(/\s+/g," ");
-  const lower = base.toLowerCase();
-  if (SPEC_SYNONYMS.has(lower)) return SPEC_SYNONYMS.get(lower);
-  return lower.replace(/[^\p{L}\p{N}\s/.-]+/gu,"").replace(/\//g,"_").replace(/\s+/g,"_").replace(/-+/g,"_").replace(/^_+|_+$/g,"");
-}
-function normalizeUnitsInText(v = ""){
-  return String(v)
-    .replace(/(\d)\s*["”]/g,"$1 in")
-    .replace(/(\d)\s*[\'’]/g,"$1 ft")
-    .replace(/\b(pounds?|lbs?)\b/gi,"lb")
-    .replace(/\b(ounces?)\b/gi,"oz")
-    .replace(/\b(millimet(er|re)s?)\b/gi,"mm")
-    .replace(/\b(centimet(er|re)s?)\b/gi,"cm")
-    .replace(/\b(kilograms?)\b/gi,"kg")
-    .replace(/\b(grams?)\b/gi,"g")
-    .replace(/\s{2,}/g," ")
-    .trim();
-}
-function parseDimensionsBlock(v=""){
-  const t = normalizeUnitsInText(v).toLowerCase();
-  const m = t.match(/\b(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\s*[×x]\s*(\d+(?:\.\d+)?)\s*(in|cm|mm|ft)?\b/);
-  if (m) {
-    const w = parseFloat(m[1]), d = parseFloat(m[3]), h = parseFloat(m[5]);
-    const unit = (m[2] || m[4] || m[6] || "in").toLowerCase();
-    return { width: w, depth: d, height: h, unit };
-  }
-  return null;
-}
-export function enrichSpecsWithDerived(specs = {}){
-  const out = { ...specs };
-  const candidates = [ "overall_dimensions","dimensions","overall_size" ];
-  for (const key of candidates) {
-    const val = out[key];
-    if (val && typeof val === "string") {
-      const dims = parseDimensionsBlock(val);
-      if (dims) {
-        const u = dims.unit;
-        if (dims.width  != null && out["overall_width"]  == null) out["overall_width"]  = `${dims.width} ${u}`;
-        if (dims.depth  != null && out["overall_depth"]  == null) out["overall_depth"]  = `${dims.depth} ${u}`;
-        if (dims.height != null && out["overall_height"] == null) out["overall_height"] = `${dims.height} ${u}`;
-      }
-    }
-  }
-  const DIM_KEYS = ["overall_width","overall_height","overall_length","overall_depth","width","height","length","depth",
-    "seat_width","seat_height","seat_depth","back_height","arm_height","handle_height","product_weight","shipping_weight","weight_capacity"];
-  for (const k of DIM_KEYS) if (out[k] && typeof out[k] === "string") out[k] = normalizeUnitsInText(out[k]);
-  return out;
-}
-function mergeSpecsAdditive(primary={}, secondary={}) {
-  const merged = { ...secondary, ...primary };
-  return enrichSpecsWithDerived(merged);
-}
-
-/* ==== Specs from scripts / JSON-LD extras / global KV sweep (unchanged logic) ==== */
-function pluckJsonObjectsFromJs(txt, maxBlocks = 3) {
-  const out = []; let i = 0, n = txt.length;
-  const pushBlock = (start, openChar, closeChar) => {
-    let depth = 0, j = start, inStr = false, esc = false; const isQuote = c => c === '"' || c === "'";
-    let quote = null;
-    while (j < n) {
-      const c = txt[j];
-      if (inStr) { if (esc) { esc = false; } else if (c === '\\') { esc = true; } else if (c === quote) { inStr = false; quote = null; } }
-      else { if (isQuote(c)) { inStr = true; quote = c; } else if (c === openChar) depth++; else if (c === closeChar) { depth--; if (depth === 0) { out.push(txt.slice(start, j + 1)); return j + 1; } } }
-      j++;
-    }
-    return start;
-  };
-  while (i < n && out.length < maxBlocks) {
-    const ch = txt[i];
-    if (ch === '{' || ch === '[') {
-      const next = pushBlock(i, ch, ch === '{' ? '}' : ']');
-      if (next > i) { i = next; continue; }
-    }
-    i++;
-  }
-  return out;
-}
-function extractSpecsFromScripts($, container){
-  const scope = container ? $(container) : $;
-  if (container && (isFooterOrNav($, container) || isRecoBlock($, container))) return {};
-  const out = {};
-  const RECO_PATH_RE = /(related|recommend|upsell|cross|also(view|bought)|similar|fbt|suggest)/i;
-
-  const pushKV = (name, value) => {
-    const k = canonicalizeSpecKey(name);
-    const v = cleanup(String(value || ""));
-    if (!k || !v) return;
-    if (!out[k]) out[k] = v;
-  };
-
-  const visit = (node, path = "") => {
-    if (node == null) return;
-    if (typeof node === "string") return;
-    if (Array.isArray(node)) { for (let i = 0; i < node.length; i++) visit(node[i], `${path}[${i}]`); return; }
-    if (typeof node === "object") {
-      const looksReco = RECO_PATH_RE.test(path);
-      const nameLike  = node.name || node.label || node.title || node.displayName || node.key || node.property;
-      const valueLike = node.value || node.displayValue || node.val || node.text || node.content || node.description;
-      if (!looksReco && nameLike && (valueLike != null && valueLike !== "")) pushKV(nameLike, valueLike);
-
-      const containers = [
-        "specs","specifications","technicalSpecifications","attributes","attributeGroups",
-        "productAttributes","properties","features","details","data","dataSheet","Specification","Specifications",
-        "custom_fields","customFields","customfields"
-      ];
-      containers.forEach(c => { if (node[c]) visit(node[c], `${path}.${c}`); });
-
-      if (node.product && (node.product.attributes || node.product.custom_fields)) {
-        visit(node.product.attributes || [], `${path}.product.attributes`);
-        visit(node.product.custom_fields || [], `${path}.product.custom_fields`);
-      }
-      for (const [k, v] of Object.entries(node)) visit(v, `${path}.${k}`);
-    }
-  };
-
-  scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const raw = $(el).contents().text();
-    if (!raw || !raw.trim()) return;
-    try { visit(JSON.parse(raw.trim()), "$"); } catch {}
-  });
-
-  scope.find("script").each((_, el) => {
-    if (isRecoBlock($, el)) return;
-    const txt = String($(el).contents().text() || "");
-    if (!txt || txt.length < 40) return;
-    if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
-
-    const blocks = pluckJsonObjectsFromJs(txt, 5);
-    for (const block of blocks) { try { visit(JSON.parse(block), "$"); } catch {} }
-  });
-
-  const canon = {};
-  Object.entries(out).forEach(([k, v]) => {
-    const ck = canonicalizeSpecKey(k);
-    if (!canon[ck]) canon[ck] = normalizeUnitsInText(v);
-  });
-  return enrichSpecsWithDerived(canon);
-}
-function extractJsonLdAllProductSpecs($){
-  const nodes = [];
-  $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const raw = $(el).contents().text();
-      if (!raw || !raw.trim()) return;
-      const parsed = JSON.parse(raw.trim());
-      (Array.isArray(parsed) ? parsed : [parsed]).forEach(obj => {
-        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
-        else nodes.push(obj);
-      });
-    } catch {}
-  });
-
-  const pageUrl =
-    $('link[rel="canonical"]').attr('href') ||
-    $('meta[property="og:url"]').attr('content') || "";
-
-  let pageHost = "", pagePath = "";
-  try {
-    const u = new URL(pageUrl);
-    pageHost = (u.hostname || "").toLowerCase();
-    pagePath = u.pathname || "";
-  } catch {}
-
-  const prods = nodes.filter(n => String(n && n['@type'] || '').toLowerCase().includes('product'));
-  const filtered = prods.filter(p => {
-    const url = String(p.url || p['@id'] || "");
-    if (!url) return !!pageHost ? false : true;
-    try {
-      const u = new URL(url, pageUrl || "https://example.com/");
-      if (pageHost && u.hostname.toLowerCase() !== pageHost) return false;
-      if (pagePath && u.pathname && u.pathname !== pagePath) return false;
-      return true;
-    } catch { return false; }
-  });
-
-  const chosen = filtered.length ? filtered : (prods.length ? [prods[0]] : []);
-  const merged = {};
-  for (const p of chosen) {
-    const specs = schemaPropsToSpecs(
-      p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
-    );
-    Object.assign(merged, specs);
-  }
-  return merged;
-}
-function extractAllSpecPairs($){
-  const out = {};
-  $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return;
-    let hits = 0;
-    const local = {};
-    $(tbl).find('tr').each((__, tr)=>{
-      const cells = $(tr).find('th,td');
-      if (cells.length >= 2) {
-        const k = cleanup($(cells[0]).text());
-        const v = cleanup($(cells[1]).text());
-        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return;
-        if (k.length <= 80 && v.length <= 400) {
-          local[canonicalizeSpecKey(k)] = v;
-          hits++;
-        }
-      }
-    });
-    if (hits >= 3) Object.assign(out, local);
-  });
-
-  $('dl').each((_, dl)=>{
-    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return;
-    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
-    if (dts.length === dds.length && dts.length >= 3){
-      for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text());
-        const v=cleanup($(dds[i]).text());
-        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue;
-        out[canonicalizeSpecKey(k)] = v;
-      }
-    }
-  });
-
-  $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
-    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
-    const t = cleanup($(el).text());
-    if (!t || LEGAL_MENU_RE.test(t)) return;
-    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
-    if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
-  });
-
-  const norm = {};
-  for (const [k,v] of Object.entries(out)) norm[k] = normalizeUnitsInText(v);
-  return enrichSpecsWithDerived(norm);
-}
-
+/* === Specs (scoped → dense block → global) === */
 function extractSpecsSmart($){
   let specPane = resolveTabPane($, [
     'technical specifications','technical specification',
     'tech specs','specifications','specification','details'
   ]);
+  // ADD: Make spec pane selection “footer-aware”
   if (specPane && (isFooterOrNav($, specPane) || isRecoBlock($, specPane))) {
     specPane = null;
   }
@@ -1544,34 +1699,40 @@ function extractSpecsSmart($){
   if (Object.keys(dense).length) return dense;
 
   const out = {};
+  
+  // Tables (global fallback)
   $('table').each((_, tbl)=>{
-    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return;
+    if (isFooterOrNav($, tbl) || isRecoBlock($, tbl) || isPartsOrAccessoryTable($, tbl)) return; // ADD reco + parts guard
     $(tbl).find('tr').each((__, tr)=>{
       const cells=$(tr).find('th,td');
       if (cells.length>=2){
         const k=cleanup($(cells[0]).text());
         const v=cleanup($(cells[1]).text());
-        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return;
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) return; // ADD
         const kk = k.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
         if (kk && v && kk.length<80 && v.length<400) out[kk]=v;
       }
     });
   });
 
+  // Definition lists
   $('dl').each((_, dl)=>{
-    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return;
+    if (isFooterOrNav($, dl) || isRecoBlock($, dl)) return; // ADD reco guard
     const dts=$(dl).find('dt'), dds=$(dl).find('dd');
     if (dts.length === dds.length && dts.length){
       for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const k=cleanup($(dts[i]).text());
         const v=cleanup($(dds[i]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+        if (!k || !v || LEGAL_MENU_RE.test(k) || LEGAL_MENU_RE.test(v)) continue; // ADD
+        const kk = k.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        if (kk && v && kk.length<80 && v.length<400) out[kk]=v;
       }
     }
   });
 
+  // LI pairs
   $('li').each((_, li)=>{
-    if (isFooterOrNav($, li) || isRecoBlock($, li)) return;
+    if (isFooterOrNav($, li) || isRecoBlock($, li)) return; // ADD reco guard
     const t = cleanup($(li).text());
     if (!t || t.length < 3 || t.length > 250) return;
     const m = t.split(/[:\-–]\s+/);
@@ -1593,7 +1754,7 @@ function extractSpecsFromDensestBlock($){
   let bestEl = null, bestScore = 0;
 
   $(candidates).each((_, el)=>{
-    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
     const $el = $(el);
     let score = 0;
 
@@ -1625,7 +1786,7 @@ function deriveSpecsFromParagraphs($){
   const out = {};
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p, li').each((_, el)=>{
-      if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+      if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
       const t = cleanup($(el).text());
       if (!t) return;
       const m = t.match(/^([^:]{2,60}):\s*(.{2,300})$/);
@@ -1703,7 +1864,7 @@ function deriveFeaturesFromParagraphs($){
 
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('p').each((_, p)=>{
-      if (isFooterOrNav($, p) || isRecoBlock($, p)) return;
+      if (isFooterOrNav($, p) || isRecoBlock($, p)) return; // ADD reco guard
       const raw = cleanup($(p).text());
       if (!raw) return;
       splitIntoSentences(raw).forEach(pushIfGood);
@@ -1722,12 +1883,14 @@ function deriveFeaturesFromParagraphs($){
   return uniq;
 }
 
-/* === Resolve tabs/containers (unchanged) === */
+/* === Resolve tabs === */
 function escapeRe(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
 function documentQueryById($, id){
   try { return id ? $(`#${CSS.escape(id)}`)[0] : null; }
   catch { return id ? $(`#${id}`)[0] : null; }
 }
+
 function resolveTabPane($, names){
   const nameRe = new RegExp(`^(?:${names.map(n=>escapeRe(n)).join('|')})$`, 'i');
   let pane = null;
@@ -1764,6 +1927,7 @@ function resolveTabPane($, names){
   return pane;
 }
 
+/* ===== Dojo/dijit TabContainer helpers ===== */
 function parseDojoTabs($, baseUrl, tablistRoot) {
   const out = [];
   const $root = tablistRoot ? $(tablistRoot) : $('[role="tablist"]').first();
@@ -1810,6 +1974,7 @@ function parseDojoTabs($, baseUrl, tablistRoot) {
 
   return out;
 }
+
 async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
   if (!tabs || !tabs.length || !renderApiUrl) return tabs || [];
   const base = renderApiUrl.replace(/\/+$/,'');
@@ -1820,19 +1985,17 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     if (!tt.html && tt.href) {
       try {
         const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
-        const r = await fetch(url, { headers, redirect: "follow" });
-        if (r.ok) {
-          const html = await r.text();
-          const $p = cheerio.load(html);
-          tt.html = $p.root().html() || '';
-          tt.text = $p.root().text().replace(/\s+/g,' ').trim();
-        }
+        const { html } = await fetchWithRetry(url, { headers });
+        const $p = cheerio.load(html);
+        tt.html = $p.root().html() || '';
+        tt.text = $p.root().text().replace(/\s+/g,' ').trim();
       } catch {}
     }
     out.push(tt);
   }
   return out;
 }
+
 function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Features','Downloads']) {
   const rank = t => {
     const i = order.findIndex(x => x && t && x.toLowerCase() === t.toLowerCase());
@@ -1845,6 +2008,7 @@ function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Fea
     .filter(Boolean)
     .join('\n');
 }
+
 function resolveAllPanes($, names){
   const out = new Set();
   const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
@@ -1882,14 +2046,355 @@ function resolveAllPanes($, names){
 }
 
 /* ================== Tab/Accordion Harvester ================== */
-export async function augmentFromTabs(norm, baseUrl, html, opts){
+function extractSpecsFromContainer($, container){
+  // ADD: avoid footer/nav/reco contamination
+  if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
+  const out = {};
+  const $c = $(container);
+
+  $c.find('table').each((_, tbl)=>{
+    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
+    $(tbl).find('tr').each((__, tr)=>{
+      const cells=$(tr).find('th,td');
+      if (cells.length>=2){
+        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const v=cleanup($(cells[1]).text());
+        if (k && v && k.length<80 && v.length<400) out[k]=v;
+      }
+    });
+  });
+
+  $c.find('dl').each((_, dl)=>{
+    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
+    if (dts.length === dds.length && dts.length){
+      for (let i=0;i<dts.length;i++){
+        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+        const v=cleanup($(dds[i]).text());
+        if (k && v && k.length<80 && v.length<400) out[k]=v;
+      }
+    }
+  });
+
+  $c.find('li').each((_, li)=>{
+    const t = cleanup($(li).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k]=v;
+    }
+  });
+
+  $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
+    const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
+    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
+    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
+  });
+
+  return out;
+}
+
+function collectManualsFromContainer($, container, baseUrl, sinkSet){
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
+  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+    const href = String($(el).attr('href') || "");
+    const full = abs(baseUrl, href);
+    if (!full) return;
+    const L = full.toLowerCase();
+    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
+  });
+}
+
+function extractFeaturesFromContainer($, container){
+  const items = [];
+  const $c = $(container);
+
+  const pushIfGood = (txt) => {
+    const t = cleanup(txt);
+    if (!t) return;
+    if (t.length < 7 || t.length > 220) return;
+    if (/>|›|»/.test(t)) return;
+    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    if (/(https?:\/\/|www\.)/i.test(t)) return;
+    items.push(t);
+  };
+
+  $c.find('li').each((_, li)=> pushIfGood($(li).text()));
+  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
+
+  const seen = new Set();
+  const out = [];
+  for (const t of items){
+    const k = t.toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(t);
+    }
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+/* — Overview extractor (paragraphs only) — */
+function extractDescriptionFromContainer($, container){
+  const $c = $(container);
+  const parts = [];
+  const push = (t) => {
+    t = cleanup(t);
+    if (!t) return;
+    if (/^\s*(share|subscribe|privacy|terms|trademark|copyright)\b/i.test(t)) return;
+    parts.push(t);
+  };
+
+  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
+  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
+
+  const lines = parts
+    .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
+    .filter(Boolean);
+
+  const seen = new Set();
+  const out = [];
+  for (const s of lines) {
+    const k = s.toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(s);
+    }
+  }
+  return out.join('\n');
+}
+/* ====== Markdown builders ====== */
+function extractDescriptionMarkdown($){
+  const candidates = [
+    '[itemprop="description"]',
+    '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
+    '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs'
+  ].join(', ');
+
+  let bestEl = null, bestLen = 0;
+  $(candidates).each((_, el)=>{
+    // ADD: skip footer/nav & legal-like text nodes
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+    const textCheck = cleanup($(el).text());
+    if (LEGAL_MENU_RE.test(textCheck) || /^©\s?\d{4}/.test(textCheck)) return;
+
+    const text = textCheck;
+    if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
+  });
+  if (!bestEl) return "";
+
+  const raw = extractDescriptionFromContainer($, bestEl);
+  return containerTextToMarkdown(raw);
+}
+
+function containerTextToMarkdown(s){
+  const lines = String(s || "").split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const out = [];
+  let para = [];
+  const flush = () => { if (para.length){ out.push(para.join(' ')); para = []; } };
+
+  for (const line of lines){
+    if (line.startsWith("• ")){ flush(); out.push(`- ${line.slice(2).trim()}`); }
+    else if (/^[-*] /.test(line)){ flush(); out.push(line); }
+    else { para.push(line); }
+  }
+  flush();
+  return out.join("\n\n");
+}
+
+function textToMarkdown(t){
+  const lines = String(t||"").split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  if (!lines.length) return "";
+  const out = [];
+  let para = [];
+  const flush = () => { if (para.length){ out.push(para.join(' ')); para = []; } };
+
+  for (const line of lines){
+    if (/^[-*•] /.test(line)){ flush(); out.push(line.replace(/^• /, "- ")); }
+    else { para.push(line); }
+  }
+  flush();
+  return out.join("\n\n");
+}
+
+function objectToMarkdownTable(obj){
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return "";
+  const rows = entries.map(([k,v]) => `| ${toTitleCase(k.replace(/_/g,' '))} | ${String(v).replace(/\n+/g, ' ').trim()} |`);
+  return ["| Spec | Value |","|---|---|",...rows].join("\n");
+}
+
+/* === Images-in-panes filter === */
+function filterAndRankExtraPaneImages(urls, baseUrl, opts){
+  const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
+  const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
+  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
+  const badRe = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
+
+  let arr = (urls||[])
+    .filter(Boolean)
+    .map(u => decodeHtml(abs(baseUrl, u)))
+    .filter(u => allowWebExt.test(u))
+    .filter(u => !badRe.test(u))
+    .filter(u => {
+      const { w,h } = inferSizeFromUrl(u);
+      if (!w && !h) return true;
+      return Math.max(w||0, h||0) >= minPx;
+    });
+
+  return Array.from(new Set(arr)).slice(0, 6);
+}
+
+/* ================== Utils ================== */
+
+// ---- FIX: add brand inference helper used as fallback ----
+function inferBrandFromName(name){
+  const first = (String(name||"").trim().split(/\s+/)[0] || "");
+  if (/^(the|a|an|with|and|for|of|by|pro|basic)$/i.test(first)) return "";
+  if (/^[A-Z][A-Za-z0-9\-]+$/.test(first)) return first;
+  return "";
+}
+// ----------------------------------------------------------
+
+function collectCodesFromUrl(url){
+  const out = [];
+  try {
+    const u = url.toLowerCase();
+    const m1 = /\/item\/([^\/?#]+)/i.exec(u);
+    const m2 = /\/p\/([a-z0-9._-]+)/i.exec(u);
+    const m3 = /\/product\/([a-z0-9._-]+)/i.exec(u);
+    [m1, m2, m3].forEach(m => { if (m && m[1]) out.push(m[1]); });
+  } catch {}
+  return out;
+}
+
+function deepFindImagesFromJson(obj, out = []){
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (/\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) { obj.forEach(v => deepFindImagesFromJson(v, out)); return out; }
+  if (typeof obj === 'object') {
+    const keys = ['url','src','image','imageUrl','imageURL','contentUrl','thumbnail','full','large','zoom','original','href'];
+    keys.forEach(k => {
+      const v = obj[k];
+      if (typeof v === 'string' && /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(v)) out.push(v);
+      else if (v) deepFindImagesFromJson(v, out);
+    });
+    ['images','gallery','media','assets','pictures','variants','slides'].forEach(k=>{ if (obj[k]) deepFindImagesFromJson(obj[k], out); });
+    Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
+  }
+  return out;
+}
+
+function deepFindPdfsFromJson(obj, out = []){
+  if (!obj) return out;
+  if (typeof obj === 'string') {
+    if (/\.pdf(?:[?#].*)?$/i.test(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) { obj.forEach(v => deepFindPdfsFromJson(v, out)); return out; }
+  if (typeof obj === 'object') {
+    Object.values(obj).forEach(v => deepFindPdfsFromJson(v, out));
+  }
+  return out;
+}
+
+function firstGoodParagraph($){
+  let best = "";
+  $('main, #main, .main, .content, #content, body').first().find("p").each((_, p)=>{
+    const t = cleanup($(p).text());
+    if (t && t.length > best.length) best = t;
+  });
+  return best;
+}
+
+// ADD: footer/nav detection + legal/menu text guard
+function isFooterOrNav($, el){
+  return $(el).closest(
+    'footer, #footer, .footer, .site-footer, .page-footer, .global-footer, #global-footer,' +
+    ' nav, .nav, .navbar, [role="navigation"], [role="contentinfo"],' +
+    ' [aria-label*="footer" i], [aria-label*="breadcrumb" i], .breadcrumbs,' +
+    ' .legal, .legalese, .bottom-bar, .cookie, .consent, .newsletter, .subscribe, .sitemap'
+  ).length > 0;
+}
+
+// ADD: recommendation/reco block detector (prevents spec leakage from “related/also viewed/etc.”)
+function isRecoBlock($, el){
+  if ($(el).closest(
+    '.related, .related-products, #related-products, ' +
+    '.upsell, .cross-sell, .crosssell, .you-may-also-like, ' +
+    '.recommended, .recommendations, .product-recommendations, .product-recs, [data-recommendations], ' +
+    '.frequently-bought, .frequently-bought-together, .fbt, ' +
+    '.also-viewed, .people-also-viewed, .also-bought, .customers-also-bought, ' +
+    '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
+  ).length > 0) return true;
+
+  // ADD: extra coverage for sites using singular `.recommendation`, "co-viewed", and explicit data flags
+  if ($(el).closest('.recommendation, .co-viewed, [data-br-request-type="recommendation"]').length > 0) return true;
+
+  return false;
+}
+
+const LEGAL_MENU_RE = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|sign\s*in)\b/i;
+
+/* ===== ADD: Parts/accessory table detection & pruning (add-only) ===== */
+const PARTS_HEADER_RE = /\b(no\.?|part(?:\s*no\.?)?|item(?:\s*description)?|qty(?:\s*req\.)?|quantity|price)\b/i;
+
+function isPartsOrAccessoryTable($, tbl){
+  try {
+    // header scan
+    const header = $(tbl).find('tr').first().find('th,td')
+      .map((_,c)=>cleanup($(c).text())).get().join(' | ');
+    if (PARTS_HEADER_RE.test(header)) return true;
+
+    // row heuristics
+    let numericFirstCol = 0, itemLinks = 0, rows = 0;
+    $(tbl).find('tr').each((_, tr)=>{
+      const cells = $(tr).find('td,th');
+      if (cells.length < 2) return;
+      rows++;
+      const first = cleanup($(cells[0]).text());
+      if (/^\d+$/.test(first)) numericFirstCol++;
+      if ($(cells[1]).find('a[href*="/item/"], a[href*="/product/"]').length) itemLinks++;
+    });
+    return (rows >= 3 && numericFirstCol >= 2 && itemLinks >= 2);
+  } catch { return false; }
+}
+
+function prunePartsLikeSpecs(specs = {}){
+  const out = {};
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?)$/i;
+
+  for (const [k, v] of Object.entries(specs || {})) {
+    const key = String(k || "").trim();
+    const val = String(v || "").trim();
+    // drop empty
+    if (!key || !val) continue;
+    // drop numeric index keys (1, 2, 3…)
+    if (/^\d+$/.test(key)) continue;
+    // drop classic parts table headers masquerading as specs
+    if (BAD_KEYS.test(key)) continue;
+    out[key] = val;
+  }
+  return out;
+}
+
+/* ================== Tab harvest orchestrator ================== */
+async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
+  // === Dojo/dijit TabContainer pre-pass ===
   try {
     const dojoTabs0 = parseDojoTabs($, baseUrl);
     if (dojoTabs0.length) {
       const headers = { "User-Agent": "MedicalExIngest/1.7" };
-      const dojoTabs = await hydrateLazyTabs(dojoTabs0, process.env.RENDER_API_URL, headers);
+      if (RENDER_API_TOKEN) headers["Authorization"] = `Bearer ${RENDER_API_TOKEN}`;
+      const dojoTabs = await hydrateLazyTabs(dojoTabs0, RENDER_API_URL, headers);
 
       const specNames = ['specification','specifications','technical specifications','tech specs','details'];
       const featNames = ['features','features/benefits','benefits','key features','highlights'];
@@ -1908,6 +2413,7 @@ export async function augmentFromTabs(norm, baseUrl, html, opts){
 
         if (specNames.some(n => title.includes(n))) {
           Object.assign(addSpecs, extractSpecsFromContainer($p, $p.root()));
+          /* ==== MEDX ADD-ONLY: specs-from-scripts in Dojo tab v1 ==== */
           try {
             const jsonExtras = extractSpecsFromScripts($p, $p.root());
             Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
@@ -1948,7 +2454,10 @@ export async function augmentFromTabs(norm, baseUrl, html, opts){
         }
       }
     }
-  } catch(e) { /* non-fatal */ }
+  } catch(e) {
+    // non-fatal
+  }
+  // === end Dojo/dijit pre-pass ===
 
   const specPanes   = resolveAllPanes($, [ 'specification','specifications','technical specifications','tech specs','details' ]);
   const manualPanes = resolveAllPanes($, [ 'downloads','documents','technical resources','parts diagram','resources','manuals','documentation' ]);
@@ -1958,7 +2467,11 @@ export async function augmentFromTabs(norm, baseUrl, html, opts){
   const addSpecs = {};
   for (const el of specPanes) {
     Object.assign(addSpecs, extractSpecsFromContainer($, el));
-    try { Object.assign(addSpecs, mergeSpecsAdditive(extractSpecsFromScripts($, el), {})); } catch {}
+    /* ==== MEDX ADD-ONLY: specs-from-scripts inside spec panes v1 ==== */
+    try {
+      const jsonExtras = extractSpecsFromScripts($, el);
+      Object.assign(addSpecs, mergeSpecsAdditive(jsonExtras, {}));
+    } catch {}
   }
 
   const addManuals = new Set();
@@ -2010,8 +2523,8 @@ export async function augmentFromTabs(norm, baseUrl, html, opts){
   return norm;
 }
 
-/* ===== Sanitizer & helpers ===== */
-export function sanitizeIngestPayload(p) {
+/* ================== Optional post-processor (gated by &sanitize=true) ================== */
+function sanitizeIngestPayload(p) {
   const out = { ...p };
 
   const legalRe = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|facebook|instagram|twitter|linkedin)\b/i;
@@ -2034,6 +2547,7 @@ export function sanitizeIngestPayload(p) {
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
+  // EXPANDED bad image filter to exclude placeholders
   const badImg = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|coming[-_]?soon|image[-_]?coming[-_]?soon|awaiting|spacer|blank|default|dummy|sample|temp|swatch|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
@@ -2058,322 +2572,14 @@ export function sanitizeIngestPayload(p) {
   return out;
 }
 
-/* ===== Markdown helpers (exported for server) ===== */
-export function extractDescriptionMarkdown($){
-  const candidates = [
-    '[itemprop="description"]',
-    '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
-    '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs'
-  ].join(', ');
-
-  let bestEl = null, bestLen = 0;
-  $(candidates).each((_, el)=>{
-    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
-    const textCheck = cleanup($(el).text());
-    if (LEGAL_MENU_RE.test(textCheck) || /^©\s?\d{4}/.test(textCheck)) return;
-
-    const text = textCheck;
-    if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
-  });
-  if (!bestEl) return "";
-
-  const raw = extractDescriptionFromContainer($, bestEl);
-  return containerTextToMarkdown(raw);
-}
-export function containerTextToMarkdown(s){
-  const lines = String(s || "").split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const out = [];
-  let para = [];
-  const flush = () => { if (para.length){ out.push(para.join(' ')); para = []; } };
-
-  for (const line of lines){
-    if (line.startsWith("• ")){ flush(); out.push(`- ${line.slice(2).trim()}`); }
-    else if (/^[-*] /.test(line)){ flush(); out.push(line); }
-    else { para.push(line); }
-  }
-  flush();
-  return out.join("\n\n");
-}
-export function textToMarkdown(t){
-  const lines = String(t||"").split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  if (!lines.length) return "";
-  const out = [];
-  let para = [];
-  const flush = () => { if (para.length){ out.push(para.join(' ')); para = []; } };
-
-  for (const line of lines){
-    if (/^[-*•] /.test(line)){ flush(); out.push(line.replace(/^• /, "- ")); }
-    else { para.push(line); }
-  }
-  flush();
-  return out.join("\n\n");
-}
-export function objectToMarkdownTable(obj){
-  const entries = Object.entries(obj || {});
-  if (!entries.length) return "";
-  const rows = entries.map(([k,v]) => `| ${toTitleCase(k.replace(/_/g,' '))} | ${String(v).replace(/\n+/g, ' ').trim()} |`);
-  return ["| Spec | Value |","|---|---|",...rows].join("\n");
-}
-
-/* ===== Remaining utils used across the module ===== */
-function filterAndRankExtraPaneImages(urls, baseUrl, opts){
-  const minPx     = (opts && opts.minImgPx) || MIN_IMG_PX_ENV;
-  const excludePng= (opts && typeof opts.excludePng === 'boolean') ? opts.excludePng : EXCLUDE_PNG_ENV;
-  const allowWebExt = excludePng ? /\.(?:jpe?g|webp)(?:[?#].*)?$/i : /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i;
-  const badRe = /(logo|brandmark|favicon|sprite|placeholder|no-?image|missingimage|icon|social|facebook|twitter|instagram|linkedin|\/common\/images\/|\/icons\/|\/wp-content\/themes\/)/i;
-
-  let arr = (urls||[])
-    .filter(Boolean)
-    .map(u => decodeHtml(abs(baseUrl, u)))
-    .filter(u => allowWebExt.test(u))
-    .filter(u => !badRe.test(u))
-    .filter(u => {
-      const { w,h } = inferSizeFromUrl(u);
-      if (!w && !h) return true;
-      return Math.max(w||0, h||0) >= minPx;
-    });
-
-  return Array.from(new Set(arr)).slice(0, 6);
-}
-
-const LEGAL_MENU_RE = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login)\b/i;
-
-function isFooterOrNav($, el){
-  return $(el).closest(
-    'footer, #footer, .footer, .site-footer, .page-footer, .global-footer, #global-footer,' +
-    ' nav, .nav, .navbar, [role="navigation"], [role="contentinfo"],' +
-    ' [aria-label*="footer" i], [aria-label*="breadcrumb" i], .breadcrumbs,' +
-    ' .legal, .legalese, .bottom-bar, .cookie, .consent, .newsletter, .subscribe, .sitemap'
-  ).length > 0;
-}
-function isRecoBlock($, el){
-  if ($(el).closest(
-    '.related, .related-products, #related-products, ' +
-    '.upsell, .cross-sell, .crosssell, .you-may-also-like, ' +
-    '.recommended, .recommendations, .product-recommendations, .product-recs, [data-recommendations], ' +
-    '.frequently-bought, .frequently-bought-together, .fbt, ' +
-    '.also-viewed, .people-also-viewed, .also-bought, .customers-also-bought, ' +
-    '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
-  ).length > 0) return true;
-
-  if ($(el).closest('.recommendation, .co-viewed, [data-br-request-type="recommendation"]').length > 0) return true;
-  return false;
-}
-const PARTS_HEADER_RE = /\b(no\.?|part(?:\s*no\.?)?|item(?:\s*description)?|qty(?:\s*req\.)?|quantity|price)\b/i;
-function isPartsOrAccessoryTable($, tbl){
-  try {
-    const header = $(tbl).find('tr').first().find('th,td')
-      .map((_,c)=>cleanup($(c).text())).get().join(' | ');
-    if (PARTS_HEADER_RE.test(header)) return true;
-
-    let numericFirstCol = 0, itemLinks = 0, rows = 0;
-    $(tbl).find('tr').each((_, tr)=>{
-      const cells = $(tr).find('td,th');
-      if (cells.length < 2) return;
-      rows++;
-      const first = cleanup($(cells[0]).text());
-      if (/^\d+$/.test(first)) numericFirstCol++;
-      if ($(cells[1]).find('a[href*="/item/"], a[href*="/product/"]').length) itemLinks++;
-    });
-    return (rows >= 3 && numericFirstCol >= 2 && itemLinks >= 2);
-  } catch { return false; }
-}
-function prunePartsLikeSpecs(specs = {}){
-  const out = {};
-  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?)$/i;
-
-  for (const [k, v] of Object.entries(specs || {})) {
-    const key = String(k || "").trim();
-    const val = String(v || "").trim();
-    if (!key || !val) continue;
-    if (/^\d+$/.test(key)) continue;
-    if (BAD_KEYS.test(key)) continue;
-    out[key] = val;
-  }
-  return out;
-}
-
-/* === Container extractors used by tabs/specs === */
-function extractSpecsFromContainer($, container){
-  if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
-  const out = {};
-  const $c = $(container);
-
-  $c.find('table').each((_, tbl)=>{
-    if (isPartsOrAccessoryTable($, tbl)) return;
-    $(tbl).find('tr').each((__, tr)=>{
-      const cells=$(tr).find('th,td');
-      if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(cells[1]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
-      }
-    });
-  });
-
-  $c.find('dl').each((_, dl)=>{
-    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
-    if (dts.length === dds.length && dts.length){
-      for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(dds[i]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
-      }
-    }
-  });
-
-  $c.find('li').each((_, li)=>{
-    const t = cleanup($(li).text());
-    if (!t || t.length < 3 || t.length > 250) return;
-    const m = t.split(/[:\-–]\s+/);
-    if (m.length >= 2){
-      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-      const v = m.slice(1).join(': ').trim();
-      if (k && v && !out[k]) out[k]=v;
-    }
-  });
-
-  $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
-    const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
-    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
-    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
-  });
-
-  return out;
-}
-function collectManualsFromContainer($, container, baseUrl, sinkSet){
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
-  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr('href') || "");
-    const full = abs(baseUrl, href);
-    if (!full) return;
-    const L = full.toLowerCase();
-    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
-  });
-}
-function extractFeaturesFromContainer($, container){
-  const items = [];
-  const $c = $(container);
-
-  const pushIfGood = (txt) => {
-    const t = cleanup(txt);
-    if (!t) return;
-    if (t.length < 7 || t.length > 220) return;
-    if (/>|›|»/.test(t)) return;
-    if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
-    if (/(https?:\/\/|www\.)/i.test(t)) return;
-    items.push(t);
-  };
-
-  $c.find('li').each((_, li)=> pushIfGood($(li).text()));
-  $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
-
-  const seen = new Set();
-  const out = [];
-  for (const t of items){
-    const k = t.toLowerCase();
-    if (!seen.has(k)) {
-      seen.add(k);
-      out.push(t);
-    }
-    if (out.length >= 20) break;
-  }
-  return out;
-}
-function extractDescriptionFromContainer($, container){
-  const $c = $(container);
-  const parts = [];
-  const push = (t) => {
-    t = cleanup(t);
-    if (!t) return;
-    if (/^\s*(share|subscribe|privacy|terms|trademark|copyright)\b/i.test(t)) return;
-    parts.push(t);
-  };
-
-  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
-  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
-
-  const lines = parts
-    .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g,' ').trim())
-    .filter(Boolean);
-
-  const seen = new Set();
-  const out = [];
-  for (const s of lines) {
-    const k = s.toLowerCase();
-    if (!seen.has(k)) {
-      seen.add(k);
-      out.push(s);
-    }
-  }
-  return out.join('\n');
-}
-
-/* ===== Remaining shared helpers ===== */
-function deepFindImagesFromJson(obj, out = []){
-  if (!obj) return out;
-  if (typeof obj === 'string') {
-    if (/\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(obj)) out.push(obj);
-    return out;
-  }
-  if (Array.isArray(obj)) { obj.forEach(v => deepFindImagesFromJson(v, out)); return out; }
-  if (typeof obj === 'object') {
-    const keys = ['url','src','image','imageUrl','imageURL','contentUrl','thumbnail','full','large','zoom','original','href'];
-    keys.forEach(k => {
-      const v = obj[k];
-      if (typeof v === 'string' && /\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(v)) out.push(v);
-      else if (v) deepFindImagesFromJson(v, out);
-    });
-    ['images','gallery','media','assets','pictures','variants','slides'].forEach(k=>{ if (obj[k]) deepFindImagesFromJson(obj[k], out); });
-    Object.values(obj).forEach(v => deepFindImagesFromJson(v, out));
-  }
-  return out;
-}
-function deepFindPdfsFromJson(obj, out = []){
-  if (!obj) return out;
-  if (typeof obj === 'string') {
-    if (/\.pdf(?:[?#].*)?$/i.test(obj)) out.push(obj);
-    return out;
-  }
-  if (Array.isArray(obj)) { obj.forEach(v => deepFindPdfsFromJson(v, out)); return out; }
-  if (typeof obj === 'object') {
-    Object.values(obj).forEach(v => deepFindPdfsFromJson(v, out));
-  }
-  return out;
-}
-function firstGoodParagraph($){
-  let best = "";
-  $('main, #main, .main, .content, #content, body').first().find("p").each((_, p)=>{
-    const t = cleanup($(p).text());
-    if (t && t.length > best.length) best = t;
-  });
-  return best;
-}
-function splitIntoSentences(text){
-  return String(text)
-    .replace(/\s*\n\s*/g, ' ')
-    .split(/(?<=[.!?])\s+(?=[A-Z(0-9])|[•·–\-]\s+|;\s+|·\s+/g)
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-function mergeDescriptions(a, b){
-  const seen = new Set();
-  const lines = (String(a||"") + "\n" + String(b||""))
-    .split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  const out = [];
-  for (const l of lines){
-    const k=l.toLowerCase();
-    if (!seen.has(k)) { seen.add(k); out.push(l); }
-  }
-  return out.join("\n");
-}
+/* ===== Helpers for sanitizer ===== */
 function splitBenefitSentencesText(text) {
   return String(text)
     .split(/[\.\n•·–;-]+/)
     .map((s) => s.trim())
     .filter((s) => s.length >= 8 && s.length <= 180);
 }
+
 function deriveSpecsFromText(text) {
   const out = {};
   String(text)
@@ -2389,6 +2595,7 @@ function deriveSpecsFromText(text) {
     });
   return out;
 }
+
 function firstGoodParagraphText(text) {
   const paras = String(text)
     .split(/\n+/)
@@ -2396,7 +2603,9 @@ function firstGoodParagraphText(text) {
     .filter((s) => s.length > 50);
   return paras[0] || '';
 }
+
 function toTitleCase(s) { return String(s).replace(/\b([a-z])/g, (m, c) => c.toUpperCase()); }
+
 function dedupeList(arr) {
   const seen = new Set();
   return arr.filter(x => {
@@ -2406,24 +2615,35 @@ function dedupeList(arr) {
     return true;
   });
 }
-function collectCodesFromUrl(url){
-  const out = [];
-  try {
-    const u = url.toLowerCase();
-    const m1 = /\/item\/([^\/?#]+)/i.exec(u);
-    const m2 = /\/p\/([a-z0-9._-]+)/i.exec(u);
-    const m3 = /\/product\/([a-z0-9._-]+)/i.exec(u);
-    [m1, m2, m3].forEach(m => { if (m && m[1]) out.push(m[1]); });
-  } catch {}
-  return out;
+
+/* ======= Shared helpers ======= */
+function splitIntoSentences(text){
+  return String(text)
+    .replace(/\s*\n\s*/g, ' ')
+    .split(/(?<=[.!?])\s+(?=[A-Z(0-9])|[•·–\-]\s+|;\s+|·\s+/g)
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
-/* ================== Compass-only helpers ================== */
-export function isCompass(u){
+function mergeDescriptions(a, b){
+  const seen = new Set();
+  const lines = (String(a||"") + "\n" + String(b||""))
+    .split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  const out = [];
+  for (const l of lines){
+    const k=l.toLowerCase();
+    if (!seen.has(k)) { seen.add(k); out.push(l); }
+  }
+  return out.join("\n");
+}
+
+/* ================== Compass-only helpers (ADD-ONLY) ================== */
+function isCompass(u){
   try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); }
   catch { return false; }
 }
-export function harvestCompassOverview($){
+
+function harvestCompassOverview($){
   const candPanels = $('.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, #tabs, .product-details, .product-detail');
   let best = "";
   candPanels.each((_, panel)=>{
@@ -2451,7 +2671,8 @@ export function harvestCompassOverview($){
   });
   return best;
 }
-export function harvestCompassSpecs($){
+
+function harvestCompassSpecs($){
   const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .product-details, .product-detail, section');
   const out = {};
   panels.each((_, panel)=>{
@@ -2480,3 +2701,7 @@ export function harvestCompassSpecs($){
   });
   return out;
 }
+
+/* ================== Listen ================== */
+const port = process.env.PORT || 8080;
+app.listen(port, () => console.log(`ingest-api listening on :${port}`));
