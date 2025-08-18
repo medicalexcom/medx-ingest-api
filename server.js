@@ -1280,19 +1280,13 @@ function extractAllSpecPairs($){
     }
   });
 
-  // Colon/hyphen pairs in main/product areas, but only if value looks spec-like
+  // Colon/hyphen pairs in main/product areas (keep scope, but still guard)
   $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
-    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
     const t = cleanup($(el).text());
-    if (!t || LEGAL_MENU_RE.test(t)) return;
-    const m = t.match(/^([^:–—-]{2,60})(?:\s*[:–—]\s+|\s-\s+)(.{2,300})$/);
-    if (m) {
-      const key = canonicalizeSpecKey(m[1]);
-      const val = m[2];
-      if (/\d/.test(val) || /\b(in|cm|mm|ft|lb|oz|kg|g|mAh|v|w|hz)\b/i.test(val)) {
-        out[key] ||= val;
-      }
-    }
+    if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
+    const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
+    if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
   });
 
   const norm = {};
@@ -1968,19 +1962,14 @@ function extractSpecsSmart($){
 
   // LI pairs
   $('li').each((_, li)=>{
-    if (isFooterOrNav($, li) || isRecoBlock($, li)) return;
+    if (isFooterOrNav($, li) || isRecoBlock($, li)) return; // ADD reco guard
     const t = cleanup($(li).text());
     if (!t || t.length < 3 || t.length > 250) return;
-  
-    // Only split on colon, en/em dash, or space-hyphen-space (avoid hyphenated words)
-    const m = t.match(/^([^:–—-]{2,60})(?:\s*[:–—]\s+|\s-\s+)(.{2,300})$/);
-    if (m){
-      const key = canonicalizeSpecKey(m[1]);
-      const val = m[2];
-      // Accept only spec-like values (numbers/units) to keep marketing bullets out
-      if ((/\d/.test(val) || /\b(in|cm|mm|ft|lb|oz|kg|g|mAh|v|w|hz)\b/i.test(val)) && !out[key]) {
-        out[key] = val;
-      }
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2){
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k]=v;
     }
   });
 
@@ -2062,9 +2051,6 @@ function extractFeaturesSmart($){
     if (/>|›|»/.test(t)) return;
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
     if (/(https?:\/\/|www\.)/i.test(t)) return;
-    // NEW: skip breadcrumb-like lines
-    if (/\s\/\s/.test(t)) return;
-    if (/^\s*(home|products?|shop|pumps)\s*\/.+/i.test(t)) return;
     items.push(t);
   };
 
@@ -2295,11 +2281,10 @@ function resolveAllPanes($, names){
 }
 
 /* ================== ADD-ONLY: Tab title normalization ================== */
-
 const TAB_SYNONYMS = {
   overview: ['overview','description','product description','product details','details','about','info','information'],
   specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
-  features: ['features','key features','highlights','benefits','features/benefits','product includes'], 
+  features: ['features','key features','highlights','benefits','features/benefits'],
   downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
 };
 
@@ -2409,53 +2394,6 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
-  // 3) Enfold/Avia tabs: .tabcontainer/.av_tab_section with data-fake-id
-  $('.tabcontainer .tab_titles .tab[data-fake-id], .av_tab_section .tab[data-fake-id]').each((_, t) => {
-    const $t = $(t);
-    const title = cleanup($t.text());
-    const fake = String($t.attr('data-fake-id') || '').trim(); // e.g. "#tab-id-1"
-    if (!fake || !fake.startsWith('#')) return;
-
-    // Panels are typically `${fake}-container`
-    let $panel = $(`${fake}-container`).first();
-    if (!$panel.length) $panel = $(fake).first();
-
-    // Section-local fallback
-    if (!$panel.length) {
-      const $sec = $t.closest('.av_tab_section');
-      if ($sec.length) $panel = $sec.find('.tab_content').first();
-    }
-    if (!$panel.length) return;
-
-    out.push({
-      title,
-      type: 'avia',
-      el: $panel[0],
-      html: $panel.html() || '',
-      text: cleanup($panel.text() || ''),
-      href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
-    });
-  });
-
-  // 4) Avia active-tab only fallback (when only the active pane has DOM)
-  $('.tabcontainer').each((_, tc) => {
-    const $tc = $(tc);
-    const $activeTab = $tc.find('.tab_titles .tab.active_tab').first();
-    const $activePane = $tc.find('.tab_content.active_tab_content').first();
-    const title = cleanup($activeTab.text());
-    if (title && $activePane.length) {
-      out.push({
-        title,
-        type: 'avia-active',
-        el: $activePane[0],
-        html: $activePane.html() || '',
-        text: cleanup($activePane.text() || ''),
-        href: paneRemoteHref($, $activePane[0]) ? abs(baseUrl, paneRemoteHref($, $activePane[0])) : ''
-      });
-    }
-  });
-
-
   // De-dupe by panel element id or index
   const seen = new Set();
   const uniq = [];
@@ -2557,16 +2495,6 @@ function extractFromBuckets($, buckets, baseUrl){
     collectImgs(pane.html);
   }
 
-  // Map a "Product Includes" pane (features bucket) into a single spec field
-  const includesPane = (buckets.features || []).find(p => /includes/i.test(p.title || ''));
-  if (includesPane) {
-    // Use only the includes that look like kit items (numbers/quantities)
-    const kit = (add.features || []).filter(t => /\b(one|two|three|four|\(\d+\)|\d+\s*[x×])\b/i.test(t) || /^\s*two|\d+/i.test(t));
-    if (kit.length) {
-      add.specs.in_the_box ||= kit.join('; ');
-    }
-  }
-
   return add;
 }
 
@@ -2635,30 +2563,10 @@ function extractSpecsFromContainer($, container){
     }
   });
 
-  // Colon-pairs within paragraphs/inline elements (e.g., "Item: MM011450")
-  $c.find('p, em, strong, span').each((_, el) => {
-    const t = cleanup($(el).text());
-    const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
-    if (m) {
-      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-      const v = m[2];
-      if (k && v && !out[k]) out[k] = v;
-    }
-  });
-
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
     const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
     if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
-  });
-  $c.find('p, em, strong, span').each((_, el) => {
-    const t = cleanup($(el).text());
-    const m = t.match(/^([^:–—-]{2,60})(?:\s*[:–—]\s+|\s-\s+)(.{2,300})$/);
-    if (m) {
-      const k = canonicalizeSpecKey(m[1]);
-      const v = m[2];
-      if (k && v && !out[k]) out[k] = v;
-    }
   });
 
   return out;
@@ -2957,46 +2865,6 @@ function prunePartsLikeSpecs(specs = {}){
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
 
-  // --- Quick Avia/Enfold tab harvest (Spectra site) ---
-  try {
-    const aviaTabs = [];
-    $('.tabcontainer .tab_titles .tab').each((_, t) => {
-      const $t = $(t);
-      const title = cleanup($t.text());
-      const fake  = String($t.attr('data-fake-id') || '').trim(); // e.g. "#tab-id-1"
-      if (!fake) return;
-      const $panel = $(`${fake}-container`).length ? $(`${fake}-container`).first() : $(fake).first();
-      if (!$panel.length) return;
-      aviaTabs.push({ title, html: $panel.html() || '', text: cleanup($panel.text() || '') });
-    });
-  
-    if (aviaTabs.length) {
-      // Description / Overview
-      const descTab = aviaTabs.find(t => /product description|overview|details/i.test(t.title || ''));
-      if (descTab) {
-        const $p = cheerio.load(descTab.html || '');
-        const d  = extractDescriptionFromContainer($p, $p.root()) || descTab.text;
-        if (d && d.length > (norm.description_raw || '').length) norm.description_raw = d;
-        if ((norm.description_raw || '').length < 120 && (d || '').length > 80) norm.description_raw = d;
-      }
-  
-      // Product Includes -> features + specs.in_the_box
-      const incTab = aviaTabs.find(t => /product includes/i.test(t.title || ''));
-      if (incTab) {
-        const $p  = cheerio.load(incTab.html || '');
-        const kit = $p('li').map((i, li) => cleanup($p(li).text())).get().filter(Boolean);
-        if (kit.length) {
-          (norm.features_raw ||= []);
-          const seen = new Set(norm.features_raw.map(s => s.toLowerCase()));
-          for (const line of kit) if (!seen.has(line.toLowerCase())) norm.features_raw.push(line);
-          norm.specs = { ...(norm.specs || {}), in_the_box: kit.join('; ') };
-        }
-      }
-    }
-  } catch {}
-  // --- end Avia/Enfold ---
-
-
   // === ADD-ONLY: Unified tab/accordion harvester (runs before Dojo pre-pass) ===
   try {
     const headers = { "User-Agent": "MedicalExIngest/1.7" };
@@ -3005,9 +2873,6 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
 
     if (uni.desc && uni.desc.length > (norm.description_raw || '').length) {
       norm.description_raw = mergeDescriptions(norm.description_raw || "", uni.desc);
-    }
-    if ((norm.description_raw || '').length < 120 && (uni.desc || '').length > 80) {
-      norm.description_raw = uni.desc;
     }
     if (uni.specs && Object.keys(uni.specs).length) {
       norm.specs = { ...(norm.specs || {}), ...uni.specs };
@@ -3196,10 +3061,6 @@ function sanitizeIngestPayload(p) {
       .slice(0, 12);
     features = dedupeList([...features, ...specBullets]).slice(0, 12);
   }
-  features = features.filter(t =>
-    !/\s\/\s/.test(t) &&                  // e.g., "Pumps / New Products / SG Portable"
-    !/^\s*(home|shop|products?)\s*\//i.test(t)
-  );
   out.features_raw = features.slice(0, 20);
 
   const allowManual = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|datasheet|spec(?:sheet)?|guide|brochure)/i;
@@ -3234,14 +3095,11 @@ function sanitizeIngestPayload(p) {
   const badSpecKey = /\b(privacy|terms|copyright|©|™|®)\b/i;
   if (out.specs && typeof out.specs === 'object') {
     const cleaned = {};
-    for (const [kRaw, vRaw] of Object.entries(out.specs)) {
-      const k = String(kRaw || '').trim();
-      const v = String(vRaw || '').trim();
-      if (!k || !v) continue;
-      if (badSpecKey.test(k)) continue;
-      const base = k.replace(/_+$/,'');               // drop trailing underscores
-      if (cleaned[base] && k.endsWith('_')) continue; // prefer non-underscore key
-      cleaned[base] = v;
+    for (const [k, v] of Object.entries(out.specs)) {
+      if (!k || badSpecKey.test(k)) continue;
+      const val = String(v || '').trim();
+      if (!val) continue;
+      cleaned[k] = val;
     }
     out.specs = Object.keys(cleaned).length ? cleaned : deriveSpecsFromText(out.description_raw || '');
   }
