@@ -1280,13 +1280,20 @@ function extractAllSpecPairs($){
     }
   });
 
-  // Colon/hyphen pairs in main/product areas (keep scope, but still guard)
+  // Colon/hyphen pairs in main/product areas, but only if value looks spec-like
   $('main, #main, .main, .content, #content, .product, .product-details, .product-detail').find('li,p').each((_, el)=>{
-    if (isFooterOrNav($, el) || isRecoBlock($, el)) return; // ADD reco guard
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     const t = cleanup($(el).text());
-    if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
+    if (!t || LEGAL_MENU_RE.test(t)) return;
     const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
-    if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
+    if (m) {
+      const key = canonicalizeSpecKey(m[1]);
+      const val = m[2];
+      // Only accept if the value contains numbers or units typical for specs
+      if (/\d/.test(val) || /\b(in|cm|mm|ft|lb|oz|kg|g|mah|v|w|hz|mhz|ghz)\b/i.test(val)) {
+        out[key] ||= val;
+      }
+    }
   });
 
   const norm = {};
@@ -2051,6 +2058,9 @@ function extractFeaturesSmart($){
     if (/>|›|»/.test(t)) return;
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
     if (/(https?:\/\/|www\.)/i.test(t)) return;
+    // NEW: skip breadcrumb-like lines
+    if (/\s\/\s/.test(t)) return;
+    if (/^\s*(home|products?|shop|pumps)\s*\/.+/i.test(t)) return;
     items.push(t);
   };
 
@@ -2281,10 +2291,11 @@ function resolveAllPanes($, names){
 }
 
 /* ================== ADD-ONLY: Tab title normalization ================== */
+
 const TAB_SYNONYMS = {
   overview: ['overview','description','product description','product details','details','about','info','information'],
   specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
-  features: ['features','key features','highlights','benefits','features/benefits','product includes'],
+  features: ['features','key features','highlights','benefits','features/benefits','product includes'], 
   downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
 };
 
@@ -2394,25 +2405,18 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
-    // 3) Enfold/Avia tabcontainer (data-fake-id + ...-container)
-  // Example:
-  // <div class="tab_titles">
-  //   <div class="tab" data-fake-id="#tab-id-1">Product Description</div>
-  //   <div class="tab" data-fake-id="#tab-id-2">Product Includes</div>
-  // </div>
-  // <div id="tab-id-1-container" class="tab_content">...</div>
+  // 3) Enfold/Avia tabs: .tabcontainer/.av_tab_section with data-fake-id
   $('.tabcontainer .tab_titles .tab[data-fake-id], .av_tab_section .tab[data-fake-id]').each((_, t) => {
     const $t = $(t);
     const title = cleanup($t.text());
     const fake = String($t.attr('data-fake-id') || '').trim(); // e.g. "#tab-id-1"
     if (!fake || !fake.startsWith('#')) return;
 
-    // Common Avia convention: panel id is `${fake}-container`
-    const panelSel = `${fake}-container`;
-    let $panel = $(panelSel).first();
-
-    // Fallbacks: sometimes content is directly at the fake id, or as a sibling .tab_content
+    // Panels are typically `${fake}-container`
+    let $panel = $(`${fake}-container`).first();
     if (!$panel.length) $panel = $(fake).first();
+
+    // Section-local fallback
     if (!$panel.length) {
       const $sec = $t.closest('.av_tab_section');
       if ($sec.length) $panel = $sec.find('.tab_content').first();
@@ -2428,6 +2432,25 @@ function collectTabCandidates($, baseUrl){
       href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
     });
   });
+
+  // 4) Avia active-tab only fallback (when only the active pane has DOM)
+  $('.tabcontainer').each((_, tc) => {
+    const $tc = $(tc);
+    const $activeTab = $tc.find('.tab_titles .tab.active_tab').first();
+    const $activePane = $tc.find('.tab_content.active_tab_content').first();
+    const title = cleanup($activeTab.text());
+    if (title && $activePane.length) {
+      out.push({
+        title,
+        type: 'avia-active',
+        el: $activePane[0],
+        html: $activePane.html() || '',
+        text: cleanup($activePane.text() || ''),
+        href: paneRemoteHref($, $activePane[0]) ? abs(baseUrl, paneRemoteHref($, $activePane[0])) : ''
+      });
+    }
+  });
+
 
   // De-dupe by panel element id or index
   const seen = new Set();
@@ -2530,12 +2553,13 @@ function extractFromBuckets($, buckets, baseUrl){
     collectImgs(pane.html);
   }
 
-  // Optional: map "Product Includes" bullets into a single spec field
+  // Map a "Product Includes" pane (features bucket) into a single spec field
   const includesPane = (buckets.features || []).find(p => /includes/i.test(p.title || ''));
-  if (includesPane && add.features && add.features.length) {
-    const joined = add.features.join('; ');
-    if (joined && !/^\s*$/.test(joined)) {
-      add.specs.includes ||= joined;
+  if (includesPane) {
+    // Use only the includes that look like kit items (numbers/quantities)
+    const kit = (add.features || []).filter(t => /\b(one|two|three|four|\(\d+\)|\d+\s*[x×])\b/i.test(t) || /^\s*two|\d+/i.test(t));
+    if (kit.length) {
+      add.specs.in_the_box ||= kit.join('; ');
     }
   }
 
@@ -2607,7 +2631,7 @@ function extractSpecsFromContainer($, container){
     }
   });
 
-  // Plain text colon-pairs inside paragraphs/em/strong/spans (e.g., "Item: MM011450")
+  // Colon-pairs within paragraphs/inline elements (e.g., "Item: MM011450")
   $c.find('p, em, strong, span').each((_, el) => {
     const t = cleanup($(el).text());
     const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
@@ -2929,6 +2953,9 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     if (uni.desc && uni.desc.length > (norm.description_raw || '').length) {
       norm.description_raw = mergeDescriptions(norm.description_raw || "", uni.desc);
     }
+    if ((norm.description_raw || '').length < 120 && (uni.desc || '').length > 80) {
+      norm.description_raw = uni.desc;
+    }
     if (uni.specs && Object.keys(uni.specs).length) {
       norm.specs = { ...(norm.specs || {}), ...uni.specs };
     }
@@ -3150,11 +3177,14 @@ function sanitizeIngestPayload(p) {
   const badSpecKey = /\b(privacy|terms|copyright|©|™|®)\b/i;
   if (out.specs && typeof out.specs === 'object') {
     const cleaned = {};
-    for (const [k, v] of Object.entries(out.specs)) {
-      if (!k || badSpecKey.test(k)) continue;
-      const val = String(v || '').trim();
-      if (!val) continue;
-      cleaned[k] = val;
+    for (const [kRaw, vRaw] of Object.entries(out.specs)) {
+      const k = String(kRaw || '').trim();
+      const v = String(vRaw || '').trim();
+      if (!k || !v) continue;
+      if (badSpecKey.test(k)) continue;
+      const base = k.replace(/_+$/,'');               // collapse trailing underscores
+      if (cleaned[base] && k.endsWith('_')) continue; // prefer the non-underscore key
+      cleaned[base] = v;
     }
     out.specs = Object.keys(cleaned).length ? cleaned : deriveSpecsFromText(out.description_raw || '');
   }
