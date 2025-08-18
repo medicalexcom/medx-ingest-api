@@ -2284,7 +2284,7 @@ function resolveAllPanes($, names){
 const TAB_SYNONYMS = {
   overview: ['overview','description','product description','product details','details','about','info','information'],
   specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
-  features: ['features','key features','highlights','benefits','features/benefits'],
+  features: ['features','key features','highlights','benefits','features/benefits','product includes'],
   downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
 };
 
@@ -2394,6 +2394,41 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
+    // 3) Enfold/Avia tabcontainer (data-fake-id + ...-container)
+  // Example:
+  // <div class="tab_titles">
+  //   <div class="tab" data-fake-id="#tab-id-1">Product Description</div>
+  //   <div class="tab" data-fake-id="#tab-id-2">Product Includes</div>
+  // </div>
+  // <div id="tab-id-1-container" class="tab_content">...</div>
+  $('.tabcontainer .tab_titles .tab[data-fake-id], .av_tab_section .tab[data-fake-id]').each((_, t) => {
+    const $t = $(t);
+    const title = cleanup($t.text());
+    const fake = String($t.attr('data-fake-id') || '').trim(); // e.g. "#tab-id-1"
+    if (!fake || !fake.startsWith('#')) return;
+
+    // Common Avia convention: panel id is `${fake}-container`
+    const panelSel = `${fake}-container`;
+    let $panel = $(panelSel).first();
+
+    // Fallbacks: sometimes content is directly at the fake id, or as a sibling .tab_content
+    if (!$panel.length) $panel = $(fake).first();
+    if (!$panel.length) {
+      const $sec = $t.closest('.av_tab_section');
+      if ($sec.length) $panel = $sec.find('.tab_content').first();
+    }
+    if (!$panel.length) return;
+
+    out.push({
+      title,
+      type: 'avia',
+      el: $panel[0],
+      html: $panel.html() || '',
+      text: cleanup($panel.text() || ''),
+      href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
+    });
+  });
+
   // De-dupe by panel element id or index
   const seen = new Set();
   const uniq = [];
@@ -2495,6 +2530,15 @@ function extractFromBuckets($, buckets, baseUrl){
     collectImgs(pane.html);
   }
 
+  // Optional: map "Product Includes" bullets into a single spec field
+  const includesPane = (buckets.features || []).find(p => /includes/i.test(p.title || ''));
+  if (includesPane && add.features && add.features.length) {
+    const joined = add.features.join('; ');
+    if (joined && !/^\s*$/.test(joined)) {
+      add.specs.includes ||= joined;
+    }
+  }
+
   return add;
 }
 
@@ -2560,6 +2604,17 @@ function extractSpecsFromContainer($, container){
       const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
       const v = m.slice(1).join(': ').trim();
       if (k && v && !out[k]) out[k]=v;
+    }
+  });
+
+  // Plain text colon-pairs inside paragraphs/em/strong/spans (e.g., "Item: MM011450")
+  $c.find('p, em, strong, span').each((_, el) => {
+    const t = cleanup($(el).text());
+    const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
+    if (m) {
+      const k = m[1].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m[2];
+      if (k && v && !out[k]) out[k] = v;
     }
   });
 
