@@ -616,7 +616,6 @@ function extractNormalized(baseUrl, html, opts) {
 
   const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
   const manuals = extractManuals($, baseUrl, name, html, opts);
-  const sku_final = resolveSku($, { mergedSD, og, html, name, brand });
 
   /* ================== SKU Helpers (ADD-ONLY) ================== */
   function _normSkuVal(v){
