@@ -193,6 +193,132 @@ function isBadImageUrl(u, $el){
   return false;
 }
 
+/* ================== Identifier → SKU (ADD-ONLY) ================== */
+
+/** Visible label match helpers */
+const _lbl = (s) => String(s || "").toLowerCase();
+const SKU_LABEL_HINTS = [
+  "sku", "product code", "productcode", "product id", "productid",
+  "item number", "item no", "item id", "itemid", "item code",
+  "catalog id", "catalog#", "code"
+];
+
+/** Try to decide if a generic 'code/id' is acting as the page SKU */
+function looksLikeSkuLabel(text, nearText) {
+  const t = _lbl(text);
+  if (SKU_LABEL_HINTS.some(h => t.includes(h))) return true;
+  const n = _lbl(nearText);
+  if (n && SKU_LABEL_HINTS.some(h => n.includes(h))) return true;
+  return false;
+}
+
+/** Collect raw identifier candidates from JSON-LD + DOM */
+function collectSkuCandidates($, jsonld, rawHtml) {
+  const set = new Set();
+  // 1) JSON-LD
+  try {
+    if (jsonld && typeof jsonld === "object") {
+      const jl = Array.isArray(jsonld) ? jsonld : [jsonld];
+      jl.forEach(node => {
+        if (node && typeof node === "object") {
+          if (node.sku) set.add(String(node.sku).trim());
+          if (node.productID) set.add(String(node.productID).trim());
+          if (node.identifier) set.add(String(node.identifier).trim());
+        }
+      });
+    }
+  } catch {}
+
+  // 2) Common meta/data attributes in DOM
+  const ATTRS = [
+    "[itemprop=sku]", "[data-sku]", "[data-product-sku]", "[data-item-sku]"
+  ];
+  $(ATTRS.join(",")).each((_, el) => {
+    const v = ($(el).attr("content") || $(el).attr("data-sku") || $(el).text() || "").trim();
+    if (v) set.add(v);
+  });
+
+  // 3) Key/value blocks (dt/dd, tables, specs lists)
+  $("dt,th,label").each((_, el) => {
+    const key = ($(el).text() || "").trim();
+    if (!key) return;
+    if (!looksLikeSkuLabel(key)) return;
+
+    // next value-ish sibling
+    let val = $(el).next("dd").text().trim()
+           || $(el).closest("tr").find("td").first().text().trim()
+           || $(el).parent().find("td,dd").not(el).first().text().trim();
+    if (!val) {
+      // sometimes label wraps the value
+      val = $(el).attr("data-value") || "";
+    }
+    val = String(val).replace(/\s+/g, " ").trim();
+    if (val) set.add(val);
+  });
+
+  // 4) Regex sweep for common pairs like "Product ID: 4433"
+  const PAIRS = [
+    /(sku|product[\s_-]?id|product[\s_-]?code|item[\s_-]?(?:no|number|id)|catalog[\s_-]?id|code)\s*[:#-]?\s*([A-Za-z0-9._\-\/ ]{2,64})/gi
+  ];
+  for (const rx of PAIRS) {
+    let m;
+    while ((m = rx.exec(rawHtml)) !== null) {
+      const key = (m[1] || "").toLowerCase();
+      let val = (m[2] || "").trim();
+      if (!val) continue;
+      // guard against capturing long sentences
+      if (val.length > 80) continue;
+      if (looksLikeSkuLabel(key)) set.add(val);
+    }
+  }
+
+  return Array.from(set).filter(Boolean);
+}
+
+/** Normalize a candidate into a compliant SKU string */
+function normalizeSku(s) {
+  let v = String(s || "").trim();
+  if (!v) return "";
+  v = v.toUpperCase();
+  // keep A-Z 0-9 and - _ . /
+  v = v.replace(/[^A-Z0-9._\-\/]+/g, "");
+  // collapse repeats
+  v = v.replace(/[._\-\/]{2,}/g, (m)=>m[0]);
+  // length cap (soft)
+  if (v.length > 60) v = v.slice(0, 60);
+  return v;
+}
+
+/** Deterministic fallback from brand+name (last resort) */
+import crypto from "node:crypto";
+function makeDeterministicSku(brand, name) {
+  const basis = (String(brand||"") + "|" + String(name||"")).toUpperCase();
+  const h = crypto.createHash("sha1").update(basis).digest("hex").slice(0, 6).toUpperCase();
+  return `MEDX-${h}`;
+}
+
+/**
+ * Decide on final SKU.
+ * Priority:
+ *  1) explicit SKU-ish labels (JSON-LD or DOM)
+ *  2) generic productID/item_number/etc. (treated as SKU)
+ *  3) GTIN (digits) if present elsewhere (pass in via opts.gtinCandidate)
+ *  4) Deterministic {brand+name} hash
+ */
+function chooseFinalSku({$, jsonld, rawHtml, brand, name, gtinCandidate}) {
+  const cands = collectSkuCandidates($, jsonld, rawHtml)
+    .map(normalizeSku)
+    .filter(Boolean);
+
+  if (cands.length) return cands[0];
+
+  if (gtinCandidate && String(gtinCandidate).replace(/\D+/g,"").length >= 8) {
+    return normalizeSku(String(gtinCandidate).replace(/\D+/g,""));
+  }
+
+  return makeDeterministicSku(brand, name);
+}
+
 /* ================== ADD-ONLY helpers for image/CDN/manual capture ================== */
 function getRegistrableDomain(host) {
   try {
