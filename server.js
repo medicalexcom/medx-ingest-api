@@ -1795,9 +1795,8 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     .map(([url, score]) => ({ url, score }))
     .sort((a, b) => b.score - a.score);
 
-  const result = ranked.slice(0, 8).map(r => ({ url: r.url }));
-  return result;
-
+  return ranked.slice(0, 8).map(r => ({ url: r.url }));
+  
   const seen = new Set();
   let out = [];
   for (const s of scored) {
