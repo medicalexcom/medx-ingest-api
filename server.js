@@ -193,132 +193,6 @@ function isBadImageUrl(u, $el){
   return false;
 }
 
-/* ================== Identifier → SKU (ADD-ONLY) ================== */
-
-/** Visible label match helpers */
-const _lbl = (s) => String(s || "").toLowerCase();
-const SKU_LABEL_HINTS = [
-  "sku", "product code", "productcode", "product id", "productid",
-  "item number", "item no", "item id", "itemid", "item code",
-  "catalog id", "catalog#", "code"
-];
-
-/** Try to decide if a generic 'code/id' is acting as the page SKU */
-function looksLikeSkuLabel(text, nearText) {
-  const t = _lbl(text);
-  if (SKU_LABEL_HINTS.some(h => t.includes(h))) return true;
-  const n = _lbl(nearText);
-  if (n && SKU_LABEL_HINTS.some(h => n.includes(h))) return true;
-  return false;
-}
-
-/** Collect raw identifier candidates from JSON-LD + DOM */
-function collectSkuCandidates($, jsonld, rawHtml) {
-  const set = new Set();
-  // 1) JSON-LD
-  try {
-    if (jsonld && typeof jsonld === "object") {
-      const jl = Array.isArray(jsonld) ? jsonld : [jsonld];
-      jl.forEach(node => {
-        if (node && typeof node === "object") {
-          if (node.sku) set.add(String(node.sku).trim());
-          if (node.productID) set.add(String(node.productID).trim());
-          if (node.identifier) set.add(String(node.identifier).trim());
-        }
-      });
-    }
-  } catch {}
-
-  // 2) Common meta/data attributes in DOM
-  const ATTRS = [
-    "[itemprop=sku]", "[data-sku]", "[data-product-sku]", "[data-item-sku]"
-  ];
-  $(ATTRS.join(",")).each((_, el) => {
-    const v = ($(el).attr("content") || $(el).attr("data-sku") || $(el).text() || "").trim();
-    if (v) set.add(v);
-  });
-
-  // 3) Key/value blocks (dt/dd, tables, specs lists)
-  $("dt,th,label").each((_, el) => {
-    const key = ($(el).text() || "").trim();
-    if (!key) return;
-    if (!looksLikeSkuLabel(key)) return;
-
-    // next value-ish sibling
-    let val = $(el).next("dd").text().trim()
-           || $(el).closest("tr").find("td").first().text().trim()
-           || $(el).parent().find("td,dd").not(el).first().text().trim();
-    if (!val) {
-      // sometimes label wraps the value
-      val = $(el).attr("data-value") || "";
-    }
-    val = String(val).replace(/\s+/g, " ").trim();
-    if (val) set.add(val);
-  });
-
-  // 4) Regex sweep for common pairs like "Product ID: 4433"
-  const PAIRS = [
-    /(sku|product[\s_-]?id|product[\s_-]?code|item[\s_-]?(?:no|number|id)|catalog[\s_-]?id|code)\s*[:#-]?\s*([A-Za-z0-9._\-\/ ]{2,64})/gi
-  ];
-  for (const rx of PAIRS) {
-    let m;
-    while ((m = rx.exec(rawHtml)) !== null) {
-      const key = (m[1] || "").toLowerCase();
-      let val = (m[2] || "").trim();
-      if (!val) continue;
-      // guard against capturing long sentences
-      if (val.length > 80) continue;
-      if (looksLikeSkuLabel(key)) set.add(val);
-    }
-  }
-
-  return Array.from(set).filter(Boolean);
-}
-
-/** Normalize a candidate into a compliant SKU string */
-function normalizeSku(s) {
-  let v = String(s || "").trim();
-  if (!v) return "";
-  v = v.toUpperCase();
-  // keep A-Z 0-9 and - _ . /
-  v = v.replace(/[^A-Z0-9._\-\/]+/g, "");
-  // collapse repeats
-  v = v.replace(/[._\-\/]{2,}/g, (m)=>m[0]);
-  // length cap (soft)
-  if (v.length > 60) v = v.slice(0, 60);
-  return v;
-}
-
-/** Deterministic fallback from brand+name (last resort) */
-import crypto from "node:crypto";
-function makeDeterministicSku(brand, name) {
-  const basis = (String(brand||"") + "|" + String(name||"")).toUpperCase();
-  const h = crypto.createHash("sha1").update(basis).digest("hex").slice(0, 6).toUpperCase();
-  return `MEDX-${h}`;
-}
-
-/**
- * Decide on final SKU.
- * Priority:
- *  1) explicit SKU-ish labels (JSON-LD or DOM)
- *  2) generic productID/item_number/etc. (treated as SKU)
- *  3) GTIN (digits) if present elsewhere (pass in via opts.gtinCandidate)
- *  4) Deterministic {brand+name} hash
- */
-function chooseFinalSku({$, jsonld, rawHtml, brand, name, gtinCandidate}) {
-  const cands = collectSkuCandidates($, jsonld, rawHtml)
-    .map(normalizeSku)
-    .filter(Boolean);
-
-  if (cands.length) return cands[0];
-
-  if (gtinCandidate && String(gtinCandidate).replace(/\D+/g,"").length >= 8) {
-    return normalizeSku(String(gtinCandidate).replace(/\D+/g,""));
-  }
-
-  return makeDeterministicSku(brand, name);
-}
-
 /* ================== ADD-ONLY helpers for image/CDN/manual capture ================== */
 function getRegistrableDomain(host) {
   try {
@@ -742,6 +616,126 @@ function extractNormalized(baseUrl, html, opts) {
 
   const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
   const manuals = extractManuals($, baseUrl, name, html, opts);
+  const sku_final = resolveSku($, { mergedSD, og, html, name, brand });
+
+  /* ================== SKU Helpers (ADD-ONLY) ================== */
+  function _normSkuVal(v){
+    return String(v||"").trim().replace(/\s+/g, " ");
+  }
+  
+  function _isLikelyGtinOnly(s){
+    // Reject plain 8/12/13/14 digit GTIN-like values when no letters are present
+    const digits = s.replace(/\D+/g,'');
+    return /^\d+$/.test(s) && [8,12,13,14].includes(digits.length);
+  }
+  
+  const _skuKeySynonyms = [
+    // high confidence first
+    "sku","productid","product_id","product-id","retailer_item_id","retailer:sku","item_number","item_no","item #","item",
+    "model_number","model no","model #","model",
+    "part_number","part no","part #","part",
+    "product_code","product code","code","id"
+  ];
+  
+  function _collectSkuCandidates($, { mergedSD={}, og={}, html="", name="", brand="" }){
+    const out = [];
+  
+    const push = (val, how, label="")=>{
+      const v = _normSkuVal(val);
+      if (!v) return;
+      if (_isLikelyGtinOnly(v)) return; // avoid GTIN-only values as "SKU"
+      out.push({ v, how, label });
+    };
+  
+    // 1) Structured data specs first
+    const sdSpecs = mergedSD.specs || {};
+    for (const k of Object.keys(sdSpecs)){
+      const kl = k.toLowerCase().replace(/[\s_-]+/g,'');
+      if (_skuKeySynonyms.includes(kl)) push(sdSpecs[k], "sd-spec", k);
+    }
+    // JSON-LD common top-levels mapped via mergeProductSD already ended up in specs,
+    // but keep a light extra check:
+    if (mergedSD && mergedSD.name && sdSpecs && sdSpecs.sku) push(sdSpecs.sku, "sd-direct", "sku");
+  
+    // 2) OpenGraph product extras (e.g., product:retailer_item_id)
+    if (og && og.product){
+      const ogk = og.product;
+      for (const k of Object.keys(ogk)){
+        const kl = k.toLowerCase().replace(/[\s:_-]+/g,'');
+        if (_skuKeySynonyms.includes(kl)) push(ogk[k], "og-product", k);
+      }
+    }
+  
+    // 3) Explicit DOM selectors
+    // itemprop=sku
+    $('[itemprop="sku"]').each((_, el)=>{
+      const $el = $(el);
+      const v = $el.attr('content') || $el.text();
+      push(v, "dom:itemprop=sku");
+    });
+    // data-* attributes that often carry sku
+    $('[data-sku],[data-product-sku],[data-productid],[data-item],[data-item-number],[data-model-number]').each((_, el)=>{
+      const $el = $(el);
+      const v = $el.attr('data-sku') || $el.attr('data-product-sku') || $el.attr('data-productid') ||
+                $el.attr('data-item') || $el.attr('data-item-number') || $el.attr('data-model-number');
+      push(v, "dom:data-attr");
+    });
+  
+    // 4) Labeled key:value in tables/lists/paras (SKU:, Product ID:, Item #, Model No., Code, etc.)
+    const labelRx = /\b(sku|product\s*id|productid|item\s*(?:number|no|#)?|model\s*(?:number|no|#)?|part\s*(?:number|no|#)?|product\s*code|code|id)\b/i;
+    const kvRx    = /\b(?:sku|product\s*id|productid|item\s*(?:number|no|#)?|model\s*(?:number|no|#)?|part\s*(?:number|no|#)?|product\s*code|code|id)\b[:\s#-]*([A-Za-z0-9][A-Za-z0-9._\-\/]{1,60})/i;
+  
+    $('tr, li, p, dt, dd').each((_, el)=>{
+      const t = ($(el).text() || "").replace(/\s+/g,' ').trim();
+      if (!labelRx.test(t)) return;
+      const m = kvRx.exec(t);
+      if (m && m[1]) push(m[1], "dom:labeled");
+    });
+  
+    // 5) Very light URL hint (only if explicitly labeled param present)
+    try {
+      const u = new URL((html.match(/<base[^>]*href="([^"]+)"/i)?.[1]) || "") // prefer <base> if present
+             || new URL(location.href); // fallback (ignored in SSR)
+      const params = ["sku","productid","item","item_number","model","code","id"];
+      for (const p of params){
+        const v = u.searchParams.get(p);
+        if (v) push(v, "url:param", p);
+      }
+    } catch {}
+  
+    // Scoring & selection
+    const seen = new Set();
+    const uniq = [];
+    for (const c of out){
+      const key = c.v.toLowerCase();
+      if (!seen.has(key)){ seen.add(key); uniq.push(c); }
+    }
+  
+    const score = (c)=>{
+      let s = 0;
+      if (c.how.startsWith("sd"))            s += 5;
+      else if (c.how === "og-product")       s += 4;
+      else if (c.how === "dom:itemprop=sku") s += 4;
+      else if (c.how === "dom:data-attr")    s += 3;
+      else if (c.how === "dom:labeled")      s += 3;
+      else if (c.how === "url:param")        s += 1;
+  
+      // Prefer alpha-numeric mixes; de‑prefer very short or very long
+      if (/[A-Za-z]/.test(c.v) && /\d/.test(c.v)) s += 2;
+      if (c.v.length >= 3 && c.v.length <= 40)     s += 1;
+  
+      return s;
+    };
+  
+    uniq.sort((a,b)=> score(b)-score(a));
+  
+    return uniq.map(o=>o.v);
+  }
+  
+  function resolveSku($, ctx){
+    const cands = _collectSkuCandidates($, ctx);
+    return cands[0] || ""; // pick best
+  }
 
   /* ==== ADD-ONLY: merge extra images/manuals from enhanced passes ==== */
   try {
@@ -802,6 +796,7 @@ function extractNormalized(baseUrl, html, opts) {
   if (!features.length) features = deriveFeaturesFromParagraphs($);
   if (!Object.keys(specs).length) specs = deriveSpecsFromParagraphs($);
   if (!description_raw) description_raw = firstGoodParagraph($);
+  const sku_final = resolveSku($, { mergedSD, og, html, name, brand });
 
   return {
     source: baseUrl,
@@ -811,7 +806,8 @@ function extractNormalized(baseUrl, html, opts) {
     features_raw: features,
     images: imgs,
     manuals: mans,
-    brand
+    brand,
+    sku: sku_final
   };
 }
 /* ================== Structured Data Extractors ================== */
