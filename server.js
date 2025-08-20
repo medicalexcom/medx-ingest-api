@@ -367,6 +367,33 @@ async function fetchDirectHtml(url, { headers={}, timeoutMs=DEFAULT_RENDER_TIMEO
   }
 }
 
+function mergeDescriptions(a = "", b = "") {
+  const seen = new Set();
+  const lines = (a + "\n" + b)
+    .split(/\n+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  const out = [];
+  for (const l of lines) {
+    const k = l.toLowerCase();
+    if (!seen.has(k)) { seen.add(k); out.push(l); }
+  }
+  return out.join("\n");
+}
+
+function toTitleCase(s = "") {
+  return String(s)
+    .toLowerCase()
+    .replace(/\b[a-z]/g, c => c.toUpperCase());
+}
+
+function splitIntoSentences(t = "") {
+  return String(t)
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
 /* ================== Ingest route ================== */
 /**
  * GET /ingest?url=<https://...>&selector=.css&wait=ms&timeout=ms&mode=fast|full
@@ -1764,9 +1791,12 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
   });
 
   // --- final ranking & dedupe ---
-  const scored = Array.from(set.entries())
+  const ranked = Array.from(scores.entries())
     .map(([url, score]) => ({ url, score }))
     .sort((a, b) => b.score - a.score);
+
+  const result = ranked.slice(0, 8).map(r => ({ url: r.url }));
+  return result;
 
   const seen = new Set();
   let out = [];
@@ -1783,7 +1813,7 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
 
   // --- Compass fix-up: merge real /media/images/items/* images if we have room
   try {
-    if (isCompassHost(baseUrl)) {
+    if (isCompassHost(targetUrl)) {
       const compImgs = harvestCompassItemImages($, baseUrl, rawHtml);
       if (compImgs.length) {
         const have = new Set(out.map(o => {
@@ -3365,3 +3395,9 @@ function harvestCompassSpecs($){
 /* ================== Listen ================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`ingest-api listening on :${port}`));
+
+if (process.env.NODE_ENV !== "test") {
+  const PORT = process.env.PORT || 8080;
+  app.listen(PORT, () => console.log(`ingest-api listening on :${PORT}`));
+}
+export default app;
