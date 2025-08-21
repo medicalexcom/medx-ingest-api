@@ -2604,24 +2604,23 @@ function collectTabCandidates($, baseUrl){
 }
 
 /* ================== ADD-ONLY: Hydrate generic remote panes ================== */
-async function hydrateRemotePanes(cands, renderApiUrl, headers = {}){
+async function hydrateRemotePanes(cands, renderApiUrl, headers = {}) {
   if (!cands || !cands.length) return cands;
-  const base = (renderApiUrl || '').replace(/\/+$/,'');
+  const base = (renderApiUrl || '').replace(/\/+$/, '');
   const out = [];
-  for (const c of cands){
+  for (const c of cands) {
     const copy = { ...c };
-    if ((!copy.html || copy.html.length < 40) && copy.href){
-      try{
+    if ((!copy.html || copy.html.length < 40) && copy.href) {
+      try {
         const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=fast`;
         const { html } = await fetchWithRetry(url, { headers });
         copy.html = html || '';
         copy.text = cleanup(cheerio.load(html).root().text() || '');
-      }catch{}
-    }
+      } catch {}
+    } 
     out.push(copy);
+    return out;
   }
-  return out;
-}
 
 /* ================== ADD-ONLY: Rank/merge tabs into buckets ================== */
 function bucketizeTabs(cands){
@@ -3385,33 +3384,58 @@ function harvestCompassOverview($){
   return best;
 }
 
-function harvestCompassSpecs($){
+function harvestCompassSpecs($) {
+  // look for specs in various pane-like containers
   const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .product-details, .product-detail, section');
   const out = {};
-  panels.each((_, panel)=>{
-    const $p = $(panel);
-    const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
-    if (!/technical\s+specifications?/i.test(heading)) return;
 
-    $p.find('tr').each((__, tr)=>{
+  panels.each((_, panel) => {
+    const $p = $(panel);
+    const heading  = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
+    // also inspect the label of the preceding tab/button
+    const tabLabel = cleanup($p.prev('a,button,[role="tab"]').first().text());
+    const combined = `${heading} ${tabLabel}`;
+
+    // only process panels that appear to contain technical specs
+    if (!/\b(technical\s+specifications?|tech\s*specs?|specifications?)\b/i.test(combined)) return;
+
+    // tables (<tr> rows with th/td)
+    $p.find('tr').each((__, tr) => {
       const cells = $(tr).find('th,td');
-      if (cells.length >= 2){
+      if (cells.length >= 2) {
         const k = cleanup($(cells[0]).text()).replace(/:$/, '');
         const v = cleanup($(cells[1]).text());
-        if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
+        if (k && v) {
+          const key = k.toLowerCase().replace(/\s+/g, '_');
+          if (!out[key]) out[key] = v;
+        }
       }
     });
 
-    $p.find('li').each((__, li)=>{
+    // definition lists (<dl><dt>Key<dd>Value)
+    $p.find('dl').each((__, dl) => {
+      const dts = $(dl).find('dt'), dds = $(dl).find('dd');
+      if (dts.length === dds.length && dts.length) {
+        for (let i = 0; i < dts.length; i++) {
+          const k = cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g, '_').replace(/:$/, '');
+          const v = cleanup($(dds[i]).text());
+          if (k && v && !out[k]) out[k] = v;
+        }
+      }
+    });
+
+    // colon-delimited list items (<li>Key: Value)
+    $p.find('li').each((__, li) => {
       const t = cleanup($(li).text());
       const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
-      if (m){
-        const k = m[1].toLowerCase().replace(/\s+/g,'_');
-        const v = m[2];
-        if (k && v) out[k] ||= v;
+      if (m) {
+        const key = m[1].toLowerCase().replace(/\s+/g, '_');
+        const val = m[2];
+        if (key && val && !out[key]) out[key] = val;
       }
     });
   });
+
   return out;
 }
 
