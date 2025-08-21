@@ -3375,17 +3375,17 @@ function harvestCompassSpecs($){
 /* ================== Listen ================== */
 const PORT = process.env.PORT || 8080;
 
-// Start the server only when not in test mode
-if (process.env.NODE_ENV !== "test") {
-  app.listen(PORT, () =>
-    console.log(`ingest-api listening on :${PORT}`)
-  );
+// Health endpoints (keep these near your routes)
+app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
+app.get("/healthz", (_, res) => res.json({ ok: true }));
+
+// --- bind exactly once (Render sets PORT) ---
+if (process.env.NODE_ENV !== "test" && !global.__INGEST_LISTENING__) {
+  const PORT = parseInt(process.env.PORT, 10) || 8080; // Render provides PORT (e.g., 10000)
+  app.listen(PORT, () => {
+    global.__INGEST_LISTENING__ = true;
+    console.log(`ingest-api listening on :${PORT}`);
+  });
 }
 
 export default app;
-
-// at the very bottom
-if (process.env.NODE_ENV !== "test") {
-  const PORT = process.env.PORT || 8080;
-  app.listen(PORT, () => console.log(`ingest-api listening on :${PORT}`));
-}
