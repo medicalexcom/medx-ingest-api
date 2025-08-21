@@ -3303,27 +3303,6 @@ function dedupeList(arr) {
   });
 }
 
-/* ======= Shared helpers ======= */
-function splitIntoSentences(text){
-  return String(text)
-    .replace(/\s*\n\s*/g, ' ')
-    .split(/(?<=[.!?])\s+(?=[A-Z(0-9])|[•·–\-]\s+|;\s+|·\s+/g)
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-function mergeDescriptions(a, b){
-  const seen = new Set();
-  const lines = (String(a||"") + "\n" + String(b||""))
-    .split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  const out = [];
-  for (const l of lines){
-    const k=l.toLowerCase();
-    if (!seen.has(k)) { seen.add(k); out.push(l); }
-  }
-  return out.join("\n");
-}
-
 /* ================== Compass-only helpers (ADD-ONLY) ================== */
 function isCompass(u){
   try { return /(^|\.)compasshealthbrands\.com$/i.test(new URL(u).hostname); }
