@@ -34,7 +34,8 @@ function kvPairs(text) {
       const m = line.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
       if (m) {
         const key = m[1].toLowerCase().replace(/\s+/g, '_');
-        out[key] = m[2].trim();
+        // m[2] may be undefined if the value is missing; use empty string in that case
+        out[key] = m[2] ? m[2].trim() : '';
       }
     });
   return out;
