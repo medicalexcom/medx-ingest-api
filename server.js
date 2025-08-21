@@ -3392,11 +3392,13 @@ function harvestCompassSpecs($){
 }
 
 /* ================== Listen ================== */
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`ingest-api listening on :${port}`));
+const PORT = process.env.PORT || 8080;
 
+// Start the server only when not in test mode
 if (process.env.NODE_ENV !== "test") {
-  const PORT = process.env.PORT || 8080;
-  app.listen(PORT, () => console.log(`ingest-api listening on :${PORT}`));
+  app.listen(PORT, () =>
+    console.log(`ingest-api listening on :${PORT}`)
+  );
 }
+
 export default app;
