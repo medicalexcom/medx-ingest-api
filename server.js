@@ -29,6 +29,10 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
 
+// near the top, after app setup
+app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
+app.get("/healthz", (_, res) => res.json({ ok: true }));
+
 /* ================== Utilities ================== */
 function cid() { return crypto.randomBytes(6).toString("hex"); }
 function now() { return Date.now(); }
@@ -3379,3 +3383,9 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export default app;
+
+// at the very bottom
+if (process.env.NODE_ENV !== "test") {
+  const PORT = process.env.PORT || 8080;
+  app.listen(PORT, () => console.log(`ingest-api listening on :${PORT}`));
+}
