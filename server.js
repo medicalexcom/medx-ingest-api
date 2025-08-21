@@ -5,6 +5,9 @@ import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { URL } from "node:url";
 import net from "node:net";
+import { parsePdfFromUrl } from './pdfParser.js';
+import { createWorker } from 'tesseract.js';
+
 
 /* ================== Config via env ================== */
 const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
@@ -109,6 +112,19 @@ function abs(base, link){
     const basePath = u.pathname.endsWith('/') ? u.pathname : u.pathname.replace(/\/[^\/]*$/,'/');
     return u.origin + basePath + link;
   } catch(e){ return link; }
+}
+
+// Simple OCR helper using tesseract.js
+async function ocrImageFromUrl(imageUrl) {
+  const worker = await createWorker();
+  try {
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+    const { data: { text } } = await worker.recognize(imageUrl);
+    return text;
+  } finally {
+    await worker.terminate();
+  }
 }
 
 /* === NEW: Image classification helpers (ADD-ONLY) === */
@@ -564,6 +580,30 @@ app.get("/ingest", async (req, res) => {
     console.error("INGEST ERROR:", e);
     const status = e && e.status && Number.isFinite(+e.status) ? Number(e.status) : 500;
     return res.status(status >= 400 && status <= 599 ? status : 500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// GET /parse-pdf?url=<PDF_URL>
+app.get('/parse-pdf', async (req, res) => {
+  const pdfUrl = String(req.query.url || '');
+  if (!pdfUrl) return res.status(400).json({ error: 'Missing url param' });
+  try {
+    const result = await parsePdfFromUrl(pdfUrl);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// GET /ocr?image=<IMAGE_URL>
+app.get('/ocr', async (req, res) => {
+  const imageUrl = String(req.query.image || '');
+  if (!imageUrl) return res.status(400).json({ error: 'Missing image param' });
+  try {
+    const text = await ocrImageFromUrl(imageUrl);
+    res.json({ text });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
   }
 });
 
