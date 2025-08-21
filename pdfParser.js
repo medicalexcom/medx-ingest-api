@@ -9,7 +9,7 @@
  * adapted from the original `pdf‑smoke-test.mjs` script in the medx-ingest-api
  * repository【62585107086987†L24-L37】【62585107086987†L41-L58】.
  */
-
+process.env.AUTO_KENT_DEBUG = 'false';
 import pdfParse from 'pdf-parse';
 
 // Normalise curly quotes, long dashes and whitespace
