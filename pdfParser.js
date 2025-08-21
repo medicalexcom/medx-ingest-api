@@ -494,9 +494,12 @@ function pickBySynonyms(pairs, rawText) {
     // fallback: raw text search to catch patterns like "Top Speed 4.25 mph"
     const rx = syns instanceof RegExp ? syns : syns[0];
     const m = normText(rawText).match(new RegExp(`(${rx.source})[:\\s-]+([^\\n]{2,80})`, 'i'));
-    if (m) {
-      hits[canon] = m[2] ? m[2].trim() : '';
+      if (m) {
+        hits[canon] = m[2] ? m[2].trim() : '';
+      }
     }
+    return hits;
+  }
 
 /**
  * Fetch a PDF from a URL and extract structured data.
