@@ -2619,8 +2619,9 @@ async function hydrateRemotePanes(cands, renderApiUrl, headers = {}) {
       } catch {}
     } 
     out.push(copy);
-    return out;
   }
+  return out;
+}
 
 /* ================== ADD-ONLY: Rank/merge tabs into buckets ================== */
 function bucketizeTabs(cands){
