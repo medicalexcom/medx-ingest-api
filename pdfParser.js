@@ -10,7 +10,7 @@
  * repository【62585107086987†L24-L37】【62585107086987†L41-L58】.
  */
 process.env.AUTO_KENT_DEBUG = 'false';
-import pdfParse from 'pdf-parse';
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 
 // Normalise curly quotes, long dashes and whitespace
 function normText(t) {
