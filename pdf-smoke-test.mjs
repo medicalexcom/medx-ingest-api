@@ -34,6 +34,7 @@ function kvPairs(text) {
       if (m) {
         const key = m[1].toLowerCase().replace(/\s+/g, "_");
         out[key] = m[2] ? m[2].trim() : '';
+        if (m) hits[canon] = m[2] ? m[2].trim() : '';
       }
     });
   return out;
