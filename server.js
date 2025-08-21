@@ -456,7 +456,9 @@ app.get("/ingest", async (req, res) => {
 
     const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
     const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
-    const doHarvest  = String(req.query.harvest   || "false").toLowerCase() === "true";
+    const doHarvest  = req.query.harvest != null
+      ? String(req.query.harvest).toLowerCase() === "true"
+      : true;
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
     const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
 
