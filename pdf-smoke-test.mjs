@@ -33,7 +33,7 @@ function kvPairs(text) {
       const m = line.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
       if (m) {
         const key = m[1].toLowerCase().replace(/\s+/g, "_");
-        out[key] = m[2].trim();
+        out[key] = m[2] ? m[2].trim() : '';
       }
     });
   return out;
@@ -74,8 +74,9 @@ function pickBySynonyms(pairs, rawText) {
     // fallback: raw text search to catch "Top Speed 4.25 mph" styles
     const rx = syns instanceof RegExp ? syns : syns[0];
     const m = normText(rawText).match(new RegExp(`(${rx.source})[:\\s-]+([^\\n]{2,80})`, 'i'));
-    if (m) hits[canon] = m[2].trim();
-  }
+    if (m) {
+      hits[canon] = m[2] ? m[2].trim() : '';
+    }
   return hits;
 }
 
