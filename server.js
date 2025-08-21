@@ -3293,8 +3293,6 @@ function firstGoodParagraphText(text) {
   return paras[0] || '';
 }
 
-function toTitleCase(s) { return String(s).replace(/\b([a-z])/g, (m, c) => c.toUpperCase()); }
-
 function dedupeList(arr) {
   const seen = new Set();
   return arr.filter(x => {
