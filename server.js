@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import { URL } from "node:url";
 import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
-import { createWorker } from 'tesseract.js';
+
 
 
 /* ================== Config via env ================== */
