@@ -1688,14 +1688,26 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   }
 
   // Score + dedupe by basename
-  const scored = Array.from(set).map(u => {
+  // Prioritize images that are within the main product scope and not part of recommendation blocks.
+  // Filter out any images that appear in recommendation/related sections.  If there are no such
+  // images, fall back to all candidates but still prefer inMain over others.
+  const allCandidates = Array.from(set);
+  const primary = allCandidates.filter(u => {
+    const ctx = imgContext.get(u) || {};
+    return ctx.inMain && !ctx.inReco;
+  });
+  const secondary = allCandidates.filter(u => {
+    const ctx = imgContext.get(u) || {};
+    return !primary.includes(u) && !ctx.inReco;
+  });
+  const candidates = primary.length ? primary : secondary.length ? secondary : allCandidates;
+  const scored = candidates.map(u => {
     let score = imgWeights.get(u) || 0;
     const ctx = imgContext.get(u) || {};
     if (ctx.inReco) score -= 5;
     if (ctx.inMain) score += 3;
     return { url: decodeHtml(u), score };
   }).sort((a,b) => b.score - a.score);
-
   const seen = new Set();
   const out  = [];
   for (const s of scored) {
