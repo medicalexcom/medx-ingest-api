@@ -2849,6 +2849,8 @@ function extractDescriptionFromContainer($, container){
     if (/^#/.test(t) || /zoid-paypal|increase\s+quantity|decrease\s+quantity/i.test(t)) return;
     // Skip shipping, returns, reviews, or section headings not related to product details
     if (/^\s*(shipping|returns|0\s*reviews?|review|reviews)\b/i.test(t)) return;
+    // Skip site-wide taglines or slogans unrelated to a specific product
+    if (/MedicalEx is an online store/i.test(t)) return;
     parts.push(t);
   };
 
@@ -2946,6 +2948,57 @@ function extractDescriptionMarkdown($){
   if (backupEl && backupEl !== bestEl) {
     rawExtra = extractDescriptionFromContainer($, backupEl);
   }
+  // Additionally, attempt to capture the first descriptive paragraph(s) that follow the
+  // product name heading.  On many product pages, a hook paragraph lives
+  // immediately after the <h1> title and before any bullet lists or tabs.
+  function extractHookParagraphs() {
+    const out = [];
+    const firstNameEl = $('h1,h2').first();
+    if (!firstNameEl.length) return '';
+    let el = firstNameEl.next();
+    const stopSelector = 'ul,ol,table,dl,script,style,[role="tablist"],h1,h2,h3,h4,h5';
+    while (el && el.length) {
+      if (el.is(stopSelector)) break;
+      const txt = cleanup(el.text());
+      if (txt && !/\$\d|Add to Cart|Quantity|Write a Review|rating required|shipping|returns|review/i.test(txt)) {
+        out.push(txt);
+      }
+      el = el.next();
+    }
+    return out.join('\n');
+  }
+  const hookRaw = extractHookParagraphs();
+
+  // Attempt to find a hook by scanning the entire body for a sentence that
+  // contains the product name and is reasonably long.  This serves as a
+  // last‑resort fallback when the hook paragraphs above fail.  We look for
+  // the first element whose text includes the product name (before any dash
+  // separator) and has at least 10 words.  Only consider visible elements
+  // like p/span/div.
+  function findHookByProductName() {
+    // Determine the product name from the page.  Prefer the og:title meta
+    // content, otherwise fall back to the first <h1> text.
+    const metaTitle = $('meta[property="og:title"]').attr('content') || '';
+    const h1Title = $('h1').first().text() || '';
+    const title = metaTitle || h1Title;
+    if (!title) return '';
+    // Use the portion before an em dash or hyphen as the base name to match.
+    const base = title.split(/[–-]/)[0].trim();
+    if (!base) return '';
+    let found = '';
+    $('p,span,div').each((_, el) => {
+      if (found) return;
+      const txt = cleanup($(el).text());
+      if (!txt) return;
+      if (txt.includes(base) && txt.split(/\s+/).length >= 10) {
+        // Avoid capturing meta or tagline texts about the store itself
+        if (/MedicalEx is an online store/i.test(txt)) return;
+        found = txt;
+      }
+    });
+    return found;
+  }
+  const hookByName = findHookByProductName();
   // Merge the two extractions while preserving order and removing
   // duplicates.  The fallback text (rawExtra) comes first so the hook
   // appears before the tab description.  We split on newlines to
@@ -2964,7 +3017,14 @@ function extractDescriptionMarkdown($){
     }
     return outLines.join('\n');
   };
-  const combinedRaw = mergeAndDedup(rawExtra, rawBest);
+  let combinedRaw = mergeAndDedup(hookRaw, mergeAndDedup(rawExtra, rawBest));
+  // If we found a hook by product name that isn't already included, prepend it.
+  if (hookByName) {
+    const lowerCombined = combinedRaw.toLowerCase();
+    if (!lowerCombined.includes(hookByName.toLowerCase())) {
+      combinedRaw = `${hookByName}\n${combinedRaw}`;
+    }
+  }
   return containerTextToMarkdown(combinedRaw);
 }
 
