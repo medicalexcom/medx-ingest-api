@@ -447,7 +447,10 @@ app.get("/ingest", async (req, res) => {
     const selector = req.query.selector ? `&selector=${encodeURIComponent(String(req.query.selector))}` : "";
     const wait     = req.query.wait     != null ? `&wait=${encodeURIComponent(String(req.query.wait))}` : "";
     const timeout  = req.query.timeout  != null ? `&timeout=${encodeURIComponent(String(req.query.timeout))}` : "";
-    const mode     = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=fast";
+    // Prefer fully rendered pages by default so that dynamic content (e.g. hooks
+    // injected after initial load) is available to downstream parsers.  If a
+    // client explicitly passes a mode, honour it; otherwise default to full.
+    const mode     = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=full";
 
     const minImgPx   = Number.isFinite(parseInt(String(req.query.minpx),10)) ? parseInt(String(req.query.minpx),10) : MIN_IMG_PX_ENV;
     const excludePng = typeof req.query.excludepng !== "undefined"
@@ -2416,7 +2419,7 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     const tt = { ...t };
     if (!tt.html && tt.href) {
       try {
-        const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
+        const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=full`;
         const { html } = await fetchWithRetry(url, { headers });
         const $p = cheerio.load(html);
         tt.html = $p.root().html() || '';
@@ -2612,7 +2615,7 @@ async function hydrateRemotePanes(cands, renderApiUrl, headers = {}) {
     const copy = { ...c };
     if ((!copy.html || copy.html.length < 40) && copy.href) {
       try {
-        const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=fast`;
+        const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=full`;
         const { html } = await fetchWithRetry(url, { headers });
         copy.html = html || '';
         copy.text = cleanup(cheerio.load(html).root().text() || '');
