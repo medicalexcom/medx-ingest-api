@@ -2766,6 +2766,23 @@ function extractSpecsFromContainer($, container){
     if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
   });
 
+  // As a last resort, parse any remaining div/span/p elements within the container for
+  // colon- or hyphen-separated key/value pairs.  Some websites place technical
+  // specifications in freeform grids or styled rows without using <table>, <dl> or <li>.
+  // This aggressive pass helps capture those by splitting on ':' or '-' when present.
+  $c.find('div, span, p').each((_, el) => {
+    const t = cleanup($(el).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    // Skip if this element is already inside a table row, dl or li that we've processed
+    if ($(el).closest('table,tr,dl,li').length) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2) {
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k] = v;
+    }
+  });
+
   return out;
 }
 
