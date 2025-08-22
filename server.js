@@ -2847,6 +2847,8 @@ function extractDescriptionFromContainer($, container){
     if (/\$\d/.test(t) || /\b(MSRP|Now:|Was:|Add to Cart|Add to Wish|Quantity|Rating Required|Write a Review|Facebook|Linkedin|Pinterest|Twitter|X|Select Rating)\b/i.test(t)) return;
     // Skip PayPal/CSS message content and quantity controls (#zoid-paypal, increase/decrease qty)
     if (/^#/.test(t) || /zoid-paypal|increase\s+quantity|decrease\s+quantity/i.test(t)) return;
+    // Skip shipping, returns, reviews, or section headings not related to product details
+    if (/^\s*(shipping|returns|0\s*reviews?|review|reviews)\b/i.test(t)) return;
     parts.push(t);
   };
 
@@ -3087,7 +3089,7 @@ function prunePartsLikeSpecs(specs = {}){
   const out = {};
   // Keys that clearly refer to parts lists, pricing, shipping or quantity controls rather than
   // product specifications.  These are removed from the specs object during pruning.
-  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?|shipping|msrp|now|increase_quantity.*|decrease_quantity.*|zoid.*)$/i;
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?|shipping|msrp|now|increase_quantity.*|decrease_quantity.*|zoid.*|returns|review|reviews)$/i;
 
   for (const [k, v] of Object.entries(specs || {})) {
     const key = String(k || "").trim();
