@@ -2904,6 +2904,30 @@ function extractDescriptionMarkdown($){
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
   if (!bestEl) return "";
+  // Optional fallback: scan larger main/product containers if the initial candidate is too short or
+  // misses key introductory paragraphs.  This helps capture descriptive hooks that sit
+  // outside of the usual .product-description/.tab-content sections.
+  {
+    const otherCandidates = [
+      'main', '#main', '.main', '.product', '.product-detail', '.product-details',
+      '.product__info', '.product__info-wrapper', '.content', '#content'
+    ].join(', ');
+    let backupEl = null, backupLen = 0;
+    $(otherCandidates).each((_, el) => {
+      if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+      const textCheck = cleanup($(el).text());
+      // Skip obviously irrelevant containers (shipping/returns etc.)
+      if (/^\s*(shipping|returns|review|0\s*reviews?)\b/i.test(textCheck)) return;
+      if (textCheck && textCheck.length > backupLen) {
+        backupLen = textCheck.length;
+        backupEl = el;
+      }
+    });
+    if (backupEl && backupLen > bestLen) {
+      bestEl = backupEl;
+      bestLen = backupLen;
+    }
+  }
 
   const raw = extractDescriptionFromContainer($, bestEl);
   return containerTextToMarkdown(raw);
