@@ -2845,6 +2845,8 @@ function extractDescriptionFromContainer($, container){
     // descriptions and specifications, not pricing, quantity, review prompts, or
     // social/share actions.
     if (/\$\d/.test(t) || /\b(MSRP|Now:|Was:|Add to Cart|Add to Wish|Quantity|Rating Required|Write a Review|Facebook|Linkedin|Pinterest|Twitter|X|Select Rating)\b/i.test(t)) return;
+    // Skip PayPal/CSS message content and quantity controls (#zoid-paypal, increase/decrease qty)
+    if (/^#/.test(t) || /zoid-paypal|increase\s+quantity|decrease\s+quantity/i.test(t)) return;
     parts.push(t);
   };
 
@@ -3102,7 +3104,9 @@ function isPartsOrAccessoryTable($, tbl){
 
 function prunePartsLikeSpecs(specs = {}){
   const out = {};
-  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?)$/i;
+  // Keys that clearly refer to parts lists, pricing, shipping or quantity controls rather than
+  // product specifications.  These are removed from the specs object during pruning.
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?|shipping|msrp|now|increase_quantity|decrease_quantity|zoid.*)$/i;
 
   for (const [k, v] of Object.entries(specs || {})) {
     const key = String(k || "").trim();
@@ -3112,7 +3116,8 @@ function prunePartsLikeSpecs(specs = {}){
     // drop numeric index keys (1, 2, 3…)
     if (/^\d+$/.test(key)) continue;
     // drop classic parts table headers masquerading as specs
-    if (BAD_KEYS.test(key)) continue;
+    // drop banned keys and any keys starting with a hash (CSS selectors, PayPal iframe IDs, etc.)
+    if (BAD_KEYS.test(key) || key.startsWith('#')) continue;
     out[key] = val;
   }
   return out;
