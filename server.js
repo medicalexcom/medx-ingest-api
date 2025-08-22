@@ -3216,6 +3216,13 @@ function isRecoBlock($, el){
     '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
   ).length > 0) return true;
 
+  // Additional recommendation/related section identifiers
+  if ($(el).closest(
+    '.recommended-for-you, .recommendation, .recommended-items, .recommended-products, .related-items, .related-content, ' +
+    '.you-may-also-be-interested, .you-may-be-interested, .customers-viewed, .customers-also-viewed, ' +
+    '.product-suggestions, .suggested-products'
+  ).length > 0) return true;
+
   // ADD: extra coverage for sites using singular `.recommendation`, "co-viewed", and explicit data flags
   if ($(el).closest('.recommendation, .co-viewed, [data-br-request-type="recommendation"]').length > 0) return true;
 
