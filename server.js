@@ -2888,8 +2888,13 @@ function extractDescriptionFromContainer($, container){
 /* ====== Markdown builders ====== */
 function extractDescriptionMarkdown($){
   const candidates = [
+    // Standard semantic description attribute
     '[itemprop="description"]',
+    // Common classes used for product descriptions in various themes
     '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
+    // BigCommerce/Stencil product view containers often host the hook and bullets
+    '.productView, .productView-info, .productView-description, .productView-details, .product-view, .product-view-info, .product-view-description',
+    // Tab content containers
     '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs'
   ].join(', ');
 
@@ -2910,7 +2915,8 @@ function extractDescriptionMarkdown($){
   {
     const otherCandidates = [
       'main', '#main', '.main', '.product', '.product-detail', '.product-details',
-      '.product__info', '.product__info-wrapper', '.content', '#content'
+      '.product__info', '.product__info-wrapper', '.productView', '.productView-info', '.productView-description', '.productView-details',
+      '.product-view', '.product-view-info', '.product-view-description', '.content', '#content'
     ].join(', ');
     let backupEl = null, backupLen = 0;
     $(otherCandidates).each((_, el) => {
@@ -2929,8 +2935,37 @@ function extractDescriptionMarkdown($){
     }
   }
 
-  const raw = extractDescriptionFromContainer($, bestEl);
-  return containerTextToMarkdown(raw);
+  // Always extract the markdown from the best container.  Additionally, attempt
+  // to capture any introductory copy that may live outside of the usual
+  // description/tab containers.  In BigCommerce themes, the product "hook"
+  // often sits above the tabs (e.g. in a .productView-info or summary
+  // container).  To ensure we don’t miss it, also extract from the
+  // fallback container when it differs from bestEl and merge the results.
+  const rawBest = extractDescriptionFromContainer($, bestEl);
+  let rawExtra = "";
+  if (backupEl && backupEl !== bestEl) {
+    rawExtra = extractDescriptionFromContainer($, backupEl);
+  }
+  // Merge the two extractions while preserving order and removing
+  // duplicates.  The fallback text (rawExtra) comes first so the hook
+  // appears before the tab description.  We split on newlines to
+  // deduplicate line by line.
+  const mergeAndDedup = (a, b) => {
+    const outLines = [];
+    const seen = new Set();
+    for (const line of [...String(a||"").split(/\n+/), ...String(b||"").split(/\n+/)]) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        outLines.push(trimmed);
+      }
+    }
+    return outLines.join('\n');
+  };
+  const combinedRaw = mergeAndDedup(rawExtra, rawBest);
+  return containerTextToMarkdown(combinedRaw);
 }
 
 function containerTextToMarkdown(s){
