@@ -942,11 +942,11 @@ function extractJsonLd($){
   ["sku","mpn","gtin13","gtin14","gtin12","gtin8","productID","color","size","material","model","category"]
     .forEach(k => { if (p[k]) addKV[k] = String(p[k]); });
 
+  // Only include availability information from offers.  Prices and currencies are intentionally
+  // omitted since pricing information is not needed for product integration.
   const offer = Array.isArray(p.offers) ? p.offers[0] : (p.offers || {});
-  if (offer && (offer.price || offer.priceCurrency)) {
-    if (offer.priceCurrency) addKV["price_currency"] = String(offer.priceCurrency);
-    if (offer.price)         addKV["price"] = String(offer.price);
-    if (offer.availability)  addKV["availability"] = String(offer.availability).split('/').pop();
+  if (offer && offer.availability) {
+    addKV["availability"] = String(offer.availability).split('/').pop();
   }
 
   return {
@@ -988,11 +988,8 @@ function extractMicrodataProduct($){
 
   const offers = $prod.find('[itemprop="offers"]').first();
   if (offers.length){
-    const price = offers.find('[itemprop="price"]').attr("content") || offers.find('[itemprop="price"]').text();
-    const cur   = offers.find('[itemprop="priceCurrency"]').attr("content") || offers.find('[itemprop="priceCurrency"]').text();
-    if (price) out.specs["price"] = cleanup(price);
-    if (cur)   out.specs["price_currency"] = cleanup(cur);
-    const avail= offers.find('[itemprop="availability"]').attr("href") || offers.find('[itemprop="availability"]').text();
+    // Extract only availability; omit price and currency data for this integration
+    const avail = offers.find('[itemprop="availability"]').attr("href") || offers.find('[itemprop="availability"]').text();
     if (avail) out.specs["availability"] = cleanup(String(avail).split('/').pop());
   }
 
@@ -1027,10 +1024,11 @@ function extractRdfaProduct($){
     if (v) out.specs[k] = v;
   });
 
-  const price = getProp("price");
-  const cur   = getProp("priceCurrency");
-  if (price) out.specs["price"] = price;
-  if (cur)   out.specs["price_currency"] = cur;
+  // Omit price and currency properties for this integration
+  // const price = getProp("price");
+  // const cur   = getProp("priceCurrency");
+  // if (price) out.specs["price"] = price;
+  // if (cur)   out.specs["price_currency"] = cur;
 
   $prod.find('[property="image"]').each((_, el)=>{
     const $el = $(el);
@@ -1043,10 +1041,12 @@ function extractRdfaProduct($){
 
 function extractOgProductMeta($){
   const out = {};
-  $('meta[property^="product:"]').each((_, el)=>{
+  $('meta[property^="product:"]').each((_, el) => {
     const p = String($(el).attr("property") || "");
     const v = String($(el).attr("content")  || "");
     if (!p || !v) return;
+    // Skip price-related OpenGraph product fields (e.g., product:price:amount, product:price:currency)
+    if (/^product:price/i.test(p)) return;
     const key = p.replace(/^product:/,'').replace(/:/g,'_');
     out[key] = v;
   });
@@ -2818,7 +2818,16 @@ function extractDescriptionFromContainer($, container){
   const push = (t) => {
     t = cleanup(t);
     if (!t) return;
+    // Skip common non‑informational labels (legal, share, etc.)
     if (/^\s*(share|subscribe|privacy|terms|trademark|copyright)\b/i.test(t)) return;
+    // Skip lines that include CSS or style code.  CSS often contains braces or semicolons
+    // (e.g. ".urgent-banner { ... }"), @media rules, keyframes, data‑attributes or escaped
+    // unicode sequences (e.g. "\u003C") which are not relevant to product descriptions.
+    if (/[{};@]/.test(t) || /@keyframes|@media|data-sub-layout|\u003C/i.test(t)) return;
+    // Skip lines that contain price or cart/sharing information.  We only want product
+    // descriptions and specifications, not pricing, quantity, review prompts, or
+    // social/share actions.
+    if (/\$\d/.test(t) || /\b(MSRP|Now:|Was:|Add to Cart|Add to Wish|Quantity|Rating Required|Write a Review|Facebook|Linkedin|Pinterest|Twitter|X|Select Rating)\b/i.test(t)) return;
     parts.push(t);
   };
 
