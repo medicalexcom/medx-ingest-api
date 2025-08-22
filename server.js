@@ -2822,8 +2822,42 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
-  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
-  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
+  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n) => {
+    // Capture headings and bold/lead text blocks
+    push($(n).text());
+  });
+  // Grab paragraphs and common container classes
+  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p) => {
+    push($(p).text());
+  });
+  // Also collect list item text to preserve bullet points.  Some product descriptions
+  // use <li> elements where a bold label is followed by normal text.  If we
+  // only capture the <strong> tags, the remainder of the bullet (after the bold part)
+  // will be omitted.  By capturing the entire list item, we ensure that both the
+  // bold and non‑bold portions of each bullet are included.  Prefix with a bullet
+  // marker so that containerTextToMarkdown() will render these as list items.
+  $c.find('li').each((_, li) => {
+    const txt = $(li).text();
+    if (!txt) return;
+    // Prepend a bullet symbol to help downstream markdown conversion recognise list items.
+    push(`• ${txt}`);
+  });
+
+  // Capture any remaining textual content that may be styled within spans or generic
+  // divs inside the container.  Some eCommerce pages embed descriptive text in
+  // arbitrary <span> or <div> elements (often with varying fonts) rather than
+  // paragraphs or list items.  Without explicitly collecting these elements we
+  // risk omitting important pieces of the product description.  Because
+  // extractDescriptionFromContainer() operates on a prefiltered description
+  // container (selected by extractDescriptionMarkdown()), capturing these
+  // extra spans and divs should not introduce unrelated navigation or footer
+  // content.  The cleanup() and deduplication logic will remove empty or
+  // duplicate strings.
+  $c.find('span, div').each((_, el) => {
+    const txt = $(el).text();
+    if (!txt) return;
+    push(txt);
+  });
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
