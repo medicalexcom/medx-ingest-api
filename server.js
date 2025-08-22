@@ -2990,13 +2990,29 @@ function extractDescriptionMarkdown($){
       if (found) return;
       const txt = cleanup($(el).text());
       if (!txt) return;
-      if (txt.includes(base) && txt.split(/\s+/).length >= 10) {
+      if (txt.includes(base)) {
         // Avoid capturing meta or tagline texts about the store itself
         if (/MedicalEx is an online store/i.test(txt)) return;
-        found = txt;
+        // Capture the closest container's full text to get a complete paragraph
+        const full = cleanup($(el).closest('p,div,span').text());
+        found = full || txt;
       }
     });
-    return found;
+    if (found) return found;
+    // Fallback: scan the whole body text for the base name and extract the sentence it appears in.
+    const bodyTxt = cleanup($('body').text());
+    const idx = bodyTxt.indexOf(base);
+    if (idx !== -1) {
+      const prev = bodyTxt.lastIndexOf('.', idx);
+      const next = bodyTxt.indexOf('.', idx + base.length);
+      let start = prev === -1 ? 0 : prev + 1;
+      let end = next === -1 ? Math.min(bodyTxt.length, idx + base.length + 250) : next + 1;
+      const candidate = cleanup(bodyTxt.slice(start, end));
+      if (candidate && !/MedicalEx is an online store/i.test(candidate)) {
+        return candidate;
+      }
+    }
+    return '';
   }
   const hookByName = findHookByProductName();
   // Merge the two extractions while preserving order and removing
@@ -3025,6 +3041,11 @@ function extractDescriptionMarkdown($){
       combinedRaw = `${hookByName}\n${combinedRaw}`;
     }
   }
+  // Remove any site-wide taglines that may have slipped through the earlier filters
+  combinedRaw = combinedRaw
+    .split('\n')
+    .filter(l => !/MedicalEx is an online store/i.test(l))
+    .join('\n');
   return containerTextToMarkdown(combinedRaw);
 }
 
