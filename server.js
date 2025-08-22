@@ -2854,6 +2854,9 @@ function extractDescriptionFromContainer($, container){
     if (/^\s*(shipping|returns|0\s*reviews?|review|reviews)\b/i.test(t)) return;
     // Skip site-wide taglines or slogans unrelated to a specific product
     if (/MedicalEx is an online store/i.test(t)) return;
+    // Skip cookie banners or privacy consent text and other non-product notices
+    if (/cookie(s)? policy|this website uses cookies|we use cookies|accept all cookies|cookie settings|cookie notice|analytics cookies|performance cookies|advertising cookies/i.test(t)) return;
+    if (/newsletter|subscribe|sitemap|contact us|terms of use|privacy policy|\ball rights reserved\b/i.test(t)) return;
     parts.push(t);
   };
 
@@ -2963,7 +2966,7 @@ function extractDescriptionMarkdown($){
     while (el && el.length) {
       if (el.is(stopSelector)) break;
       const txt = cleanup(el.text());
-      if (txt && !/\$\d|Add to Cart|Quantity|Write a Review|rating required|shipping|returns|review/i.test(txt)) {
+      if (txt && !/\$\d|Add to Cart|Quantity|Write a Review|rating required|shipping|returns|review|cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(txt)) {
         out.push(txt);
       }
       el = el.next();
@@ -2998,7 +3001,10 @@ function extractDescriptionMarkdown($){
         if (/MedicalEx is an online store/i.test(txt)) return;
         // Capture the closest container's full text to get a complete paragraph
         const full = cleanup($(el).closest('p,div,span').text());
-        found = full || txt;
+        const cand = full || txt;
+        // Skip if candidate contains cookie/privacy/newsletter/unrelated text
+        if (/cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(cand)) return;
+        found = cand;
       }
     });
     if (found) return found;
@@ -3011,7 +3017,7 @@ function extractDescriptionMarkdown($){
       let start = prev === -1 ? 0 : prev + 1;
       let end = next === -1 ? Math.min(bodyTxt.length, idx + base.length + 250) : next + 1;
       const candidate = cleanup(bodyTxt.slice(start, end));
-      if (candidate && !/MedicalEx is an online store/i.test(candidate)) {
+      if (candidate && !/MedicalEx is an online store/i.test(candidate) && !/cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(candidate)) {
         return candidate;
       }
     }
@@ -3048,6 +3054,8 @@ function extractDescriptionMarkdown($){
   combinedRaw = combinedRaw
     .split('\n')
     .filter(l => !/MedicalEx is an online store/i.test(l))
+    // Remove any remaining cookie/privacy/newsletter lines
+    .filter(l => !/cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(l))
     .join('\n');
   return containerTextToMarkdown(combinedRaw);
 }
