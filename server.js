@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { URL } from "node:url";
 import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
+import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
 
 
@@ -464,6 +465,7 @@ app.get("/ingest", async (req, res) => {
       : true;
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
     const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
+    const wantPdf    = String(req.query.pdf || "false").toLowerCase();
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
 
@@ -514,6 +516,16 @@ app.get("/ingest", async (req, res) => {
       const t2 = now();
       norm = await augmentFromTabs(norm, targetUrl, html, { minImgPx, excludePng, mainOnly }); // ADD-ONLY propagate
       diag.timings.harvestMs = now() - t2;
+    }
+
+    // === MEDX ADD: optionally enrich from PDF manuals ===
+    if (wantPdf === "true" || wantPdf === "1" || wantPdf === "yes") {
+      try {
+        norm = await enrichFromManuals(norm, { maxManuals: 3, maxCharsText: 20000 });
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        diag.warnings.push(`pdf-enrich: ${msg}`);
+      }
     }
 
     // === Compass-only additive harvest (keeps your existing data intact) ===
