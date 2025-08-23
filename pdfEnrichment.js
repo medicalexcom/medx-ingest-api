@@ -1,51 +1,9 @@
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { kvPairs, pickBySynonyms, parsePdfFromUrl } from './pdfParser.js';
 
-// Fetch and parse a PDF with fallback to bare domain and custom headers.
-// This helper tries the given URL and, if it begins with "www.", also tries the bare-domain
-// variant. It uses a browser-like User-Agent header to bypass simple anti-bot filters.
-async function parsePdfWithFallback(url) {
-  if (!url || typeof url !== 'string') {
-    throw new Error('A valid PDF URL must be provided');
-  }
-  const candidates = [];
-  try {
-    const { hostname } = new URL(url);
-    candidates.push(url);
-    if (hostname && hostname.startsWith('www.')) {
-      const bare = hostname.replace(/^www\./, '');
-      candidates.push(url.replace(`//${hostname}`, `//${bare}`));
-    }
-  } catch (e) {
-    candidates.push(url);
-  }
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (compatible; medx-ingest-bot/1.0)',
-    Accept: 'application/pdf, application/octet-stream;q=0.9',
-  };
-  let resp;
-  let lastErr;
-  for (const candidate of candidates) {
-    try {
-      resp = await fetch(candidate, { headers });
-      if (resp.ok) break;
-      lastErr = new Error(`HTTP ${resp.status}`);
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  if (!resp || !resp.ok) {
-    throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
-  }
-  const buffer = Buffer.from(await resp.arrayBuffer());
-  const data = await pdfParse(buffer);
-  const text = data.text || '';
-  const pairs = kvPairs(text);
-  const hits = pickBySynonyms(pairs, text);
-  const kv = pairs;
-  const tables = Array.isArray(data.tables) ? data.tables : [];
-  return { text, pairs, kv, tables, hits };
-}
+// We no longer implement our own PDF fetch fallback here.
+// Instead, use parsePdfFromUrl from pdfParser.js which handles multiple candidate URLs
+// and adds browser-like headers. Leaving this comment in place for context.
 
 export async function enrichFromManuals(norm, { maxManuals = 3, maxCharsText = 20000 } = {}) {
   const manuals = Array.isArray(norm.manuals) ? norm.manuals.slice(0, maxManuals) : [];
@@ -56,7 +14,8 @@ export async function enrichFromManuals(norm, { maxManuals = 3, maxCharsText = 2
 
   for (const url of manuals) {
     try {
-      const parsed = await parsePdfWithFallback(url);
+      // Use the shared parser from pdfParser.js which already implements fallback and headers.
+      const parsed = await parsePdfFromUrl(url);
       if (!parsed) continue;
       if (parsed.kv && typeof parsed.kv === 'object') {
         norm.specs = { ...(norm.specs || {}), ...parsed.kv };
