@@ -1,0 +1,18 @@
+{
+  "name": "bc-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "seo:batch": "node index.js seo-batch",
+    "seo:one": "node index.js seo-one",
+    "speed:audit": "node index.js speed-audit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2",
+    "ora": "^8.0.1",
+    "p-limit": "^6.1.0",
+    "slugify": "^1.6.6"
+  }
+}
