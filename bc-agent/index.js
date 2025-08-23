@@ -97,7 +97,7 @@ async function runSeoOne() {
       bcUpdateImageAlt(product.id, img.id, seo.imageAlt[i] || product.name)
     ));
   }
-import "dotenv/config.js";
+import "dotenv/config";
 import ora from "ora";
 import pLimit from "p-limit";
 import { bcGetProducts, bcUpdateProduct, bcListImages, bcUpdateImageAlt } from "./lib/bc.js";
