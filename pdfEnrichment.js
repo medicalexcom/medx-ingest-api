@@ -1,8 +1,9 @@
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
-import { kvPairs, pickBySynonyms } from './pdfParser.js';
-import { parsePdfFromUrl } from './pdfParser.js';
+import { kvPairs, pickBySynonyms, parsePdfFromUrl } from './pdfParser.js';
 
-// Fetch and parse a PDF with fallback to bare domain and custom headers
+// Fetch and parse a PDF with fallback to bare domain and custom headers.
+// This helper tries the given URL and, if it begins with "www.", also tries the bare-domain
+// variant. It uses a browser-like User-Agent header to bypass simple anti-bot filters.
 async function parsePdfWithFallback(url) {
   if (!url || typeof url !== 'string') {
     throw new Error('A valid PDF URL must be provided');
@@ -41,7 +42,9 @@ async function parsePdfWithFallback(url) {
   const text = data.text || '';
   const pairs = kvPairs(text);
   const hits = pickBySynonyms(pairs, text);
-  return { text, pairs, hits };
+  const kv = pairs;
+  const tables = Array.isArray(data.tables) ? data.tables : [];
+  return { text, pairs, kv, tables, hits };
 }
 
 export async function enrichFromManuals(norm, { maxManuals = 3, maxCharsText = 20000 } = {}) {

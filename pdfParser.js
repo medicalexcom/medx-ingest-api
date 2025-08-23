@@ -511,17 +511,49 @@ export async function parsePdfFromUrl(url) {
   if (!url || typeof url !== 'string') {
     throw new Error('A valid PDF URL must be provided');
   }
-  // Use the global fetch available in Node.js >= 18 to retrieve the PDF
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    throw new Error(`Failed to fetch PDF: HTTP ${resp.status}`);
+  // Build a list of candidate URLs to try: the original URL and a version without
+  // the www. prefix (if present). Some hosts only serve PDFs from the bare domain.
+  const candidates = [];
+  try {
+    const { hostname } = new URL(url);
+    candidates.push(url);
+    if (hostname && hostname.startsWith('www.')) {
+      const bare = hostname.replace(/^www\./, '');
+      candidates.push(url.replace(`//${hostname}`, `//${bare}`));
+    }
+  } catch (e) {
+    // If parsing the URL fails, just use the original.
+    candidates.push(url);
+  }
+
+  // Use a browser-like User-Agent and Accept header to bypass simplistic server checks.
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (compatible; medx-ingest-bot/1.0)',
+    Accept: 'application/pdf, application/octet-stream;q=0.9',
+  };
+  let resp;
+  let lastErr;
+  for (const candidate of candidates) {
+    try {
+      resp = await fetch(candidate, { headers });
+      if (resp.ok) break;
+      lastErr = new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (!resp || !resp.ok) {
+    throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
   }
   const buffer = Buffer.from(await resp.arrayBuffer());
   const data = await pdfParse(buffer);
   const text = data.text || '';
   const pairs = kvPairs(text);
   const hits = pickBySynonyms(pairs, text);
-  return { text, pairs, hits };
+  // Include kv and tables for downstream consumers
+  const kv = pairs;
+  const tables = Array.isArray(data.tables) ? data.tables : [];
+  return { text, pairs, kv, tables, hits };
 }
 
 // Named exports for helper functions (optional)
