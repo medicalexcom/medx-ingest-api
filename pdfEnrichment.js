@@ -1,4 +1,48 @@
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+import { kvPairs, pickBySynonyms } from './pdfParser.js';
 import { parsePdfFromUrl } from './pdfParser.js';
+
+// Fetch and parse a PDF with fallback to bare domain and custom headers
+async function parsePdfWithFallback(url) {
+  if (!url || typeof url !== 'string') {
+    throw new Error('A valid PDF URL must be provided');
+  }
+  const candidates = [];
+  try {
+    const { hostname } = new URL(url);
+    candidates.push(url);
+    if (hostname && hostname.startsWith('www.')) {
+      const bare = hostname.replace(/^www\./, '');
+      candidates.push(url.replace(`//${hostname}`, `//${bare}`));
+    }
+  } catch (e) {
+    candidates.push(url);
+  }
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (compatible; medx-ingest-bot/1.0)',
+    Accept: 'application/pdf, application/octet-stream;q=0.9',
+  };
+  let resp;
+  let lastErr;
+  for (const candidate of candidates) {
+    try {
+      resp = await fetch(candidate, { headers });
+      if (resp.ok) break;
+      lastErr = new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (!resp || !resp.ok) {
+    throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
+  }
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const data = await pdfParse(buffer);
+  const text = data.text || '';
+  const pairs = kvPairs(text);
+  const hits = pickBySynonyms(pairs, text);
+  return { text, pairs, hits };
+}
 
 export async function enrichFromManuals(norm, { maxManuals = 3, maxCharsText = 20000 } = {}) {
   const manuals = Array.isArray(norm.manuals) ? norm.manuals.slice(0, maxManuals) : [];
@@ -9,7 +53,7 @@ export async function enrichFromManuals(norm, { maxManuals = 3, maxCharsText = 2
 
   for (const url of manuals) {
     try {
-      const parsed = await parsePdfFromUrl(url);
+      const parsed = await parsePdfWithFallback(url);
       if (!parsed) continue;
       if (parsed.kv && typeof parsed.kv === 'object') {
         norm.specs = { ...(norm.specs || {}), ...parsed.kv };
