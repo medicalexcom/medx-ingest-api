@@ -1,4 +1,4 @@
-import "dotenv/config.js";
+import "dotenv/config";
 import ora from "ora";
 import pLimit from "p-limit";
 import { bcGetProducts, bcUpdateProduct, bcListImages, bcUpdateImageAlt } from "./lib/bc.js";
