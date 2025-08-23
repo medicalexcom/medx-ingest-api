@@ -96,14 +96,7 @@ async function runSeoOne() {
     await Promise.all((imgs.data || []).map((img, i) =>
       bcUpdateImageAlt(product.id, img.id, seo.imageAlt[i] || product.name)
     ));
-  }
-import "dotenv/config";
-import ora from "ora";
-import pLimit from "p-limit";
-import { bcGetProducts, bcUpdateProduct, bcListImages, bcUpdateImageAlt } from "./lib/bc.js";
-import { generateSEO } from "./lib/seo.js";
-import { toBcPatch } from "./lib/util.js";
-import { auditSpeed } from "./lib/speed.js";
+  ;
 
 const limit = pLimit(3); // polite concurrency
 
