@@ -29,6 +29,8 @@
     "ts-node": "10.9.2",
     "typescript": "5.8.3",
     "pdf-parse": "^1.1.1",
-    "tesseract.js": "^4.0.2"
+    "tesseract.js": "^4.0.2",
+    "pdfjs-dist":     "^3.10.111",
+    "canvas": "^2.  11.0"
   }
 }
