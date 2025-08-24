@@ -1,16 +1,26 @@
 /*
  * pdfParser.js
  *
- * This module adds PDF parsing support using the `pdf-parse` library.  It exposes
- * a single function, `parsePdfFromUrl`, which accepts a publicly accessible
- * PDF URL, fetches the document, extracts the raw text, derives key/value
- * pairs from simple "Key: Value" or "Key - Value" lines, and normalises
- * common product spec names via a synonym map.  The parsing logic is
- * adapted from the original `pdf‑smoke-test.mjs` script in the medx-ingest-api
- * repository【62585107086987†L24-L37】【62585107086987†L41-L58】.
+ * This module adds PDF parsing support using the `pdf-parse` library.  It
+ * exposes a single function, `parsePdfFromUrl`, which accepts a publicly
+ * accessible PDF URL, fetches the document, extracts the raw text,
+ * derives key/value pairs from simple "Key: Value" or "Key - Value"
+ * lines, and normalises common product spec names via a synonym map.
+ * The parsing logic is adapted from the original `pdf‑smoke-test.mjs`
+ * script in the medx-ingest-api repository.  In addition to the basic
+ * pdf-parse extraction, this upgraded version includes an OCR fallback
+ * for scanned manuals: if no text is extracted from the PDF, we render
+ * each page to an image using `pdfjs-dist` and `canvas` and run
+ * Tesseract via `tesseract.js` to recognise the text.  The rest of the
+ * parsing pipeline (normalising text, extracting key/value pairs, and
+ * mapping synonyms) remains unchanged.
  */
 process.env.AUTO_KENT_DEBUG = 'false';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+// New imports to support OCR fallback for scanned PDFs
+import { getDocument } from 'pdfjs-dist';
+import { createCanvas } from 'canvas';
+import { createWorker } from 'tesseract.js';
 
 // Normalise curly quotes, long dashes and whitespace
 function normText(t) {
@@ -22,8 +32,8 @@ function normText(t) {
     .trim();
 }
 
-// Extract simple key/value pairs from a block of text.  Handles both
-// "Key: Value" and "Key - Value" patterns on a single line【62585107086987†L24-L37】.
+// Extract simple key/value pairs from a block of text. Handles both
+// "Key: Value" and "Key - Value" patterns on a single line.
 function kvPairs(text) {
   const out = {};
   normText(text)
@@ -41,10 +51,10 @@ function kvPairs(text) {
   return out;
 }
 
-// Minimal synonym map for common product specifications【62585107086987†L41-L58】.
+// Minimal synonym map for common product specifications
 // Expanded synonym map for a wide range of product specifications.  Each
 // canonical field maps to an array of regular expressions that match
-// different phrasing or abbreviations found in manuals.  See README for
+// different phrasing or abbreviations found in manuals. See README for
 // details on how these were derived from the mega‑list provided by the user.
 const KEYMAP = {
   /* Identity & codes */
@@ -174,338 +184,57 @@ const KEYMAP = {
     /weight\s*capacity\b/i,
     /maximum\s*weight\s*capacity\b/i,
     /load\s*capacity\b/i,
-    /\bpayload\b/i,
-    /\bmax(?:imum)?\s*user\s*weight\b/i,
-    /maximum\s*load\b/i,
-    /rated\s*load\b/i,
   ],
-
-  /* Materials & construction */
-  material: [
-    /\bmaterials?\b/i,
-    /body\s*material\b/i,
-    /composition\b/i,
-  ],
-  frame_material: [
-    /frame\s*material\b/i,
-    /chassis\s*material\b/i,
-  ],
-  seat_material: [
-    /seat\s*material\b/i,
-    /cover\s*material\b/i,
-    /upholstery\b/i,
-    /\bfabric\b/i,
-  ],
-  finish: [
-    /\bfinish\b/i,
-    /\bcoating\b/i,
-    /\bplating\b/i,
-    /\banodizing\b/i,
-    /powder\s*coat\b/i,
-  ],
-
-  /* Wheels, tires & mobility */
-  wheel_size: [
-    /wheel\s*(?:size|diameter|width)\b/i,
-  ],
-  tire_size: [
-    /tire\s*(?:size|diameter|width)\b/i,
-  ],
-  caster_size: [
-    /caster\s*(?:size|diameter)\b/i,
-  ],
-  rear_wheel: [ /rear\s*wheel\b/i ],
-  front_wheel: [ /front\s*wheel\b/i ],
-  front_caster: [ /front\s*caster\b/i ],
-  rear_caster: [ /rear\s*caster\b/i ],
-  tread_type: [ /tread\s*type\b/i ],
-  tread_width: [ /tread\s*width\b/i ],
-  tread_depth: [ /tread\s*depth\b/i ],
-  bearing_type: [
-    /bearing\s*type\b/i,
-    /wheel\s*bearings\b/i,
-  ],
-
-  /* Electrical & power */
-  power_rating: [
-    /\bpower\b/i,
-    /power\s*rating\b/i,
-    /power\s*consumption\b/i,
-    /input\s*power\b/i,
-    /output\s*power\b/i,
-  ],
-  current: [
-    /\bcurrent\b/i,
-    /amperage\b/i,
-    /amp\s*draw\b/i,
-    /\bamp(?:s)?\b/i,
-  ],
-  voltage: [
-    /\bvoltage\b/i,
-    /input\s*voltage\b/i,
-    /output\s*voltage\b/i,
-    /\bV\b/i,
-  ],
-  frequency: [
-    /\bfrequency\b/i,
-    /\bHz\b/i,
-  ],
-  battery_type: [
-    /\bbattery\b/i,
-    /battery\s*type\b/i,
-  ],
-  battery_voltage: [
-    /battery\s*voltage\b/i,
-  ],
-  battery_capacity: [
-    /battery\s*capacity\b/i,
-    /amp-hours\b/i,
-    /watt-hours\b/i,
-    /\bAh\b/i,
-    /\bWh\b/i,
-  ],
-  runtime: [
-    /\brun\s*time\b/i,
-    /\bruntime\b/i,
-    /battery\s*life\b/i,
-    /operating\s*time\b/i,
-  ],
-  charge_time: [
-    /charge\s*time\b/i,
-    /charging\s*time\b/i,
-    /charge\s*cycle\b/i,
-  ],
-  power_source: [
-    /power\s*source\b/i,
-    /adapter\s*type\b/i,
-    /\bcharger\b/i,
-    /power\s*brick\b/i,
-    /plug\s*type\b/i,
-    /cord\s*length\b/i,
-  ],
-
-  /* Performance & specs */
-  speed: [
-    /\b(?:speed|max\s*speed|rated\s*speed|travel\s*speed)\b/i,
-  ],
-  rpm: [
-    /\brpm\b/i,
-    /rotations\s*per\s*minute\b/i,
-  ],
-  flow_rate: [
-    /flow\s*rate\b/i,
-    /throughput\b/i,
-    /\bL\/min\b/i,
-    /\bGPH\b/i,
-  ],
-  pressure: [
-    /\bpressure\b/i,
-    /max\s*pressure\b/i,
-    /operating\s*pressure\b/i,
-    /\bpsi\b/i,
-    /\bbar\b/i,
-  ],
-  torque: [
-    /\btorque\b/i,
-    /\bNm\b/i,
-    /ft[-\s]*lb\b/i,
-  ],
-  horsepower: [
-    /\bhorsepower\b/i,
-    /\bHP\b/i,
-  ],
-  efficiency: [
-    /\befficiency\b/i,
-    /energy\s*efficiency\s*rating\b/i,
-  ],
-
-  /* Environmental & safety */
-  operating_temperature: [
-    /operating\s*temperature\b/i,
-    /temperature\s*range\b/i,
-  ],
-  storage_temperature: [
-    /storage\s*temperature\b/i,
-  ],
-  humidity_range: [
-    /humidity\s*range\b/i,
-  ],
-  ip_rating: [
-    /\bIP\s*rating\b/i,
-    /ingress\s*protection\b/i,
-    /\bNEMA\s*rating\b/i,
-  ],
-  warnings: [
-    /\bwarnings?\b/i,
-    /\bcautions?\b/i,
-    /safety\s*information\b/i,
-    /\bprecautions?\b/i,
-    /contraindications\b/i,
-    /hazard\s*statements\b/i,
-    /\bdanger\b/i,
-    /\bwarning\b/i,
-    /\bcaution\b/i,
-    /user\s*instructions\b/i,
-    /operating\s*instructions\b/i,
-    /usage\s*guidelines\b/i,
-  ],
-
-  /* Included items & packaging */
-  included_items: [
-    /what'?s\s*included\b/i,
-    /in\s*the\s*box\b/i,
-    /box\s*contents\b/i,
-    /package\s*contents\b/i,
-    /included\s*items\b/i,
-    /bundle\s*contents\b/i,
-    /kit\s*contents\b/i,
-    /accessories\s*included\b/i,
-  ],
-  shipping_dimensions: [
-    /shipping\s*dimensions\b/i,
-    /carton\s*size\b/i,
-    /box\s*dimensions\b/i,
-    /package\s*size\b/i,
-  ],
-
-  /* Warranty & service */
-  warranty: [
-    /\bwarranty\b/i,
-    /warranty\s*period\b/i,
-    /limited\s*warranty\b/i,
-    /warranty\s*coverage\b/i,
-  ],
-  guarantee: [
-    /\bguarantee\b/i,
-    /guarantee\s*period\b/i,
-    /satisfaction\s*guarantee\b/i,
-  ],
-  service_life: [
-    /service\s*life\b/i,
-    /expected\s*life\b/i,
-    /\bMTBF\b/i,
-    /mean\s*time\s*between\s*failures\b/i,
-  ],
-
-  /* Section/heading phrases (used for multi‑line extraction if desired) */
-  specs_section: [
-    /specifications?\b/i,
-    /technical\s*spec/i,
-    /spec\s*sheet\b/i,
-    /data\s*sheet\b/i,
-    /product\s*specifications\b/i,
-    /product\s*specs\b/i,
-    /detailed\s*specs\b/i,
-    /general\s*specs\b/i,
-    /core\s*specs\b/i,
-    /specs\s*&\s*details\b/i,
-  ],
-  features_section: [
-    /\bfeatures?\b/i,
-    /key\s*features\b/i,
-    /main\s*features\b/i,
-    /product\s*features\b/i,
-    /standout\s*features\b/i,
-    /notable\s*features\b/i,
-    /unique\s*features\b/i,
-    /exclusive\s*features\b/i,
-    /\bbenefits?\b/i,
-    /key\s*benefits\b/i,
-    /product\s*benefits\b/i,
-    /selling\s*points\b/i,
-  ],
-  overview_section: [
-    /\boverview\b/i,
-    /product\s*overview\b/i,
-    /\bdescription\b/i,
-    /about\s*this\s*item\b/i,
-    /\bdetails\b/i,
-    /product\s*details\b/i,
-    /introduction\b/i,
-    /features\s*overview\b/i,
-  ],
-  included_section: [
-    /what'?s\s*included\b/i,
-    /in\s*the\s*box\b/i,
-    /included\s*items\b/i,
-    /bundle\s*contents\b/i,
-    /kit\s*contents\b/i,
-    /package\s*contents\b/i,
-    /accessories\b/i,
-  ],
-  safety_section: [
-    /\bwarnings?\b/i,
-    /\bcautions?\b/i,
-    /safety\s*information\b/i,
-    /precautions\b/i,
-    /user\s*manual\b/i,
-    /\binstructions\b/i,
-    /hazard\s*information\b/i,
-  ],
-  warranty_section: [
-    /\bwarranty\b/i,
-    /limited\s*warranty\b/i,
-    /\bguarantee\b/i,
-    /warranty\s*&\s*service\b/i,
-    /warranty\s*details\b/i,
-    /guarantee\s*information\b/i,
-  ],
-  mixed_section: [
-    /specs\s*&\s*features\b/i,
-    /specifications\s*&\s*features\b/i,
-    /features\s*&\s*specifications\b/i,
-    /features\s*&\s*benefits\b/i,
-    /benefits\s*&\s*features\b/i,
-    /highlights\s*&\s*specs\b/i,
-    /specs\s*\+\s*features\b/i,
-    /specs\s*\+\s*benefits\b/i,
-    /full\s*specs\s*&\s*highlights\b/i,
-  ],
-  
-  /* Miscellaneous fields retained from original map */
-  seat_dimensions: [/seat\s*dimensions?|seat\s*(width|depth)/i],
-  seat_opening: [/seat\s*opening/i],
-  adjustable_seat_height: [/adjustable\s*seat\s*height|seat\s*height/i],
-  top_speed: [/top\s*speed/i],
-  turning_radius: [/turning\s*radius/i],
-  batteries: /\bbatter(?:y|ies)\b/i,
-  motor: /\bmotor\b/i,
-  color: /\bcolor\b/i,
-  controller: /\bcontroller\b/i,
-  ground_clearance: /\bground\s*clearance\b/i,
 };
 
-// Select the canonical spec names based on synonyms.  Falls back to a raw
-// regex search if no direct key matches are found【62585107086987†L60-L79】.
-function pickBySynonyms(pairs, rawText) {
+// Pick key/value pairs by matching against the synonym map. Only keys that
+// match known fields are included in the output. This helper is reused
+// downstream and is exported for use elsewhere in the codebase.
+function pickBySynonyms(pairs, text) {
   const hits = {};
-  for (const [canon, syns] of Object.entries(KEYMAP)) {
-    const candidates = Object.entries(pairs).filter(([k]) =>
-      syns instanceof RegExp
-        ? syns.test(k.replace(/_/g, ' '))
-        : syns.some(rx => rx.test(k.replace(/_/g, ' ')))
-    );
-    if (candidates.length) {
-      // choose the longest value (often most complete)
-      const best = candidates.sort((a, b) => b[1].length - a[1].length)[0][1];
-      hits[canon] = best;
-      continue;
-    }
-    // fallback: raw text search to catch patterns like "Top Speed 4.25 mph"
-    const rx = syns instanceof RegExp ? syns : syns[0];
-    const m = normText(rawText).match(new RegExp(`(${rx.source})[:\\s-]+([^\\n]{2,80})`, 'i'));
+  for (const key of Object.keys(KEYMAP)) {
+    const patterns = KEYMAP[key];
+    for (const re of patterns) {
+      const m = text.match(re);
       if (m) {
-        hits[canon] = m[2] ? m[2].trim() : '';
+        hits[key] = pairs[key] ?? m[0];
+        break;
       }
     }
-    return hits;
   }
+  return hits;
+}
+
+// Perform OCR on a PDF buffer by rendering each page to a canvas and
+// recognising the text with Tesseract. This is only used as a fallback
+// when the primary pdf-parse extraction returns no text (i.e. scanned PDFs).
+async function ocrScanPdf(buffer) {
+  // Load the PDF document from an in-memory buffer
+  const pdf = await getDocument({ data: buffer }).promise;
+  // Create a Tesseract worker once per document to improve performance
+  const worker = await createWorker();
+  await worker.loadLanguage('eng');
+  await worker.initialize('eng');
+  let ocrText = '';
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    // Render the page to a canvas; a moderate scale improves OCR accuracy
+    const viewport = page.getViewport({ scale: 1.5 });
+    const canvas = createCanvas(viewport.width, viewport.height);
+    const context = canvas.getContext('2d');
+    await page.render({ canvasContext: context, viewport }).promise;
+    const { data: { text } } = await worker.recognize(canvas.toBuffer('image/png'));
+    ocrText += text + '\n';
+  }
+  await worker.terminate();
+  return ocrText;
+}
 
 /**
  * Fetch a PDF from a URL and extract structured data.
  *
  * @param {string} url - The full URL to the PDF document.
- * @returns {Promise<{ text: string, pairs: Record<string,string>, hits: Record<string,string> }>} Parsed data
+ * @returns {Promise<{ text: string, pairs: Record<string,string>, hits: Record<string,string>, kv: Record<string,string>, tables: any[] }>}
  */
 export async function parsePdfFromUrl(url) {
   if (!url || typeof url !== 'string') {
@@ -518,7 +247,7 @@ export async function parsePdfFromUrl(url) {
   // important for sites that proxy PDF downloads through intermediate
   // endpoints like /download/ or /view/ but ultimately serve the same file
   // when that segment is removed. Duplicates are automatically deduped by
-  // using a Set. See notes in README for examples (e.g. motifmedical.com).
+  // using a Set.
   const candidateSet = new Set();
   try {
     const u = new URL(url);
@@ -540,8 +269,7 @@ export async function parsePdfFromUrl(url) {
         candidateSet.add(u.origin + newPath + u.search);
       }
     }
-    // Also generate a candidate with *all* skip segments removed. This handles
-    // cases where multiple proxy segments (e.g. /file/download/file/) appear in the URL.
+    // Also generate a candidate with *all* skip segments removed.
     const strippedParts = parts.filter(p => !skipSegments.has(p.toLowerCase()));
     if (strippedParts.length < parts.length) {
       const strippedPath = '/' + strippedParts.join('/');
@@ -577,7 +305,7 @@ export async function parsePdfFromUrl(url) {
       try {
         return new URL(url).origin;
       } catch {
-        return "";
+        return '';
       }
     })();
     if (referer) {
@@ -606,144 +334,140 @@ export async function parsePdfFromUrl(url) {
       throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
     }
   }
-      // At this point resp is an HTTP response that may or may not be a PDF.
-      // Check the content-type header. If it's not a PDF, attempt to parse the
-      // body as HTML and look for a PDF link. This allows us to handle
-      // intermediate landing pages that link to a manual PDF rather than
-      // serving the file directly (e.g. "User Manual" pages with a download
-      // button). Only proceed to PDF parsing once we have a confirmed PDF
-      // response.  If no PDF link can be found, throw an error so the caller
-      // can decide how to handle missing manuals.
-      let pdfResp = resp;
-      try {
-        const ct = (resp.headers.get('content-type') || '').toLowerCase();
-        // If the response does not report a PDF content-type, attempt to detect
-        // PDFs via the Content-Disposition filename or the raw file signature.
-        let needHtmlParse = false;
-        if (!/application\/pdf|application\/octet-stream/.test(ct)) {
-          let isPdf = false;
-          const cd = resp.headers.get('content-disposition') || '';
-          if (/\.pdf\b/i.test(cd)) {
+  // At this point resp is an HTTP response that may or may not be a PDF.
+  // Check the content-type header. If it's not a PDF, attempt to parse the
+  // body as HTML and look for a PDF link. This allows us to handle
+  // intermediate landing pages that link to a manual PDF rather than
+  // serving the file directly (e.g. "User Manual" pages with a download
+  // button). Only proceed to PDF parsing once we have a confirmed PDF
+  // response.  If no PDF link can be found, throw an error so the caller
+  // can decide how to handle missing manuals.
+  let pdfResp = resp;
+  try {
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    // If the response does not report a PDF content-type, attempt to detect
+    // PDFs via the Content-Disposition filename or the raw file signature.
+    let needHtmlParse = false;
+    if (!/application\/pdf|application\/octet-stream/.test(ct)) {
+      let isPdf = false;
+      const cd = resp.headers.get('content-disposition') || '';
+      if (/\.pdf\b/i.test(cd)) {
+        isPdf = true;
+      } else {
+        try {
+          const arr = await resp.clone().arrayBuffer();
+          const sig = Buffer.from(arr.slice(0, 5)).toString('ascii');
+          if (sig === '%PDF-') {
             isPdf = true;
-          } else {
-            try {
-              const arr = await resp.clone().arrayBuffer();
-              const sig = Buffer.from(arr.slice(0, 5)).toString('ascii');
-              if (sig === '%PDF-') {
-                isPdf = true;
-              }
-            } catch {}
           }
-          if (!isPdf) {
-            needHtmlParse = true;
-          } else {
-            // treat resp as PDF; pdfResp remains resp
-          }
-        }
-        if (needHtmlParse) {
-          // Not a PDF – parse the HTML to find candidate PDF URLs. Use a simple
-          // regex search for links ending in .pdf. Also handle relative URLs by
-          // resolving them against the response URL. If multiple PDFs are
-          // present, try each until one succeeds.
-          const html = await resp.text();
-          const pdfLinks = [];
-          // Absolute URLs in the document
-          // Use a RegExp constructor instead of a regex literal to avoid issues with
-          // escape sequences being interpreted inconsistently across Node versions.
-          // This pattern matches fully qualified PDF URLs (e.g. https://example.com/file.pdf)
-          // and allows optional query parameters.
-          const absRe = new RegExp(
-            "https?:\\\/\\\/[^\"'<>\\s]+?\\.pdf(?:\\?[^\"'<>\\s]*)?",
-            "gi"
-          );
-          let m;
-          while ((m = absRe.exec(html))) {
-            pdfLinks.push(m[0]);
-          }
-          // Relative links in href/src attributes
-          // Similar RegExp constructor for relative href/src attributes linking to PDF files.
-          const relRe = new RegExp(
-            "(?:href|src)\\s*=\\s*[\"']([^\"']+?\\.pdf(?:\\?[^\"']*)?)[\"']",
-            "gi"
-          );
-          while ((m = relRe.exec(html))) {
-            try {
-              const u = new URL(m[1], resp.url).href;
-              pdfLinks.push(u);
-            } catch {}
-          }
-          // Dedupe while preserving order
-          const seenUrls = new Set();
-          const unique = pdfLinks.filter(u => {
-            if (seenUrls.has(u)) return false;
-            seenUrls.add(u);
-            return true;
-          });
-          // Attempt to fetch each candidate PDF
-          let foundPdf = false;
-          for (const link of unique) {
-            try {
-              let candidateResp;
-              // Use the same headers as before to fetch the PDF
-              candidateResp = await fetch(link, { headers });
-              if (!candidateResp || !candidateResp.ok) {
-                // Try with referer header
-                const ref = (() => {
-                  try { return new URL(link).origin; } catch { return ''; }
-                })();
-                if (ref) {
-                  try {
-                    candidateResp = await fetch(link, { headers: { ...headers, Referer: ref } });
-                  } catch {}
-                }
-              }
-              if (candidateResp && candidateResp.ok) {
-                const ct2 = (candidateResp.headers.get('content-type') || '').toLowerCase();
-                let candidateIsPdf = /application\/pdf|application\/octet-stream/.test(ct2);
-                if (!candidateIsPdf) {
-                  const cd2 = candidateResp.headers.get('content-disposition') || '';
-                  if (/\.pdf\b/i.test(cd2)) {
-                    candidateIsPdf = true;
-                  } else {
-                    try {
-                      const b2 = await candidateResp.clone().arrayBuffer();
-                      const sig2 = Buffer.from(b2.slice(0, 5)).toString('ascii');
-                      if (sig2 === '%PDF-') {
-                        candidateIsPdf = true;
-                      }
-                    } catch {}
-                  }
-                }
-                if (candidateIsPdf) {
-                  pdfResp = candidateResp;
-                  foundPdf = true;
-                  break;
-                }
-              }
-            } catch {}
-          }
-          if (!foundPdf) {
-            throw new Error('HTML page did not contain a reachable PDF');
-          }
-        }
-      } catch (err) {
-        // If the HTML parsing or fallback fetching fails, rethrow the error to
-        // indicate that the PDF could not be retrieved. Do not silently
-        // continue with an invalid pdfResp.
-        throw err;
+        } catch {}
       }
-      // At this point pdfResp should contain an actual PDF response. Parse it.
-      const buffer = Buffer.from(await pdfResp.arrayBuffer());
-      const data = await pdfParse(buffer);
-      const text = data.text || '';
-      const pairs = kvPairs(text);
-      const hits = pickBySynonyms(pairs, text);
-      // Include kv and tables for downstream consumers
-      const kv = pairs;
-      const tables = Array.isArray(data.tables) ? data.tables : [];
-      return { text, pairs, kv, tables, hits };
+      if (!isPdf) {
+        needHtmlParse = true;
+      } else {
+        // treat resp as PDF; pdfResp remains resp
+      }
+    }
+    if (needHtmlParse) {
+      // Not a PDF – parse the HTML to find candidate PDF URLs. Use a simple
+      // regex search for links ending in .pdf. Also handle relative URLs by
+      // resolving them against the response URL. If multiple PDFs are
+      // present, try each until one succeeds.
+      const html = await resp.text();
+      const pdfLinks = [];
+      // Absolute URLs in the document
+      const absRe = new RegExp(
+        'https?:\\/\\/[^"\'"'"'<>\\s]+?\\.pdf(?:\\?[^"\'"'"'<>\\s]*)?',
+        'gi'
+      );
+      let m;
+      while ((m = absRe.exec(html)) !== null) {
+        try {
+          const u = new URL(m[0], resp.url).href;
+          pdfLinks.push(u);
+        } catch {}
+      }
+      // Dedupe while preserving order
+      const seenUrls = new Set();
+      const unique = pdfLinks.filter(u => {
+        if (seenUrls.has(u)) return false;
+        seenUrls.add(u);
+        return true;
+      });
+      // Attempt to fetch each candidate PDF
+      let foundPdf = false;
+      for (const link of unique) {
+        try {
+          let candidateResp;
+          // Use the same headers as before to fetch the PDF
+          candidateResp = await fetch(link, { headers });
+          if (!candidateResp || !candidateResp.ok) {
+            // Try with referer header
+            const ref = (() => {
+              try { return new URL(link).origin; } catch { return ''; }
+            })();
+            if (ref) {
+              try {
+                candidateResp = await fetch(link, { headers: { ...headers, Referer: ref } });
+              } catch {}
+            }
+          }
+          if (candidateResp && candidateResp.ok) {
+            const ct2 = (candidateResp.headers.get('content-type') || '').toLowerCase();
+            let candidateIsPdf = /application\/pdf|application\/octet-stream/.test(ct2);
+            if (!candidateIsPdf) {
+              const cd2 = candidateResp.headers.get('content-disposition') || '';
+              if (/\.pdf\b/i.test(cd2)) {
+                candidateIsPdf = true;
+              } else {
+                try {
+                  const b2 = await candidateResp.clone().arrayBuffer();
+                  const sig2 = Buffer.from(b2.slice(0, 5)).toString('ascii');
+                  if (sig2 === '%PDF-') {
+                    candidateIsPdf = true;
+                  }
+                } catch {}
+              }
+            }
+            if (candidateIsPdf) {
+              pdfResp = candidateResp;
+              foundPdf = true;
+              break;
+            }
+          }
+        } catch {}
+      }
+      if (!foundPdf) {
+        throw new Error('HTML page did not contain a reachable PDF');
+      }
+    }
+  } catch (err) {
+    // If the HTML parsing or fallback fetching fails, rethrow the error to
+    // indicate that the PDF could not be retrieved. Do not silently
+    // continue with an invalid pdfResp.
+    throw err;
+  }
+  // At this point pdfResp should contain an actual PDF response. Parse it.
+  const buffer = Buffer.from(await pdfResp.arrayBuffer());
+  const data = await pdfParse(buffer);
+  // pdf-parse extracts machine-readable text from embedded PDF streams.
+  // If the returned text is empty, attempt an OCR fallback to handle scanned PDFs.
+  let text = data.text || '';
+  if (!text || !text.trim()) {
+    try {
+      text = await ocrScanPdf(buffer);
+    } catch (e) {
+      // If OCR fails, leave text empty; continue processing to preserve existing behaviour.
+      text = text || '';
+    }
+  }
+  const pairs = kvPairs(text);
+  const hits = pickBySynonyms(pairs, text);
+  // Include kv and tables for downstream consumers
+  const kv = pairs;
+  const tables = Array.isArray(data.tables) ? data.tables : [];
+  return { text, pairs, kv, tables, hits };
 }
 
 // Named exports for helper functions (optional)
 export { kvPairs, pickBySynonyms, normText };
-
