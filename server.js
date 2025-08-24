@@ -8,6 +8,7 @@ import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
+import { harvestTabsFromHtml } from './tabHarvester.js';
 
 
 
@@ -3309,6 +3310,29 @@ function prunePartsLikeSpecs(specs = {}){
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
+
+  // === START: static tab harvest via tabHarvester.js ===
+  try {
+    const { tabs, includedItems, productsInclude } = await harvestTabsFromHtml(html, baseUrl);
+    if (tabs && tabs.length) {
+      norm.tabs = tabs;
+    }
+    if (includedItems && includedItems.length) {
+      norm.includedItems = includedItems;
+      // also output structured version
+      norm["Included Items JSON"] = includedItems.map(item => ({ item }));
+    }
+    if (productsInclude && productsInclude.length) {
+      norm.productsInclude = productsInclude;
+      norm["Key Features JSON"] = (norm["Key Features JSON"] || []).concat(
+        productsInclude.map(feature => ({ feature }))
+      );
+    }
+  } catch (e) {
+    // non-fatal; record error for debugging
+    norm.tabHarvestError = String(e && e.message ? e.message : e);
+  }
+  // === END: static tab harvest ===
 
   // === ADD-ONLY: Unified tab/accordion harvester (runs before Dojo pre-pass) ===
   try {
