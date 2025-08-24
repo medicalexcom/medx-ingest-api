@@ -12,11 +12,6 @@
 process.env.AUTO_KENT_DEBUG = 'false';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 
-// Additional imports for OCR fallback on scanned PDFs
-import { getDocument } from 'pdfjs-dist';
-import { createCanvas } from 'canvas';
-import { createWorker } from 'tesseract.js';
-
 // Normalise curly quotes, long dashes and whitespace
 function normText(t) {
   return String(t)
@@ -480,31 +475,6 @@ const KEYMAP = {
   ground_clearance: /\bground\s*clearance\b/i,
 };
 
-// Perform OCR on a PDF buffer by rendering each page to a canvas and
-// recognising the text with Tesseract. This is only used as a fallback
-// when the primary pdf-parse extraction returns no text (i.e. scanned PDFs).
-async function ocrScanPdf(buffer) {
-  // Load the PDF document from an in-memory buffer
-  const pdf = await getDocument({ data: buffer }).promise;
-  // Create a Tesseract worker once per document to improve performance
-  const worker = await createWorker();
-  await worker.loadLanguage('eng');
-  await worker.initialize('eng');
-  let ocrText = '';
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    // Render the page to a canvas; a moderate scale improves OCR accuracy
-    const viewport = page.getViewport({ scale: 1.5 });
-    const canvas = createCanvas(viewport.width, viewport.height);
-    const context = canvas.getContext('2d');
-    await page.render({ canvasContext: context, viewport }).promise;
-    const { data: { text } } = await worker.recognize(canvas.toBuffer('image/png'));
-    ocrText += text + '\n';
-  }
-  await worker.terminate();
-  return ocrText;
-}
-
 // Select the canonical spec names based on synonyms.  Falls back to a raw
 // regex search if no direct key matches are found【62585107086987†L60-L79】.
 function pickBySynonyms(pairs, rawText) {
@@ -682,16 +652,20 @@ export async function parsePdfFromUrl(url) {
           // escape sequences being interpreted inconsistently across Node versions.
           // This pattern matches fully qualified PDF URLs (e.g. https://example.com/file.pdf)
           // and allows optional query parameters.
-          // Use regex literal to avoid complex escaping in string constructor
-          const absRe = /https?:\/\/[^"'<>\s]+?\.pdf(?:\?[^"'<>\s]*)?/gi;
+          const absRe = new RegExp(
+            "https?:\\\/\\\/[^\"'<>\\s]+?\\.pdf(?:\\?[^\"'<>\\s]*)?",
+            "gi"
+          );
           let m;
           while ((m = absRe.exec(html))) {
             pdfLinks.push(m[0]);
           }
           // Relative links in href/src attributes
           // Similar RegExp constructor for relative href/src attributes linking to PDF files.
-          // Regex literal for relative href/src PDF links
-          const relRe = /(?:href|src)\s*=\s*["']([^"']+?\.pdf(?:\?[^"']*)?)["']/gi;
+          const relRe = new RegExp(
+            "(?:href|src)\\s*=\\s*[\"']([^\"']+?\\.pdf(?:\\?[^\"']*)?)[\"']",
+            "gi"
+          );
           while ((m = relRe.exec(html))) {
             try {
               const u = new URL(m[1], resp.url).href;
@@ -761,17 +735,7 @@ export async function parsePdfFromUrl(url) {
       // At this point pdfResp should contain an actual PDF response. Parse it.
       const buffer = Buffer.from(await pdfResp.arrayBuffer());
       const data = await pdfParse(buffer);
-      // pdf-parse extracts machine-readable text from embedded PDF streams.
-      // If the returned text is empty, attempt an OCR fallback to handle scanned PDFs.
-      let text = data.text || '';
-      if (!text || !text.trim()) {
-        try {
-          text = await ocrScanPdf(buffer);
-        } catch (e) {
-          // If OCR fails, leave text empty; continue processing to preserve existing behaviour.
-          text = text || '';
-        }
-      }
+      const text = data.text || '';
       const pairs = kvPairs(text);
       const hits = pickBySynonyms(pairs, text);
       // Include kv and tables for downstream consumers
