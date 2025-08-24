@@ -9,6 +9,12 @@ import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
 
+// Import our tab harvester. This helper extracts tabbed/accordion
+// content such as "What's in the Box" and "Products Include" from
+// static HTML documents. The harvested data is added to the
+// normalization payload without overwriting existing fields.
+import { harvestTabsFromHtml } from "./tabHarvester.js";
+
 
 
 /* ================== Config via env ================== */
@@ -3309,6 +3315,36 @@ function prunePartsLikeSpecs(specs = {}){
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
+
+  // === MEDX ADD: harvest additional tab content (What's in the Box, Products Include, etc.) ===
+  // Use the new tab harvester to extract structured lists from any
+  // tabs or accordions found in the document. Results are merged
+  // additively into the normalized payload without overwriting
+  // existing data. This runs before the unifiedTabHarvest and Dojo
+  // processing so that bespoke lists are not missed.
+  try {
+    const { tabs, includedItems, productsInclude } = await harvestTabsFromHtml(html, baseUrl);
+    if (Array.isArray(tabs) && tabs.length) {
+      norm.tabs = tabs;
+    }
+    if (Array.isArray(includedItems) && includedItems.length) {
+      norm.includedItems = includedItems;
+      // Also expose as JSON structure for downstream pipelines
+      norm["Included Items JSON"] = includedItems.map(item => ({ item }));
+    }
+    if (Array.isArray(productsInclude) && productsInclude.length) {
+      norm.productsInclude = productsInclude;
+      const jsonArr = productsInclude.map(feature => ({ feature }));
+      if (Array.isArray(norm["Key Features JSON"])) {
+        norm["Key Features JSON"] = norm["Key Features JSON"].concat(jsonArr);
+      } else {
+        norm["Key Features JSON"] = jsonArr;
+      }
+    }
+  } catch (e) {
+    // Non-fatal: ignore errors so they do not impact existing flows
+  }
+  // === END MEDX ADD ===
 
   // === ADD-ONLY: Unified tab/accordion harvester (runs before Dojo pre-pass) ===
   try {
