@@ -511,20 +511,38 @@ export async function parsePdfFromUrl(url) {
   if (!url || typeof url !== 'string') {
     throw new Error('A valid PDF URL must be provided');
   }
-  // Build a list of candidate URLs to try: the original URL and a version without
-  // the www. prefix (if present). Some hosts only serve PDFs from the bare domain.
-  const candidates = [];
+  // Build a list of candidate URLs to try. Start with the original URL and
+  // optionally a version without the leading www. Some hosts only serve PDFs
+  // from the bare domain. We'll also generate additional candidates by
+  // stripping common "download" or "view" segments from the path. This is
+  // important for sites that proxy PDF downloads through intermediate
+  // endpoints like /download/ or /view/ but ultimately serve the same file
+  // when that segment is removed. Duplicates are automatically deduped by
+  // using a Set. See notes in README for examples (e.g. motifmedical.com).
+  const candidateSet = new Set();
   try {
-    const { hostname } = new URL(url);
-    candidates.push(url);
+    const u = new URL(url);
+    const { hostname } = u;
+    candidateSet.add(url);
+    // Remove www. prefix if present
     if (hostname && hostname.startsWith('www.')) {
       const bare = hostname.replace(/^www\./, '');
-      candidates.push(url.replace(`//${hostname}`, `//${bare}`));
+      candidateSet.add(url.replace(`//${hostname}`, `//${bare}`));
+    }
+    // Generate additional candidates by stripping common download/view segments
+    const parts = u.pathname.split('/').filter(Boolean);
+    const skipSegments = new Set(['download', 'view', 'asset', 'file', 'document', 'documents']);
+    for (let i = 0; i < parts.length; i++) {
+      if (skipSegments.has(parts[i].toLowerCase())) {
+        const newParts = parts.filter((_, j) => j !== i);
+        const newPath = '/' + newParts.join('/');
+        candidateSet.add(u.origin + newPath + u.search);
+      }
     }
   } catch (e) {
-    // If parsing the URL fails, just use the original.
-    candidates.push(url);
+    candidateSet.add(url);
   }
+  const candidates = Array.from(candidateSet);
 
   // Use a browser-like User-Agent and Accept header to bypass simplistic server checks.
   const headers = {
@@ -543,7 +561,42 @@ export async function parsePdfFromUrl(url) {
     }
   }
   if (!resp || !resp.ok) {
-    throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
+    // Try fallback strategies to fetch the PDF. Some hosts may return
+    // HTTP 403 unless a Referer or more generic User-Agent header is present.
+    let fallbackResp = null;
+    // 1) Try again with a Referer header set to the PDF's origin
+    const referer = (() => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return "";
+      }
+    })();
+    if (referer) {
+      try {
+        fallbackResp = await fetch(url, { headers: { ...headers, Referer: referer } });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    // 2) Try again with a different desktop User-Agent and Accept-Language
+    if (!fallbackResp || !fallbackResp.ok) {
+      const altHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:113.0) Gecko/20100101 Firefox/113.0',
+        'Accept': headers['Accept'],
+        'Accept-Language': 'en-US,en;q=0.8',
+      };
+      try {
+        fallbackResp = await fetch(url, { headers: altHeaders });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (fallbackResp && fallbackResp.ok) {
+      resp = fallbackResp;
+    } else {
+      throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
+    }
   }
   const buffer = Buffer.from(await resp.arrayBuffer());
   const data = await pdfParse(buffer);
