@@ -412,7 +412,8 @@ function toTitleCase(s = "") {
 
 function splitIntoSentences(t = "") {
   return String(t)
-    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
+    // Split sentences not only on punctuation but also on newlines and bullet/dash markers.
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])|\n+|(?:^|\s)[\u2022\-]\s+/)
     .map(s => s.trim())
     .filter(Boolean);
 }
@@ -2328,7 +2329,8 @@ function deriveFeaturesFromParagraphs($){
   const pushIfGood = (txt) => {
     const t = cleanup(txt);
     if (!t) return;
-    if (t.length < 7 || t.length > 220) return;
+    // allow longer bullet lines up to 400 characters (was 220)
+    if (t.length < 7 || t.length > 400) return;
     if (/>|›|»/.test(t)) return;
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
     if (/(https?:\/\/|www\.)/i.test(t)) return;
@@ -2350,7 +2352,7 @@ function deriveFeaturesFromParagraphs($){
     if (!seen.has(k)){
       seen.add(k);
       uniq.push(t);
-      if (uniq.length>=12) break;
+      if (uniq.length>=30) break;
     }
   }
   return uniq;
@@ -2869,7 +2871,8 @@ function extractFeaturesFromContainer($, container){
       seen.add(k);
       out.push(t);
     }
-    if (out.length >= 20) break;
+        // allow up to 50 features to avoid truncating long bullet lists
+        if (out.length >= 50) break;
   }
   return out;
 }
