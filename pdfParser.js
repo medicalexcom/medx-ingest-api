@@ -682,20 +682,16 @@ export async function parsePdfFromUrl(url) {
           // escape sequences being interpreted inconsistently across Node versions.
           // This pattern matches fully qualified PDF URLs (e.g. https://example.com/file.pdf)
           // and allows optional query parameters.
-          const absRe = new RegExp(
-            "https?:\\\/\\\/[^\"'<>\\s]+?\\.pdf(?:\\?[^\"'<>\\s]*)?",
-            "gi"
-          );
+          // Use regex literal to avoid complex escaping in string constructor
+          const absRe = /https?:\/\/[^"'<>\s]+?\.pdf(?:\?[^"'<>\s]*)?/gi;
           let m;
           while ((m = absRe.exec(html))) {
             pdfLinks.push(m[0]);
           }
           // Relative links in href/src attributes
           // Similar RegExp constructor for relative href/src attributes linking to PDF files.
-          const relRe = new RegExp(
-            "(?:href|src)\\s*=\\s*[\"']([^\"']+?\\.pdf(?:\\?[^\"']*)?)[\"']",
-            "gi"
-          );
+          // Regex literal for relative href/src PDF links
+          const relRe = /(?:href|src)\s*=\s*["']([^"']+?\.pdf(?:\?[^"']*)?)["']/gi;
           while ((m = relRe.exec(html))) {
             try {
               const u = new URL(m[1], resp.url).href;
