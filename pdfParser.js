@@ -532,12 +532,20 @@ export async function parsePdfFromUrl(url) {
     // Generate additional candidates by stripping common download/view segments
     const parts = u.pathname.split('/').filter(Boolean);
     const skipSegments = new Set(['download', 'view', 'asset', 'file', 'document', 'documents']);
+    // Generate candidates by removing each skip segment individually
     for (let i = 0; i < parts.length; i++) {
       if (skipSegments.has(parts[i].toLowerCase())) {
         const newParts = parts.filter((_, j) => j !== i);
         const newPath = '/' + newParts.join('/');
         candidateSet.add(u.origin + newPath + u.search);
       }
+    }
+    // Also generate a candidate with *all* skip segments removed. This handles
+    // cases where multiple proxy segments (e.g. /file/download/file/) appear in the URL.
+    const strippedParts = parts.filter(p => !skipSegments.has(p.toLowerCase()));
+    if (strippedParts.length < parts.length) {
+      const strippedPath = '/' + strippedParts.join('/');
+      candidateSet.add(u.origin + strippedPath + u.search);
     }
   } catch (e) {
     candidateSet.add(url);
@@ -609,7 +617,30 @@ export async function parsePdfFromUrl(url) {
       let pdfResp = resp;
       try {
         const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        // If the response does not report a PDF content-type, attempt to detect
+        // PDFs via the Content-Disposition filename or the raw file signature.
+        let needHtmlParse = false;
         if (!/application\/pdf|application\/octet-stream/.test(ct)) {
+          let isPdf = false;
+          const cd = resp.headers.get('content-disposition') || '';
+          if (/\.pdf\b/i.test(cd)) {
+            isPdf = true;
+          } else {
+            try {
+              const arr = await resp.clone().arrayBuffer();
+              const sig = Buffer.from(arr.slice(0, 5)).toString('ascii');
+              if (sig === '%PDF-') {
+                isPdf = true;
+              }
+            } catch {}
+          }
+          if (!isPdf) {
+            needHtmlParse = true;
+          } else {
+            // treat resp as PDF; pdfResp remains resp
+          }
+        }
+        if (needHtmlParse) {
           // Not a PDF – parse the HTML to find candidate PDF URLs. Use a simple
           // regex search for links ending in .pdf. Also handle relative URLs by
           // resolving them against the response URL. If multiple PDFs are
@@ -617,7 +648,7 @@ export async function parsePdfFromUrl(url) {
           const html = await resp.text();
           const pdfLinks = [];
           // Absolute URLs in the document
-          const absRe = /https?:\/\/[^"'<>\s]+?\.pdf(?:\?[^"'<>\s]*)?/gi;
+          const absRe = /https?:\\/\\/[^"'<>\s]+?\.pdf(?:\?[^"'<>\s]*)?/gi;
           let m;
           while ((m = absRe.exec(html))) {
             pdfLinks.push(m[0]);
@@ -657,7 +688,22 @@ export async function parsePdfFromUrl(url) {
               }
               if (candidateResp && candidateResp.ok) {
                 const ct2 = (candidateResp.headers.get('content-type') || '').toLowerCase();
-                if (/application\/pdf|application\/octet-stream/.test(ct2)) {
+                let candidateIsPdf = /application\/pdf|application\/octet-stream/.test(ct2);
+                if (!candidateIsPdf) {
+                  const cd2 = candidateResp.headers.get('content-disposition') || '';
+                  if (/\.pdf\b/i.test(cd2)) {
+                    candidateIsPdf = true;
+                  } else {
+                    try {
+                      const b2 = await candidateResp.clone().arrayBuffer();
+                      const sig2 = Buffer.from(b2.slice(0, 5)).toString('ascii');
+                      if (sig2 === '%PDF-') {
+                        candidateIsPdf = true;
+                      }
+                    } catch {}
+                  }
+                }
+                if (candidateIsPdf) {
                   pdfResp = candidateResp;
                   foundPdf = true;
                   break;

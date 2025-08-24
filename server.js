@@ -2063,7 +2063,15 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     const $el = $(el);
     const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
     const t = ($el.text() || $el.attr('aria-label') || '').toLowerCase();
-    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) push(el, href, 4);
+    // If the anchor text strongly suggests a manual (matches allowRe), assign a higher
+    // base score (5) so that the link passes the subsequent filtering threshold even
+    // if the URL itself does not look like a PDF or known proxy. Otherwise use the
+    // default score of 4 for direct PDFs or known proxy URLs. This is additive and
+    // preserves existing behaviour for other links.
+    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) {
+      const base = allowRe.test(t) ? 5 : 4;
+      push(el, href, base);
+    }
   });
 
   // 2) onclick handlers that open PDFs
