@@ -1,19 +1,13 @@
 /*
  * pdfParser.js
  *
- * This module adds PDF parsing support using the `pdf-parse` library.  It
- * exposes a single function, `parsePdfFromUrl`, which accepts a publicly
- * accessible PDF URL, fetches the document, extracts the raw text,
- * derives key/value pairs from simple "Key: Value" or "Key - Value"
- * lines, and normalises common product spec names via a synonym map.
- * The parsing logic is adapted from the original `pdf‑smoke-test.mjs`
- * script in the medx-ingest-api repository.  In addition to the basic
- * pdf-parse extraction, this upgraded version includes an OCR fallback
- * for scanned manuals: if no text is extracted from the PDF, we render
- * each page to an image using `pdfjs-dist` and `canvas` and run
- * Tesseract via `tesseract.js` to recognise the text.  The rest of the
- * parsing pipeline (normalising text, extracting key/value pairs, and
- * mapping synonyms) remains unchanged.
+ * Upgraded version of the original PDF parser. In addition to extracting
+ * machine‑readable text using `pdf-parse`, this version adds an OCR
+ * fallback for scanned manuals that contain no embedded text. The new
+ * helper `ocrScanPdf` uses `pdfjs-dist` and `canvas` to render each page
+ * of a PDF to an image and then runs Tesseract via `tesseract.js` to
+ * recognise the text. The rest of the parsing logic (normalising text,
+ * extracting key/value pairs, and mapping synonyms) remains unchanged.
  */
 process.env.AUTO_KENT_DEBUG = 'false';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
