@@ -2337,13 +2337,8 @@ function deriveFeaturesFromParagraphs($){
     out.push(t);
   };
 
-  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
-    .find('p').each((_, p)=>{
-      if (isFooterOrNav($, p) || isRecoBlock($, p)) return; // ADD reco guard
-      const raw = cleanup($(p).text());
-      if (!raw) return;
-      splitIntoSentences(raw).forEach(pushIfGood);
-    });
+  // Only derive features from list items. Paragraph sentences are intentionally skipped to avoid duplicating
+  // the descriptive text in the features list.
   // Also capture bullet lists within the main content as features
   $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
     .find('li').each((_, li)=>{
