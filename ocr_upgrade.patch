@@ -1,0 +1,83 @@
+ *** Begin Patch
+ *** Update File: package.json
+ @@ "dependencies": {
+ -    "pdf-parse": "^1.1.1",
+ -    "tesseract.js": "^4.0.2"
+ +    "pdf-parse": "^1.1.1",
+ +    "tesseract.js": "^4.0.2",
+ +    "pdfjs-dist": "^3.10.111",
+ +    "canvas": "^2.11.0"
+ *** End Patch
+
+ *** Begin Patch
+ *** Update File: Dockerfile
+ @@
+ -FROM node:20-alpine
+ +FROM node:20
+ @@
+ -RUN npm ci --only=production
+ +RUN apt-get update && \
+ +    apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev && \
+ +    rm -rf /var/lib/apt/lists/* && \
+ +    npm ci --only=production
+ *** End Patch
+
+ *** Begin Patch
+ *** Update File: pdfParser.js
+ @@
+  import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+ +import { getDocument } from 'pdfjs-dist';
+ +import { createCanvas } from 'canvas';
+ +import { createWorker } from 'tesseract.js';
+ @@
+  function kvPairs(text) {
+ @@
+    return out;
+  }
+ 
+  // OCR fallback for scanned (image-only) PDF files.
+  // This helper renders each page using pdfjs-dist and uses tesseract.js to recognise text.
+  async function ocrScanPdf(buffer) {
+    const loadingTask = getDocument({ data: buffer });
+    const pdfDoc = await loadingTask.promise;
+    const worker = await createWorker();
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+    let ocrText = '';
+    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+      const page = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = createCanvas(viewport.width, viewport.height);
+      const context = canvas.getContext('2d');
+      // Render the page into the canvas
+      await page.render({ canvasContext: context, viewport }).promise;
+      // Perform OCR on the rendered image
+      const { data: { text } } = await worker.recognize(canvas.toBuffer('image/png'));
+      if (text) {
+        ocrText += text + '\n';
+      }
+    }
+    await worker.terminate();
+    return ocrText.trim();
+  }
+ @@ export async function parsePdfFromUrl(url) {
+ @@
+ -      const buffer = Buffer.from(await pdfResp.arrayBuffer());
+ -      const data = await pdfParse(buffer);
+ -      const text = data.text || '';
+ -      const pairs = kvPairs(text);
+ +      const buffer = Buffer.from(await pdfResp.arrayBuffer());
+ +      const data   = await pdfParse(buffer);
+ +      // Extract text from the PDF. If the extracted text is empty or whitespace-only,
+ +      // attempt a fallback OCR pass to handle scanned (image-only) manuals.
+ +      let text     = data.text || '';
+ +      if (!text || !text.trim()) {
+ +        try {
+ +          text = await ocrScanPdf(buffer);
+ +        } catch (e) {
+ +          // Leave text as empty on OCR failure; continue with empty string.
+ +          text = '';
+ +        }
+ +      }
+ +      const pairs   = kvPairs(text);
+ *** End Patch
