@@ -648,13 +648,24 @@ export async function parsePdfFromUrl(url) {
           const html = await resp.text();
           const pdfLinks = [];
           // Absolute URLs in the document
-          const absRe = /https?:\\/\\/[^"'<>\s]+?\.pdf(?:\?[^"'<>\s]*)?/gi;
+          // Use a RegExp constructor instead of a regex literal to avoid issues with
+          // escape sequences being interpreted inconsistently across Node versions.
+          // This pattern matches fully qualified PDF URLs (e.g. https://example.com/file.pdf)
+          // and allows optional query parameters.
+          const absRe = new RegExp(
+            "https?:\\\/\\\/[^\"'<>\\s]+?\\.pdf(?:\\?[^\"'<>\\s]*)?",
+            "gi"
+          );
           let m;
           while ((m = absRe.exec(html))) {
             pdfLinks.push(m[0]);
           }
           // Relative links in href/src attributes
-          const relRe = /(?:href|src)\s*=\s*["']([^"']+?\.pdf(?:\?[^"']*)?)["']/gi;
+          // Similar RegExp constructor for relative href/src attributes linking to PDF files.
+          const relRe = new RegExp(
+            "(?:href|src)\\s*=\\s*[\"']([^\"']+?\\.pdf(?:\\?[^\"']*)?)[\"']",
+            "gi"
+          );
           while ((m = relRe.exec(html))) {
             try {
               const u = new URL(m[1], resp.url).href;
