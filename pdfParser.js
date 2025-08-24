@@ -11,6 +11,10 @@
  */
 process.env.AUTO_KENT_DEBUG = 'false';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+// Additional imports for OCR fallback
+import { getDocument } from 'pdfjs-dist';
+import { createCanvas } from 'canvas';
+import { createWorker } from 'tesseract.js';
 
 // Normalise curly quotes, long dashes and whitespace
 function normText(t) {
@@ -39,6 +43,39 @@ function kvPairs(text) {
       }
     });
   return out;
+}
+
+/**
+ * Perform an OCR pass over a PDF when traditional PDF text extraction fails.
+ * This function renders each page to a canvas using pdfjs-dist and then uses
+ * tesseract.js to extract text from the rendered image. The text from all
+ * pages is concatenated and returned.
+ *
+ * @param {Buffer} buffer - The raw PDF file contents
+ * @returns {Promise<string>} The concatenated OCR text of the PDF
+ */
+async function ocrScanPdf(buffer) {
+  const doc = await getDocument({ data: buffer }).promise;
+  let fullText = '';
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const viewport = page.getViewport({ scale: 2.0 });
+    const canvas = createCanvas(viewport.width, viewport.height);
+    const ctx = canvas.getContext('2d');
+    const renderContext = { canvasContext: ctx, viewport };
+    await page.render(renderContext).promise;
+    const imgBuffer = canvas.toBuffer();
+    const worker = await createWorker();
+    try {
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      const { data: { text } } = await worker.recognize(imgBuffer);
+      fullText += text + '\n';
+    } finally {
+      await worker.terminate();
+    }
+  }
+  return fullText;
 }
 
 // Minimal synonym map for common product specifications【62585107086987†L41-L58】.
@@ -735,7 +772,15 @@ export async function parsePdfFromUrl(url) {
       // At this point pdfResp should contain an actual PDF response. Parse it.
       const buffer = Buffer.from(await pdfResp.arrayBuffer());
       const data = await pdfParse(buffer);
-      const text = data.text || '';
+      let text = data.text || '';
+      // If no text was extracted, perform an OCR fallback on the scanned PDF.
+      if (!text || !text.trim()) {
+        try {
+          text = await ocrScanPdf(buffer);
+        } catch (err) {
+          // ignore OCR errors; keep text as empty string
+        }
+      }
       const pairs = kvPairs(text);
       const hits = pickBySynonyms(pairs, text);
       // Include kv and tables for downstream consumers
@@ -746,3 +791,4 @@ export async function parsePdfFromUrl(url) {
 
 // Named exports for helper functions (optional)
 export { kvPairs, pickBySynonyms, normText };
+
