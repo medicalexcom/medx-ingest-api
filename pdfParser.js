@@ -598,15 +598,93 @@ export async function parsePdfFromUrl(url) {
       throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
     }
   }
-  const buffer = Buffer.from(await resp.arrayBuffer());
-  const data = await pdfParse(buffer);
-  const text = data.text || '';
-  const pairs = kvPairs(text);
-  const hits = pickBySynonyms(pairs, text);
-  // Include kv and tables for downstream consumers
-  const kv = pairs;
-  const tables = Array.isArray(data.tables) ? data.tables : [];
-  return { text, pairs, kv, tables, hits };
+      // At this point resp is an HTTP response that may or may not be a PDF.
+      // Check the content-type header. If it's not a PDF, attempt to parse the
+      // body as HTML and look for a PDF link. This allows us to handle
+      // intermediate landing pages that link to a manual PDF rather than
+      // serving the file directly (e.g. "User Manual" pages with a download
+      // button). Only proceed to PDF parsing once we have a confirmed PDF
+      // response.  If no PDF link can be found, throw an error so the caller
+      // can decide how to handle missing manuals.
+      let pdfResp = resp;
+      try {
+        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        if (!/application\/pdf|application\/octet-stream/.test(ct)) {
+          // Not a PDF – parse the HTML to find candidate PDF URLs. Use a simple
+          // regex search for links ending in .pdf. Also handle relative URLs by
+          // resolving them against the response URL. If multiple PDFs are
+          // present, try each until one succeeds.
+          const html = await resp.text();
+          const pdfLinks = [];
+          // Absolute URLs in the document
+          const absRe = /https?:\/\/[^"'<>\s]+?\.pdf(?:\?[^"'<>\s]*)?/gi;
+          let m;
+          while ((m = absRe.exec(html))) {
+            pdfLinks.push(m[0]);
+          }
+          // Relative links in href/src attributes
+          const relRe = /(?:href|src)\s*=\s*["']([^"']+?\.pdf(?:\?[^"']*)?)["']/gi;
+          while ((m = relRe.exec(html))) {
+            try {
+              const u = new URL(m[1], resp.url).href;
+              pdfLinks.push(u);
+            } catch {}
+          }
+          // Dedupe while preserving order
+          const seenUrls = new Set();
+          const unique = pdfLinks.filter(u => {
+            if (seenUrls.has(u)) return false;
+            seenUrls.add(u);
+            return true;
+          });
+          // Attempt to fetch each candidate PDF
+          let foundPdf = false;
+          for (const link of unique) {
+            try {
+              let candidateResp;
+              // Use the same headers as before to fetch the PDF
+              candidateResp = await fetch(link, { headers });
+              if (!candidateResp || !candidateResp.ok) {
+                // Try with referer header
+                const ref = (() => {
+                  try { return new URL(link).origin; } catch { return ''; }
+                })();
+                if (ref) {
+                  try {
+                    candidateResp = await fetch(link, { headers: { ...headers, Referer: ref } });
+                  } catch {}
+                }
+              }
+              if (candidateResp && candidateResp.ok) {
+                const ct2 = (candidateResp.headers.get('content-type') || '').toLowerCase();
+                if (/application\/pdf|application\/octet-stream/.test(ct2)) {
+                  pdfResp = candidateResp;
+                  foundPdf = true;
+                  break;
+                }
+              }
+            } catch {}
+          }
+          if (!foundPdf) {
+            throw new Error('HTML page did not contain a reachable PDF');
+          }
+        }
+      } catch (err) {
+        // If the HTML parsing or fallback fetching fails, rethrow the error to
+        // indicate that the PDF could not be retrieved. Do not silently
+        // continue with an invalid pdfResp.
+        throw err;
+      }
+      // At this point pdfResp should contain an actual PDF response. Parse it.
+      const buffer = Buffer.from(await pdfResp.arrayBuffer());
+      const data = await pdfParse(buffer);
+      const text = data.text || '';
+      const pairs = kvPairs(text);
+      const hits = pickBySynonyms(pairs, text);
+      // Include kv and tables for downstream consumers
+      const kv = pairs;
+      const tables = Array.isArray(data.tables) ? data.tables : [];
+      return { text, pairs, kv, tables, hits };
 }
 
 // Named exports for helper functions (optional)

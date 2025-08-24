@@ -2040,7 +2040,17 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     const L = u.toLowerCase();
     const ctx = scoreByContext($, node, { mainOnly });
     if (ctx <= -999) return;
-    if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) return;
+        // If the URL does not look like a PDF or a known proxy (document, view,
+        // download, asset, file) then skip it unless the baseScore is high.
+        // A high baseScore (>= 4) indicates the anchor text strongly suggested
+        // a manual (e.g. "User Manual"), so allow it through for further
+        // processing. This makes it possible to follow manual pages that
+        // ultimately link to PDFs, without polluting results with unrelated
+        // pages. Existing behaviour for direct PDF or known proxy URLs is
+        // preserved.
+        if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) {
+          if (baseScore < 4) return;
+        }
     if (blockRe.test(L)) return;
     const cur = urls.get(u) || 0;
     urls.set(u, Math.max(cur, baseScore + ctx));
