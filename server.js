@@ -2344,6 +2344,14 @@ function deriveFeaturesFromParagraphs($){
       if (!raw) return;
       splitIntoSentences(raw).forEach(pushIfGood);
     });
+  // Also capture bullet lists within the main content as features
+  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
+    .find('li').each((_, li)=>{
+      if (isFooterOrNav($, li) || isRecoBlock($, li)) return;
+      const raw = cleanup($(li).text());
+      if (!raw) return;
+      pushIfGood(raw);
+    });
 
   const seen=new Set();
   const uniq=[];
