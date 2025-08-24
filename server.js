@@ -1921,13 +1921,16 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
   const push = u => { if (u) set.add(abs(baseUrl, u)); };
 
   $('main, #main, .main, article, .product, .product-detail, .product-details').first().find('img').each((_, el)=>{
+    // Skip images that are within footer/nav or recommendation/upsell sections to reduce noise
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     push($(el).attr('src'));
     push($(el).attr('data-src'));
     push(pickLargestFromSrcset($(el).attr('srcset')));
   });
 
-  // noscript fallbacks in main area
+  // noscript fallbacks in main area. Skip noscript blocks in footer/nav or recommendation areas.
   $('main, #main, .main, article').first().find('noscript').each((_, n)=>{
+    if (isFooterOrNav($, n) || isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
     const _$ = cheerio.load(inner);
     _$("img").each((__, el)=>{
@@ -2328,10 +2331,10 @@ function deriveFeaturesFromParagraphs($){
   /**
    * Collect a set of candidate feature strings from both paragraphs and list items in the main
    * content area.  We intentionally include paragraphs here because some merchants embed
-   * feature-like statements in prose rather than in an explicit list.  To avoid overwhelming the
+   * feature‑like statements in prose rather than in an explicit list.  To avoid overwhelming the
    * feature list with every sentence from the description, we break paragraphs into sentences
-   * using {@link splitIntoSentences} and then filter them via pushIfGood.  Bullet items are
-   * collected whole.  Results are deduplicated case-insensitively and truncated to a reasonable
+   * with the `splitIntoSentences` helper and then filter them via `pushIfGood`.  Bullet items are
+   * collected whole.  Results are deduplicated case‑insensitively and truncated to a reasonable
    * count.  Longer lines (up to 400 characters) are allowed because certain features may be
    * verbose.
    */
