@@ -2325,37 +2325,60 @@ function extractFeaturesSmart($){
   return out;
 }
 function deriveFeaturesFromParagraphs($){
+  /**
+   * Collect a set of candidate feature strings from both paragraphs and list items in the main
+   * content area.  We intentionally include paragraphs here because some merchants embed
+   * feature-like statements in prose rather than in an explicit list.  To avoid overwhelming the
+   * feature list with every sentence from the description, we break paragraphs into sentences
+   * using {@link splitIntoSentences} and then filter them via pushIfGood.  Bullet items are
+   * collected whole.  Results are deduplicated case-insensitively and truncated to a reasonable
+   * count.  Longer lines (up to 400 characters) are allowed because certain features may be
+   * verbose.
+   */
   const out = [];
   const pushIfGood = (txt) => {
     const t = cleanup(txt);
     if (!t) return;
-    // allow longer bullet lines up to 400 characters (was 220)
+    // allow longer feature lines up to 400 characters (was 220)
     if (t.length < 7 || t.length > 400) return;
+    // skip arrows and navigation markers
     if (/>|›|»/.test(t)) return;
+    // skip common non-feature words
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    // skip lines containing URLs
     if (/(https?:\/\/|www\.)/i.test(t)) return;
     out.push(t);
   };
-
-  // Only derive features from list items. Paragraph sentences are intentionally skipped to avoid duplicating
-  // the descriptive text in the features list.
-  // Also capture bullet lists within the main content as features
-  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
-    .find('li').each((_, li)=>{
-      if (isFooterOrNav($, li) || isRecoBlock($, li)) return;
-      const raw = cleanup($(li).text());
-      if (!raw) return;
-      pushIfGood(raw);
-    });
-
-  const seen=new Set();
-  const uniq=[];
-  for (const t of out){
-    const k=t.toLowerCase();
-    if (!seen.has(k)){
+  // Define a selector for the main content area where we search for paragraphs and list items.
+  const contentSelector = 'main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content';
+  // First collect candidate sentences from paragraphs.  Splitting paragraphs into sentences
+  // means each sentence is treated as a potential feature.  This provides a fallback when no
+  // bullet list is available.  We still limit the total number of features later.
+  $(contentSelector).find('p').each((_, p) => {
+    if (isFooterOrNav($, p) || isRecoBlock($, p)) return;
+    const raw = cleanup($(p).text());
+    if (!raw) return;
+    const sentences = splitIntoSentences(raw);
+    sentences.forEach((s) => pushIfGood(s));
+  });
+  // Collect bullet list items in the same content area.  These are often true features and
+  // should be kept whole.  They typically override any prose-derived sentences.
+  $(contentSelector).find('li').each((_, li) => {
+    if (isFooterOrNav($, li) || isRecoBlock($, li)) return;
+    const raw = cleanup($(li).text());
+    if (!raw) return;
+    pushIfGood(raw);
+  });
+  // Deduplicate case-insensitively and limit to 30 entries.  Longer lists are unlikely to be
+  // useful and may overwhelm downstream consumers.
+  const seen = new Set();
+  const uniq = [];
+  for (const t of out) {
+    const k = t.toLowerCase();
+    if (!seen.has(k)) {
       seen.add(k);
       uniq.push(t);
-      if (uniq.length>=30) break;
+      if (uniq.length >= 30) break;
     }
   }
   return uniq;
