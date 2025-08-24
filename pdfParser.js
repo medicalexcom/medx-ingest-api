@@ -12,7 +12,17 @@
 process.env.AUTO_KENT_DEBUG = 'false';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 // Additional imports for OCR fallback
-import { getDocument } from 'pdfjs-dist';
+// pdfjs‑dist is published as a CommonJS module, which does not expose named
+// exports in a way that Node's ESM loader can import directly.  Attempting
+// `import { getDocument } from 'pdfjs-dist';` will throw a syntax error at
+// runtime (see Render build logs).  To work around this, import the
+// CommonJS module as a default (`pdfjs`) and then destructure the desired
+// function.  This follows the guidance from Node's error message:
+//   import pkg from 'pdfjs-dist';
+//   const { getDocument } = pkg;
+// See: https://github.com/mozilla/pdf.js/tree/master/examples/node
+import pdfjs from 'pdfjs-dist';
+const { getDocument } = pdfjs;
 import { createCanvas } from 'canvas';
 import { createWorker } from 'tesseract.js';
 
