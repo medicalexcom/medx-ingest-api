@@ -2980,6 +2980,16 @@ function extractFeaturesFromContainer($, container){
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
+  // Capture bold headings within paragraphs as potential features.
+  // Some pages (e.g. Unimom) structure their “What’s in the Box” or
+  // feature lists as alternating <p><b>Feature</b></p> and <p>– description</p>.
+  // Extract the bold text as a feature name.
+  $c.find('p').each((_, el) => {
+    const $p = $(el);
+    const btxt = cleanup($p.find('b,strong').first().text());
+    if (btxt) pushIfGood(btxt);
+  });
+
   const seen = new Set();
   const out = [];
   for (const t of items){
@@ -3521,6 +3531,74 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
           // ignore parse errors for individual tab
         }
       }
+    }
+
+    // === Custom tab detection for GemPages/GoodFoundation (gf_tabs/gf_tab-panel) ===
+    try {
+      const $$ = cheerio.load(html);
+      $$('.gf_tabs').each((_, ul) => {
+        const titles = {};
+        // map tab index to title
+        $$(ul).find('.gf_tab').each((__, li) => {
+          const idx = String($$(li).attr('data-index') || '').trim();
+          const t = cleanup($$(li).text());
+          if (idx) titles[idx] = t;
+        });
+        // find panels associated with this tab list.  Panels may be siblings or elsewhere on the page.
+        // We'll search the nearest parent section for panels to avoid scanning entire DOM per panel.
+        const container = $$(ul).parent();
+        container.find('.gf_tab-panel').each((__, panel) => {
+          const idx = String($$(panel).attr('data-index') || '').trim();
+          const title = titles[idx] || '';
+          const { html: ph, text: pt } = (function(){
+            const h = $$(panel).html() || '';
+            const t = $$(panel).text() || '';
+            return { html: norm(h || ''), text: norm(t || '') };
+          })();
+          if (!(ph || pt)) return;
+          // Parse this panel for specs, features, desc, and manuals
+          try {
+            const $p = cheerio.load(ph || '');
+            // specs
+            const extraSpecs = extractSpecsFromContainer($p, $p.root());
+            if (extraSpecs && Object.keys(extraSpecs).length) {
+              norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(extraSpecs) };
+            }
+            // features
+            const tabFeatures = extractFeaturesFromContainer($p, $p.root());
+            if (tabFeatures && tabFeatures.length) {
+              const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+              for (const f of tabFeatures) {
+                const k = String(f).toLowerCase();
+                if (!seen.has(k)) {
+                  (norm.features_raw ||= []).push(f);
+                  seen.add(k);
+                }
+                if ((norm.features_raw || []).length >= 40) break;
+              }
+            }
+            // description
+            const descCandidate = extractDescriptionFromContainer($p, $p.root());
+            if (descCandidate && descCandidate.length) {
+              norm.description_raw = mergeDescriptions(norm.description_raw || '', descCandidate);
+            }
+            // manuals
+            const manualSet = new Set();
+            collectManualsFromContainer($p, $p.root(), baseUrl, manualSet);
+            if (manualSet.size) {
+              const have = new Set(norm.manuals || []);
+              for (const u of manualSet) {
+                if (!have.has(u)) {
+                  (norm.manuals ||= []).push(u);
+                  have.add(u);
+                }
+              }
+            }
+          } catch {}
+        });
+      });
+    } catch (err) {
+      // ignore gf tab detection errors
     }
   } catch (e) {
     // non-fatal; record error for debugging
