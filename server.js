@@ -2927,7 +2927,7 @@ function extractSpecsFromContainer($, container){
 
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
-    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
+    const b = cleanup($(r).find('.value, .val, .data, .detail, td, span, p').last().text());
     if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
   });
 
@@ -3493,7 +3493,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       for (const f of uni.features) {
         const k = String(f).toLowerCase();
         if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-        if (norm.features_raw.length >= 20) break;
+        if (norm.features_raw.length >= 40) break;
       }
     }
     if (uni.manuals && uni.manuals.length) {
@@ -3570,7 +3570,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
         for (const f of addFeatures) {
           const k = String(f).toLowerCase();
           if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-          if (norm.features_raw.length >= 20) break;
+          if (norm.features_raw.length >= 40) break;
         }
       }
 
@@ -3625,7 +3625,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     for (const f of addFeatures) {
       const k = String(f).toLowerCase();
       if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-      if (norm.features_raw.length >= 20) break;
+      if (norm.features_raw.length >= 40) break;
     }
   }
 
