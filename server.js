@@ -2990,6 +2990,20 @@ function extractFeaturesFromContainer($, container){
     if (btxt) pushIfGood(btxt);
   });
 
+  // Capture simple div-based lists used by some Shopify/GemPages sites.  When
+  // a panel contains a .text-edit element with multiple <div> children, each
+  // child div often represents a single item (e.g. “1 Minuet breast pump”).
+  $c.find('.text-edit').each((_, el) => {
+    const $parent = $(el);
+    const divs = $parent.children('div');
+    if (divs.length > 1) {
+      divs.each((__, d) => {
+        const txt = cleanup($(d).text());
+        if (txt) pushIfGood(txt);
+      });
+    }
+  });
+
   const seen = new Set();
   const out = [];
   for (const t of items){
