@@ -2374,6 +2374,28 @@ function extractFeaturesSmart($){
     $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
   }
 
+  /*
+   * Some merchants hide their feature lists under a heading like
+   * “Features & Benefits” or “Features and Benefits” within the product
+   * description tab.  Those sections often contain a bullet list
+   * immediately following the heading.  To ensure those bullets are
+   * captured, we scan for elements whose text matches a regex and then
+   * grab the first following <ul> or <ol>.  The bullets are pushed
+   * through the same pushIfGood filter as other features.
+   */
+  try {
+    const labelRe = /\bfeatures\s*(?:&|and|\/|\+)?\s*benefits\b/i;
+    $('p, h2, h3, h4, h5, strong, span, div').each((_, el) => {
+      const txt = cleanup($(el).text());
+      if (!txt || !labelRe.test(txt)) return;
+      // Find the first ul/ol after the label element or within its parent.
+      let list = $(el).nextAll('ul,ol').first();
+      if (!list.length) list = $(el).parent().find('ul,ol').first();
+      if (!list.length) return;
+      list.find('li').each((__, li) => pushIfGood($(li).text()));
+    });
+  } catch (err) { /* ignore errors */ }
+
   const seen = new Set();
   const out=[];
   for (const t of items){
