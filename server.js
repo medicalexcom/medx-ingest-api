@@ -3470,6 +3470,58 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
         if ((norm.features_raw || []).length >= 40) break;
       }
     }
+
+    // Harvest all tab content regardless of title.  For each tab, parse features,
+    // specs, descriptions, and manuals.  This ensures that even tabs with
+    // unfamiliar titles contribute data.  We process after promoting
+    // included/product include items so that features from those lists are
+    // already deduplicated.
+    if (tabs && tabs.length) {
+      for (const tab of tabs) {
+        if (!tab || !(tab.html || tab.text)) continue;
+        try {
+          const $p = cheerio.load(tab.html || '');
+          // Extract specs from this tab and merge
+          const extraSpecs = extractSpecsFromContainer($p, $p.root());
+          if (extraSpecs && Object.keys(extraSpecs).length) {
+            norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(extraSpecs) };
+          }
+          // Extract features from this tab and merge
+          const tabFeatures = extractFeaturesFromContainer($p, $p.root());
+          if (tabFeatures && tabFeatures.length) {
+            const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+            for (const f of tabFeatures) {
+              const k = String(f).toLowerCase();
+              if (!seen.has(k)) {
+                (norm.features_raw ||= []).push(f);
+                seen.add(k);
+              }
+              if ((norm.features_raw || []).length >= 40) break;
+            }
+          }
+          // Extract description paragraphs from this tab (longest)
+          const descCandidate = extractDescriptionFromContainer($p, $p.root());
+          if (descCandidate && descCandidate.length) {
+            // Only merge if it adds more unique content
+            norm.description_raw = mergeDescriptions(norm.description_raw || '', descCandidate);
+          }
+          // Extract manuals from this tab
+          const manualSet = new Set();
+          collectManualsFromContainer($p, $p.root(), baseUrl, manualSet);
+          if (manualSet.size) {
+            const have = new Set(norm.manuals || []);
+            for (const u of manualSet) {
+              if (!have.has(u)) {
+                (norm.manuals ||= []).push(u);
+                have.add(u);
+              }
+            }
+          }
+        } catch (err) {
+          // ignore parse errors for individual tab
+        }
+      }
+    }
   } catch (e) {
     // non-fatal; record error for debugging
     norm.tabHarvestError = String(e && e.message ? e.message : e);
