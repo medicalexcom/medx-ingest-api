@@ -2411,7 +2411,7 @@ function deriveFeaturesFromParagraphs($){
     out.push(t);
   };
   // Define a selector for the main content area where we search for paragraphs and list items.
-  const contentSelector = 'main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content';
+  const contentSelector = 'main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content, .tab_inner_content, .tab_content';
   // First collect candidate sentences from paragraphs.  Splitting paragraphs into sentences
   // means each sentence is treated as a potential feature.  This provides a fallback when no
   // bullet list is available.  We still limit the total number of features later.
