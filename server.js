@@ -3559,18 +3559,25 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
           if (idx) titles[idx] = t;
         });
         // find panels associated with this tab list.  Panels may be siblings or elsewhere on the page.
-        // We'll search the nearest parent section for panels to avoid scanning entire DOM per panel.
-        const container = $$(ul).parent();
-        container.find('.gf_tab-panel').each((__, panel) => {
-          const idx = String($$(panel).attr('data-index') || '').trim();
+        // We'll scan the entire document for elements with the same data-index that are not the tab items.
+        Object.keys(titles).forEach(idx => {
+          const sel = `[data-index="${idx}"]`;
+          let panel = null;
+          $$(sel).each((i, el) => {
+            const $el = $$(el);
+            // skip tab list items
+            if ($el.is('.gf_tab') || $el.closest('.gf_tabs').length) return;
+            // choose the first candidate that looks like content: class item-content or not li
+            if (!$el.is('li') && !$el.find('.gf_tab').length) {
+              panel = $el;
+              return false; // break
+            }
+          });
+          if (!panel || !titles[idx]) return;
           const title = titles[idx] || '';
-          const { html: ph, text: pt } = (function(){
-            const h = $$(panel).html() || '';
-            const t = $$(panel).text() || '';
-            return { html: norm(h || ''), text: norm(t || '') };
-          })();
+          const ph = norm(panel.html() || '');
+          const pt = norm(panel.text() || '');
           if (!(ph || pt)) return;
-          // Parse this panel for specs, features, desc, and manuals
           try {
             const $p = cheerio.load(ph || '');
             // specs
