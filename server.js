@@ -2384,11 +2384,18 @@ function extractFeaturesSmart($){
    * through the same pushIfGood filter as other features.
    */
   try {
-    const labelRe = /\bfeatures\s*(?:&|and|\/|\+)?\s*benefits\b/i;
+    // Scan for headings or paragraphs that introduce a feature or included-items list.
+    // Two separate regexes: one for Features & Benefits, another for Products Include / What's in the Box.
+    const featureLabelRe = /\bfeatures\s*(?:&|and|\/|\+)?\s*benefits\b/i;
+    const includesLabelRe = /\b(products?\s*include|product\s*includes|what'?s\s+in\s+the\s+box|inclusions?|package\s+contents?)\b/i;
     $('p, h2, h3, h4, h5, strong, span, div').each((_, el) => {
       const txt = cleanup($(el).text());
-      if (!txt || !labelRe.test(txt)) return;
-      // Find the first ul/ol after the label element or within its parent.
+      if (!txt) return;
+      let labelType = null;
+      if (featureLabelRe.test(txt)) labelType = 'feature';
+      else if (includesLabelRe.test(txt)) labelType = 'include';
+      if (!labelType) return;
+      // Find the first <ul> or <ol> after the label or within its parent.
       let list = $(el).nextAll('ul,ol').first();
       if (!list.length) list = $(el).parent().find('ul,ol').first();
       if (!list.length) return;
@@ -3434,12 +3441,34 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       norm.includedItems = includedItems;
       // also output structured version
       norm["Included Items JSON"] = includedItems.map(item => ({ item }));
+      // Promote included items into features_raw if not already present.  These
+      // often describe what comes in the box and can be valuable features.
+      const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+      for (const itm of includedItems) {
+        const k = String(itm).toLowerCase();
+        if (!seen.has(k)) {
+          (norm.features_raw ||= []).push(itm);
+          seen.add(k);
+        }
+        if ((norm.features_raw || []).length >= 40) break;
+      }
     }
     if (productsInclude && productsInclude.length) {
       norm.productsInclude = productsInclude;
       norm["Key Features JSON"] = (norm["Key Features JSON"] || []).concat(
         productsInclude.map(feature => ({ feature }))
       );
+      // Promote productsInclude list into features_raw as well.  These are
+      // typically high‑value features and should be included.
+      const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+      for (const itm of productsInclude) {
+        const k = String(itm).toLowerCase();
+        if (!seen.has(k)) {
+          (norm.features_raw ||= []).push(itm);
+          seen.add(k);
+        }
+        if ((norm.features_raw || []).length >= 40) break;
+      }
     }
   } catch (e) {
     // non-fatal; record error for debugging
