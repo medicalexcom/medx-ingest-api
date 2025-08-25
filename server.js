@@ -1102,6 +1102,27 @@ function mergeProductSD(a={}, b={}, c={}){
   const description = pick(a.description, pick(b.description, c.description));
   const brand       = pick(a.brand,       pick(b.brand,       c.brand));
   const images = [...new Set([...(a.images||[]), ...(b.images||[]), ...(c.images||[])])];
+  // Apply a prefix-based heuristic to filter out images belonging to other products.
+  // Many e-commerce sites include images of related or variant items in microdata/RDFa. We derive
+  // a prefix from the filename of the first image and retain only images that start with that
+  // prefix. If more than 3 images are present, limit the list to three. If filtering removes all
+  // images, fall back to the original list.
+  let filteredImages = images;
+  try {
+    if (images.length > 3) {
+      const firstName = String(images[0] || '').split('/').pop().split('?')[0] || '';
+      const prefixMatch = firstName.match(/^([A-Za-z0-9]+)/);
+      const prefix = prefixMatch ? prefixMatch[1] : firstName.split('_')[0];
+      if (prefix && prefix.length >= 3) {
+        filteredImages = images.filter(u => {
+          const fname = String(u || '').split('/').pop().split('?')[0] || '';
+          return fname.startsWith(prefix);
+        });
+      }
+      if (!filteredImages.length) filteredImages = images;
+      filteredImages = filteredImages.slice(0, 3);
+    }
+  } catch {}
   const specs  = { ...(c.specs || {}), ...(b.specs || {}), ...(a.specs || {}) };
 
   const feats  = [];
@@ -1111,7 +1132,7 @@ function mergeProductSD(a={}, b={}, c={}){
     if (k && !seen.has(k)){ seen.add(k); feats.push(t); }
   });
 
-  return { name, description, brand, images, specs, features: feats };
+  return { name, description, brand, images: filteredImages, specs, features: feats };
 }
 
 /* === Images === */
