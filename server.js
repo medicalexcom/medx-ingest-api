@@ -883,9 +883,10 @@ function extractNormalized(baseUrl, html, opts) {
   // features extracted from the page with any structured-data features, then deduplicate.
   const featSmart = extractFeaturesSmart($);
   const featPara  = deriveFeaturesFromParagraphs($);
-  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice(0, 20);
+  // Limit the number of features to a higher count to avoid truncating bullet lists.
+  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice(0, 40);
   if (mergedSD.features && mergedSD.features.length) {
-    features = dedupeList([...(mergedSD.features || []), ...features]).slice(0, 20);
+    features = dedupeList([...(mergedSD.features || []), ...features]).slice(0, 40);
   }
 
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
