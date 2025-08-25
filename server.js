@@ -878,7 +878,15 @@ function extractNormalized(baseUrl, html, opts) {
   // ==== ADD: prune parts/accessories noise from specs (add-only) ====
   try { specs = prunePartsLikeSpecs(specs); } catch {}
 
-  let features = (mergedSD.features && mergedSD.features.length) ? mergedSD.features : extractFeaturesSmart($);
+  // Collect features both from structured data tabs and from paragraphs/lists to ensure
+  // bullet lists in Product Description or similar sections are captured.  Always combine
+  // features extracted from the page with any structured-data features, then deduplicate.
+  const featSmart = extractFeaturesSmart($);
+  const featPara  = deriveFeaturesFromParagraphs($);
+  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice(0, 20);
+  if (mergedSD.features && mergedSD.features.length) {
+    features = dedupeList([...(mergedSD.features || []), ...features]).slice(0, 20);
+  }
 
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
   const mans = manuals.length ? manuals : fallbackManualsFromPaths($, baseUrl, name, html);
@@ -2355,7 +2363,10 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
+  // Also search for 'product description' or 'description' tabs, since some sites
+  // embed feature lists under those headings.  This helps capture bullet lists
+  // that live within the Product Description tab (e.g. Spectra S1+ page).
+  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights','product description','description']);
   if (featPane){
     const $c = $(featPane);
     $c.find('li').each((_, li)=> pushIfGood($(li).text()));
