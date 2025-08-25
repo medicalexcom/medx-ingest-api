@@ -949,6 +949,32 @@ function extractJsonLd($){
     return [];
   })();
 
+  // Heuristic: filter structured-data images to avoid unrelated product pictures.
+  // Some pages embed multiple images in JSON-LD, including other products from the same brand.
+  // We assume the true product images share a common filename prefix (letters/digits) with
+  // the first image.  If more than 3 images are present, derive a prefix from the first
+  // filename and keep only those images whose basename starts with that prefix.  Finally
+  // limit to the first 3 images after filtering.
+  let filteredImages = images;
+  try {
+    if (images.length > 3) {
+      const firstName = String(images[0] || '').split('/').pop().split('?')[0] || '';
+      // Extract initial alphanumeric prefix (e.g., BSBCWB from BSBCWB_Prod2.jpg)
+      const prefixMatch = firstName.match(/^([A-Za-z0-9]+)/);
+      const prefix = prefixMatch ? prefixMatch[1] : firstName.split('_')[0];
+      if (prefix && prefix.length >= 3) {
+        filteredImages = images.filter(u => {
+          const fname = String(u || '').split('/').pop().split('?')[0] || '';
+          return fname.startsWith(prefix);
+        });
+      }
+      // In case the filter removes all images, fall back to original list
+      if (!filteredImages.length) filteredImages = images;
+      // Limit to the first 3 images to reduce noise
+      filteredImages = filteredImages.slice(0, 3);
+    }
+  } catch {}
+
   const specs = schemaPropsToSpecs(
     p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
   );
@@ -966,13 +992,13 @@ function extractJsonLd($){
     addKV["availability"] = String(offer.availability).split('/').pop();
   }
 
-  return {
+    return {
     name: p.name || '',
     description: p.description || '',
     brand: (p.brand && (p.brand.name || p.brand)) || '',
     specs: { ...specs, ...addKV },
     features,
-    images
+    images: filteredImages
   };
 }
 
