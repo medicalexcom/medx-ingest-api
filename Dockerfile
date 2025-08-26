@@ -4,7 +4,8 @@ COPY package*.json ./
 RUN apt-get update && \
     apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev && \
     rm -rf /var/lib/apt/lists/* && \
-    npm ci --only=production
+    npm ci --only=production && \
+    npx playwright install --with-deps
 COPY . .
 EXPOSE 8080
 ENV PORT=8080

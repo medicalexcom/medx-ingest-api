@@ -570,6 +570,29 @@ app.get("/ingest", async (req, res) => {
     /* ==== MEDX ADD-ONLY: final spec enrichment before sanitize v1 ==== */
     try { norm.specs = enrichSpecsWithDerived(norm.specs || {}); } catch {}
 
+    // ==== MEDX ADD-ONLY: optional browsing step to fetch dynamic content ====
+    // If the `browse` query parameter is set to true, we run our Playwright-based
+    // crawler to fetch a fully rendered version of the product page. This
+    // complements the existing static scrape with content pulled from tabs,
+    // accordions, and lazy-loaded elements.  Results are merged into `norm`
+    // using the mergeRaw helper.  Dynamic import is used here to avoid
+    // incurring Playwright overhead unless needed.
+    const doBrowse = String(req.query.browse || '').toLowerCase() === 'true';
+    if (doBrowse) {
+      try {
+        const { browseProduct } = await import('./browserCrawler.js');
+        const { mergeRaw }     = await import('./mergeRaw.js');
+        const b = await browseProduct(targetUrl, { headless: true });
+        if (b && b.ok) {
+          norm = mergeRaw({ raw_existing: norm, raw_browse: b.raw_browse });
+        } else {
+          diag.warnings.push(`browse-error: ${b && b.error ? b.error : 'unknown'}`);
+        }
+      } catch (e) {
+        diag.warnings.push(`browse-exception: ${e && e.message ? e.message : String(e)}`);
+      }
+    }
+
     if (wantMd) {
       const $ = cheerio.load(html);
       try { norm.description_md = extractDescriptionMarkdown($) || textToMarkdown(norm.description_raw || ""); }
