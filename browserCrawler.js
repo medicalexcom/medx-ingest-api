@@ -273,27 +273,31 @@ export async function browseProduct(url, opts = {}) {
       await page.mouse.wheel(0, 2000);
       await page.waitForTimeout(350);
     }
-    const full_html = await page.content();
+        // Capture the full HTML. We keep it only for debugging and don't
+        // include it in the returned object to avoid noise.
+        const full_html = await page.content();
     const visible_text = await collectVisibleText(page);
     const sections = await collectSections(page);
     const { anchors, images, pdfs, jsons } = await collectLinks(page);
-    return {
-      ok: true,
-      raw_browse: {
-        source_url: url,
-        fetched_at: new Date().toISOString(),
-        full_html,
-        visible_text,
-        sections,
-        links: {
-          anchors,
-          images,
-          pdfs,
-          jsons,
-        },
-        console: consoleLogs,
-      },
-    };
+        return {
+          ok: true,
+          raw_browse: {
+            source_url: url,
+            fetched_at: new Date().toISOString(),
+            // We intentionally omit full_html from the returned object. It is
+            // available in the closure if needed for debugging but not
+            // exposed to downstream consumers.
+            visible_text,
+            sections,
+            links: {
+              anchors,
+              images,
+              pdfs,
+              jsons,
+            },
+            console: consoleLogs,
+          },
+        };
   } catch (err) {
     return { ok: false, error: String(err) };
   } finally {
