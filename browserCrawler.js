@@ -157,13 +157,19 @@ async function collectSections(page) {
       included: ['text="What’s in the box"', 'text="Included Items"', 'text="Package Includes"'],
     };
     const serialize = (el) => (el ? el.innerText.replace(/\s+\n/g, '\n').trim() : '');
-    function findFirst(selectors) {
-      for (const s of selectors) {
-        const el = document.querySelector(s);
-        if (el) return el;
-      }
-      return null;
-    }
+        function findFirst(selectors) {
+          for (const s of selectors) {
+            try {
+              const el = document.querySelector(s);
+              if (el) return el;
+            } catch (e) {
+              // Ignore invalid CSS selectors (e.g., Playwright-specific selectors like text="..."),
+              // and continue checking the next selector.
+              continue;
+            }
+          }
+          return null;
+        }
     sections.description = serialize(findFirst(map.description));
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features = serialize(findFirst(map.features));
