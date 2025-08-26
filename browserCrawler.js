@@ -12,6 +12,7 @@ import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { chromium } from 'playwright';
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -210,7 +211,34 @@ export async function browseProduct(url, opts = {}) {
     viewport = { width: 1366, height: 900 },
     headless = true,
   } = opts;
-  const browser = await chromium.launch({ headless });
+  let browser;
+  try {
+    // Attempt to launch the browser. In some server environments the
+    // Playwright browser binaries are missing unless `playwright install` has
+    // been run. If launch fails due to missing binaries, attempt to
+    // download them on the fly.
+    browser = await chromium.launch({ headless });
+  } catch (err) {
+    const msg = String(err || '');
+    // Detect the missing executable error that Playwright throws when no
+    // browser binary is available. The error message includes the path to
+    // the missing headless_shell or chrome executable.
+    if (/Executable\s+doesn\'t\s+exist|failed\s+to\s+launch/.test(msg)) {
+      try {
+        // Run the Playwright install script synchronously. We suppress
+        // output (stdio: 'inherit' could be used for debugging) and
+        // install all dependencies with system packages. The command will
+        // download the Chromium browser into the Playwright cache. When
+        // finished we retry launching the browser.
+        execSync('npx playwright install --with-deps', { stdio: 'ignore' });
+        browser = await chromium.launch({ headless });
+      } catch (installErr) {
+        return { ok: false, error: String(installErr) };
+      }
+    } else {
+      return { ok: false, error: String(err) };
+    }
+  }
   const context = await browser.newContext({ userAgent, viewport });
   const page = await context.newPage();
   const consoleLogs = [];

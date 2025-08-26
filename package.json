@@ -2,10 +2,15 @@
   "name": "medx-ingest-api",
   "version": "1.0.0",
   "type": "module",
-  "engines": { "node": ">=18.17" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
     "dev": "NODE_ENV=development node server.js",
-    "start": "npx playwright install --with-deps && node server.js",
+    // Install Playwright browsers after install and before start. Render's build process runs `npm install` but does not
+    // execute the start script until runtime, so use `postinstall` to ensure the Chromium binaries are downloaded.
+    "postinstall": "npx playwright install --with-deps",
+    "start": "node server.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -30,7 +35,7 @@
     "typescript": "5.8.3",
     "pdf-parse": "^1.1.1",
     "tesseract.js": "^4.0.2",
-    "pdfjs-dist":     "^3.10.111",
+    "pdfjs-dist": "^3.10.111",
     "canvas": "^2.11.0",
     "playwright": "^1.39.0"
   }
