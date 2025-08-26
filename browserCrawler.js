@@ -230,7 +230,10 @@ export async function browseProduct(url, opts = {}) {
         // install all dependencies with system packages. The command will
         // download the Chromium browser into the Playwright cache. When
         // finished we retry launching the browser.
-        execSync('npx playwright install --with-deps', { stdio: 'ignore' });
+        // Install the browser binaries. We omit the --with-deps flag because
+        // it attempts to install system dependencies requiring root privileges.
+        // Installing only the browser avoids permission issues on platforms like Render.
+        execSync('npx playwright install chromium', { stdio: 'ignore' });
         browser = await chromium.launch({ headless });
       } catch (installErr) {
         return { ok: false, error: String(installErr) };
