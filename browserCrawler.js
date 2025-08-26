@@ -187,11 +187,27 @@ async function collectLinks(page) {
   return page.evaluate(() => {
     const anchors = [...document.querySelectorAll('a[href]')].map((a) => a.href);
     const imgs = [...document.images].map((i) => i.src);
+    // Only keep anchors that link to PDFs. Drop all other anchors to avoid noise.
+    const pdfAnchors = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
+    // Filter images: retain those in the product catalog and exclude logos, loaders, banners, and footer images.
+    const filteredImages = imgs.filter((src) => {
+      try {
+        const url = new URL(src);
+        const path = url.pathname.toLowerCase();
+        return (
+          /\/media\/catalog\/product\//.test(path) &&
+          !/logo|loader|banner|theme|footer|payment|icon|spinner/.test(path)
+        );
+      } catch {
+        return false;
+      }
+    });
+    // Also collect standalone PDF URLs (direct links) in the page
     const pdfs = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
     const jsons = anchors.filter((h) => /\.json(\?|$)/i.test(h));
     return {
-      anchors: Array.from(new Set(anchors)),
-      images: Array.from(new Set(imgs)),
+      anchors: Array.from(new Set(pdfAnchors)),
+      images: Array.from(new Set(filteredImages)),
       pdfs: Array.from(new Set(pdfs)),
       jsons: Array.from(new Set(jsons)),
     };
