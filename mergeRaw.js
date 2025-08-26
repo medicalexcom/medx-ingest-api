@@ -18,8 +18,9 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
   const out = { ...raw_existing };
   // Namespaced capsule for browser output
   out._browse = raw_browse;
-  // Lift certain fields if missing in the original
-  if (!out.full_html && raw_browse.full_html) out.full_html = raw_browse.full_html;
+  // Lift certain fields if missing in the original.  We avoid copying the
+  // entire HTML into the top-level to prevent bloating the response.
+  // If the caller wants the full HTML it is available under `_browse.full_html`.
   if (!out.visible_text && raw_browse.visible_text) out.visible_text = raw_browse.visible_text;
   // Ensure lists are unique
   const uniq = (arr) => Array.from(new Set((arr || []).filter(Boolean)));
