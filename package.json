@@ -5,7 +5,7 @@
   "engines": { "node": ">=18.17" },
   "scripts": {
     "dev": "NODE_ENV=development node server.js",
-    "start": "node server.js",
+    "start": "npx playwright install --with-deps && node server.js",
     "test": "node --test"
   },
   "dependencies": {
