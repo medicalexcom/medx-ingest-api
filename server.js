@@ -706,7 +706,7 @@ app.get("/ingest", async (req, res) => {
     // Limit images to a small set of representative product photos.  Keep at
     // most the first three images as they are usually the most relevant.
     if (Array.isArray(norm.images) && norm.images.length > 3) {
-      norm.images = norm.images.slice(0, 3);
+      norm.images = norm.images.slice();
     }
 
     // If the extracted name is identical to the brand, attempt to set the
@@ -1071,9 +1071,9 @@ function extractNormalized(baseUrl, html, opts) {
   const featSmart = extractFeaturesSmart($);
   const featPara  = deriveFeaturesFromParagraphs($);
   // Limit the number of features to a higher count to avoid truncating bullet lists.
-  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice(0, 40);
+  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice();
   if (mergedSD.features && mergedSD.features.length) {
-    features = dedupeList([...(mergedSD.features || []), ...features]).slice(0, 40);
+    features = dedupeList([...(mergedSD.features || []), ...features]).slice();
   }
 
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
