@@ -18,6 +18,34 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
   const out = { ...raw_existing };
   // Namespaced capsule for browser output
   out._browse = raw_browse;
+  // Filter browser-collected images to only those that match the original image filenames.
+  // This avoids including cross-sell or unrelated product images.
+  if (raw_browse.links && Array.isArray(raw_browse.links.images) && Array.isArray(out.images)) {
+    const origNames = out.images.map((url) => {
+      try {
+        const u = new URL(url);
+        return u.pathname.split('/').pop().toLowerCase();
+      } catch {
+        return url.split('/').pop().toLowerCase();
+      }
+    });
+    const filtered = [];
+    const seenNames = new Set();
+    for (const img of raw_browse.links.images) {
+      let fname;
+      try {
+        const u = new URL(img);
+        fname = u.pathname.split('/').pop().toLowerCase();
+      } catch {
+        fname = img.split('/').pop().toLowerCase();
+      }
+      if (origNames.includes(fname) && !seenNames.has(fname)) {
+        filtered.push(img);
+        seenNames.add(fname);
+      }
+    }
+    raw_browse.links.images = filtered;
+  }
   // Lift certain fields if missing in the original.  We avoid copying the
   // entire HTML into the top-level to prevent bloating the response.
   // If the caller wants the full HTML it is available under `_browse.full_html`.
@@ -25,9 +53,11 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
   // Ensure lists are unique
   const uniq = (arr) => Array.from(new Set((arr || []).filter(Boolean)));
   const bLinks = raw_browse.links || {};
-  out.images = uniq([...(out.images || []), ...(bLinks.images || [])]);
+  // Do not merge images or anchor links from the browser output into the top-level.
+  // We only merge new PDFs, since those are product manuals or specs.
+  out.images = uniq([...(out.images || [])]);
   out.pdfs = uniq([...(out.pdfs || []), ...(bLinks.pdfs || [])]);
-  out.links = uniq([...(out.links || []), ...(bLinks.anchors || [])]);
+  out.links = uniq([...(out.links || [])]);
   // Merge sections non-destructively
   out.sections = {
     ...(out.sections || {}),
