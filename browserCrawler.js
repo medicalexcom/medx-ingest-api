@@ -363,7 +363,14 @@ export async function browseProduct(url, opts = {}) {
       const filtered = text.filter((l) => isEnglishLine(l.trim())).join('\n').trim();
       cleanedSections[key] = filtered;
     }
+    // Overwrite cleaned sections back
     sections = cleanedSections;
+    // Some sites include generic headings like "COMPANY INFO" in features; drop
+    // such generic placeholders. We treat any features text equal to
+    // "COMPANY INFO" (case-insensitive) as not meaningful for product features.
+    if (sections.features && sections.features.trim().toLowerCase() === 'company info') {
+      sections.features = '';
+    }
     const { anchors, images, pdfs, jsons } = await collectLinks(page);
         return {
           ok: true,
