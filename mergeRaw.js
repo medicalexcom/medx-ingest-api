@@ -25,11 +25,9 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
   // Ensure lists are unique
   const uniq = (arr) => Array.from(new Set((arr || []).filter(Boolean)));
   const bLinks = raw_browse.links || {};
-  // Do not merge images or anchor links from the browser output into the top-level.
-  // We only merge new PDFs, since those are product manuals or specs.
-  out.images = uniq([...(out.images || [])]);
+  out.images = uniq([...(out.images || []), ...(bLinks.images || [])]);
   out.pdfs = uniq([...(out.pdfs || []), ...(bLinks.pdfs || [])]);
-  out.links = uniq([...(out.links || [])]);
+  out.links = uniq([...(out.links || []), ...(bLinks.anchors || [])]);
   // Merge sections non-destructively
   out.sections = {
     ...(out.sections || {}),
