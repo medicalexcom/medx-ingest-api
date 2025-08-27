@@ -190,7 +190,7 @@ async function collectLinks(page) {
     // Only keep anchors that link to PDFs. Drop all other anchors to avoid noise.
     const pdfAnchors = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
     // Filter images: retain those in the product catalog and exclude logos, loaders, banners, and footer images.
-    const filteredImages = imgs.filter((src) => {
+    let candidateImages = imgs.filter((src) => {
       try {
         const url = new URL(src);
         const path = url.pathname.toLowerCase();
@@ -202,12 +202,47 @@ async function collectLinks(page) {
         return false;
       }
     });
+    // Group by base filename to identify duplicate images across caches.
+    const nameCounts = {};
+    const baseNames = candidateImages.map((src) => {
+      try {
+        const url = new URL(src);
+        return url.pathname.split('/').pop().toLowerCase();
+      } catch {
+        return '';
+      }
+    });
+    baseNames.forEach((name) => {
+      if (name) nameCounts[name] = (nameCounts[name] || 0) + 1;
+    });
+    // Filter images again: keep if the base filename appears more than once across caches, or if it does not contain a dash followed by a digit (to exclude accessory images).
+    candidateImages = candidateImages.filter((src) => {
+      try {
+        const url = new URL(src);
+        const name = url.pathname.split('/').pop().toLowerCase();
+        return (
+          (nameCounts[name] > 1) || !/-\d/.test(name)
+        );
+      } catch {
+        return false;
+      }
+    });
     // Also collect standalone PDF URLs (direct links) in the page
     const pdfs = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
     const jsons = anchors.filter((h) => /\.json(\?|$)/i.test(h));
+    // Deduplicate images by base filename: keep only one image (the first encountered) for each filename.
+    const imagesByName = {};
+    for (const src of candidateImages) {
+      try {
+        const name = new URL(src).pathname.split('/').pop().toLowerCase();
+        if (!imagesByName[name]) imagesByName[name] = src;
+      } catch {
+        continue;
+      }
+    }
     return {
       anchors: Array.from(new Set(pdfAnchors)),
-      images: Array.from(new Set(filteredImages)),
+      images: Object.values(imagesByName),
       pdfs: Array.from(new Set(pdfs)),
       jsons: Array.from(new Set(jsons)),
     };
