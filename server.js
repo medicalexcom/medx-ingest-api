@@ -527,11 +527,52 @@ app.get("/ingest", async (req, res) => {
 
     // === MEDX ADD: optionally enrich from PDF manuals ===
     if (wantPdf === "true" || wantPdf === "1" || wantPdf === "yes") {
+      // Preserve the existing site-derived specs before enriching from PDFs. We do this
+      // so that specifications extracted from manuals are not merged back into
+      // the main specs object; instead they will remain under `pdf_kv` in the
+      // returned object. This ensures that tab-harvested specs stay separate.
+      const siteSpecsSnapshot = { ...(norm.specs || {}) };
       try {
         norm = await enrichFromManuals(norm, { maxManuals: 3, maxCharsText: 20000 });
       } catch (e) {
         const msg = e && e.message ? e.message : String(e);
         diag.warnings.push(`pdf-enrich: ${msg}`);
+      }
+      // Restore original site specs to avoid merging PDF key-values into specs.
+      norm.specs = siteSpecsSnapshot;
+      // Filter the manual text and key-values to English only. Define a local
+      // heuristic here since the main isEnglishLineFn is declared later in the
+      // handler and cannot be referenced before initialization. A line is
+      // considered English if at least 70% of its characters are ASCII.
+      const isEng = (line) => {
+        const total = line.length;
+        if (total === 0) return false;
+        let ascii = 0;
+        for (let i = 0; i < line.length; i++) {
+          const c = line.charCodeAt(i);
+          if (c >= 0x20 && c <= 0x7e) ascii++;
+        }
+        return ascii / total >= 0.7;
+      };
+      if (typeof norm.pdf_text === 'string') {
+        const pdfLines = norm.pdf_text.split('\n');
+        const filteredPdfLines = pdfLines
+          .map((l) => l.trim())
+          .filter((l) => isEng(l));
+        norm.pdf_text = filteredPdfLines.join('\n');
+      }
+      if (Array.isArray(norm.pdf_kv)) {
+        const filteredKv = [];
+        for (const kv of norm.pdf_kv) {
+          const newKv = {};
+          for (const [k, v] of Object.entries(kv)) {
+            const keyOk = typeof k === 'string' ? isEng(k) : true;
+            const valOk = typeof v === 'string' ? isEng(v) : true;
+            if (keyOk && valOk) newKv[k] = v;
+          }
+          if (Object.keys(newKv).length) filteredKv.push(newKv);
+        }
+        norm.pdf_kv = filteredKv;
       }
     }
 
