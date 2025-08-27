@@ -336,8 +336,34 @@ export async function browseProduct(url, opts = {}) {
         // Capture the full HTML. We keep it only for debugging and don't
         // include it in the returned object to avoid noise.
         const full_html = await page.content();
-    const visible_text = await collectVisibleText(page);
-    const sections = await collectSections(page);
+    let visible_text = await collectVisibleText(page);
+    // Filter non-English lines from visible text. We keep a line if it contains
+    // primarily ASCII letters/spaces/punctuation. Lines with too many non-Latin
+    // characters are dropped. This heuristic approximates English detection.
+    function isEnglishLine(line) {
+      const total = line.length;
+      if (total === 0) return false;
+      let ascii = 0;
+      for (let i = 0; i < line.length; i++) {
+        const code = line.charCodeAt(i);
+        // Accept typical ASCII characters and punctuation (0x20-0x7E)
+        if (code >= 0x20 && code <= 0x7e) ascii++;
+      }
+      return ascii / total >= 0.7;
+    }
+    visible_text = visible_text
+      .split('\n')
+      .filter((l) => isEnglishLine(l.trim()))
+      .join('\n');
+    let sections = await collectSections(page);
+    // Clean up sections: only keep English lines and drop entire section if empty.
+    const cleanedSections = {};
+    for (const key of ['description', 'specifications', 'features', 'included']) {
+      const text = String(sections[key] || '').split('\n');
+      const filtered = text.filter((l) => isEnglishLine(l.trim())).join('\n').trim();
+      cleanedSections[key] = filtered;
+    }
+    sections = cleanedSections;
     const { anchors, images, pdfs, jsons } = await collectLinks(page);
         return {
           ok: true,
