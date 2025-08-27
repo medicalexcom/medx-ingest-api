@@ -1167,7 +1167,7 @@ function extractJsonLd($){
       // In case the filter removes all images, fall back to original list
       if (!filteredImages.length) filteredImages = images;
       // Limit to the first 3 images to reduce noise
-      filteredImages = filteredImages.slice(0, 3);
+      filteredImages = filteredImages.slice();
     }
   } catch {}
 
@@ -1316,7 +1316,7 @@ function mergeProductSD(a={}, b={}, c={}){
         });
       }
       if (!filteredImages.length) filteredImages = images;
-      filteredImages = filteredImages.slice(0, 3);
+      filteredImages = filteredImages.slice();
     }
   } catch {}
   const specs  = { ...(c.specs || {}), ...(b.specs || {}), ...(a.specs || {}) };
@@ -3065,7 +3065,7 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
   return {
     desc: add.desc,
     specs: prunePartsLikeSpecs(add.specs || {}),
-    features: dedupeList(add.features || []).slice(0, 20),
+    features: dedupeList(add.features || []).slice(),
     manuals: dedupeManualUrls(Array.from(add.manuals || [])),
     images
   };
@@ -4007,10 +4007,10 @@ function sanitizeIngestPayload(p) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
       .filter((s) => s.length >= 7 && s.length <= 180)
-      .slice(0, 12);
-    features = dedupeList([...features, ...specBullets]).slice(0, 12);
+      .slice();
+    features = dedupeList([...features, ...specBullets]).slice();
   }
-  out.features_raw = features.slice(0, 20);
+  out.features_raw = features.slice();
 
   const allowManual = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|datasheet|spec(?:sheet)?|guide|brochure)/i;
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
@@ -4039,7 +4039,7 @@ function sanitizeIngestPayload(p) {
   ].join('|'), 'i');
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
-    .slice(0, 12);
+    .slice();
 
   const badSpecKey = /\b(privacy|terms|copyright|©|™|®)\b/i;
   if (out.specs && typeof out.specs === 'object') {
