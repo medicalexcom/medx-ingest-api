@@ -547,6 +547,8 @@ app.get("/ingest", async (req, res) => {
       const isEng = (line) => {
         const total = line.length;
         if (total === 0) return false;
+        // Reject lines with accented characters (Spanish/French etc.)
+        if (/[áéíóúñàèùâêîôûäëïöüçœ’]/i.test(line)) return false;
         let ascii = 0;
         for (let i = 0; i < line.length; i++) {
           const c = line.charCodeAt(i);
@@ -573,6 +575,42 @@ app.get("/ingest", async (req, res) => {
           if (Object.keys(newKv).length) filteredKv.push(newKv);
         }
         norm.pdf_kv = filteredKv;
+      }
+      // Extract English bullet features from the PDF text. We look for a FEATURES
+      // section and capture lines until a SPECIFICATIONS section or the end of
+      // the features list. Only keep English lines using the isEng heuristic.
+      if (typeof norm.pdf_text === 'string') {
+        const lines = norm.pdf_text.split('\n');
+        let inFeatures = false;
+        const pdfFeatures = [];
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (/^features$/i.test(line)) {
+            inFeatures = true;
+            continue;
+          }
+          if (/^specifications$/i.test(line)) {
+            if (inFeatures) break;
+          }
+          if (inFeatures) {
+            // Remove leading bullets or hyphens
+            let cleaned = line.replace(/^[-•\s]+/, '').trim();
+            if (!cleaned) continue;
+            if (isEng(cleaned)) {
+              pdfFeatures.push(cleaned);
+            }
+          }
+        }
+        if (pdfFeatures.length) {
+          const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+          for (const f of pdfFeatures) {
+            const key = f.toLowerCase();
+            if (!seen.has(key)) {
+              (norm.features_raw ||= []).push(f);
+              seen.add(key);
+            }
+          }
+        }
       }
     }
 
@@ -623,6 +661,10 @@ app.get("/ingest", async (req, res) => {
     const isEnglishLineFn = (line) => {
       const total = line.length;
       if (total === 0) return false;
+      // Immediately reject lines that contain accented characters commonly found in
+      // Spanish, French or other non‑English European languages.  If any of
+      // these characters appear, assume the line is not English.
+      if (/[áéíóúñàèùâêîôûäëïöüçœ’]/i.test(line)) return false;
       let asciiCount = 0;
       for (let i = 0; i < line.length; i++) {
         const code = line.charCodeAt(i);
@@ -638,9 +680,15 @@ app.get("/ingest", async (req, res) => {
         .filter((l) => isEnglishLineFn(l));
       norm.description_raw = filtered.join('\n');
     }
-    // Filter features_raw array
+    // Filter features_raw array: keep only English lines and drop multilingual or
+    // slash-separated labels. Remove entries containing explicit language
+    // indicators or slash‑separated parts (e.g. "Silla inodoro tres en uno/", "EnglishEspañolFrançais").
     if (Array.isArray(norm.features_raw)) {
-      norm.features_raw = norm.features_raw.filter((l) => isEnglishLineFn(String(l).trim()));
+      norm.features_raw = norm.features_raw
+        .filter((l) => isEnglishLineFn(String(l).trim()))
+        .filter((l) => !/[\\/]/.test(String(l)))
+        .filter((l) => !/\b(español|français)\b/i.test(String(l)))
+        .filter((l) => String(l).trim().toLowerCase() !== 'englishespañolfrançais');
     }
     // Filter specs values
     if (norm.specs && typeof norm.specs === 'object') {
@@ -653,6 +701,37 @@ app.get("/ingest", async (req, res) => {
         }
       }
       norm.specs = filteredSpecs;
+    }
+
+    // Limit images to a small set of representative product photos.  Keep at
+    // most the first three images as they are usually the most relevant.
+    if (Array.isArray(norm.images) && norm.images.length > 3) {
+      norm.images = norm.images.slice(0, 3);
+    }
+
+    // If the extracted name is identical to the brand, attempt to set the
+    // product name from the OpenGraph title or the URL slug.  This helps
+    // correct cases where name_raw is populated with the vendor name.
+    try {
+      if (
+        norm.name_raw &&
+        norm.brand &&
+        String(norm.name_raw).toLowerCase() === String(norm.brand).toLowerCase()
+      ) {
+        const $check = cheerio.load(html);
+        const ogTitle = $check('meta[property="og:title"]').attr('content') || '';
+        let candidate = ogTitle.trim();
+        if (!candidate) {
+          // Fallback: derive name from the final segment of the URL path
+          const parts = targetUrl.split('/').filter(Boolean);
+          const slug = parts[parts.length - 1] || '';
+          candidate = slug.replace(/[-_]/g, ' ').replace(/\.html?$/i, '').trim();
+          candidate = candidate.replace(/\b(bs\d+[a-z]?)\b/i, '').trim();
+        }
+        if (candidate) norm.name_raw = candidate;
+      }
+    } catch {
+      /* ignore name heuristic errors */
     }
 
     // ==== MEDX ADD-ONLY: optional browsing step to fetch dynamic content ====
