@@ -575,6 +575,45 @@ app.get("/ingest", async (req, res) => {
     /* ==== MEDX ADD-ONLY: final spec enrichment before sanitize v1 ==== */
     try { norm.specs = enrichSpecsWithDerived(norm.specs || {}); } catch {}
 
+    // === Filter non-English content from the scraped result ===
+    // Define a heuristic: consider a string English if at least 70% of its characters
+    // are ASCII (0x20–0x7E). This removes non-Latin lines from descriptions,
+    // features, specs, and sections. Non-string spec values (e.g., numbers) are kept.
+    const isEnglishLineFn = (line) => {
+      const total = line.length;
+      if (total === 0) return false;
+      let asciiCount = 0;
+      for (let i = 0; i < line.length; i++) {
+        const code = line.charCodeAt(i);
+        if (code >= 0x20 && code <= 0x7e) asciiCount++;
+      }
+      return asciiCount / total >= 0.7;
+    };
+    // Filter description_raw lines
+    if (typeof norm.description_raw === 'string') {
+      const descLines = norm.description_raw.split('\n');
+      const filtered = descLines
+        .map((l) => l.trim())
+        .filter((l) => isEnglishLineFn(l));
+      norm.description_raw = filtered.join('\n');
+    }
+    // Filter features_raw array
+    if (Array.isArray(norm.features_raw)) {
+      norm.features_raw = norm.features_raw.filter((l) => isEnglishLineFn(String(l).trim()));
+    }
+    // Filter specs values
+    if (norm.specs && typeof norm.specs === 'object') {
+      const filteredSpecs = {};
+      for (const [k, v] of Object.entries(norm.specs)) {
+        if (typeof v === 'string') {
+          if (isEnglishLineFn(v.trim())) filteredSpecs[k] = v;
+        } else {
+          filteredSpecs[k] = v;
+        }
+      }
+      norm.specs = filteredSpecs;
+    }
+
     // ==== MEDX ADD-ONLY: optional browsing step to fetch dynamic content ====
     // If the `browse` query parameter is set to true, we run our Playwright-based
     // crawler to fetch a fully rendered version of the product page. This
