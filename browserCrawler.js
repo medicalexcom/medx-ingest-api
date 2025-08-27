@@ -215,21 +215,23 @@ async function collectLinks(page) {
     baseNames.forEach((name) => {
       if (name) nameCounts[name] = (nameCounts[name] || 0) + 1;
     });
-    // Filter images again: keep if the base filename appears more than once across caches, or if it does not contain a dash followed by a digit (to exclude accessory images).
+
+    // Filter images again: keep if the base filename appears more than once across caches,
+    // or if it does not contain a dash followed by a digit (to exclude accessory images).
     candidateImages = candidateImages.filter((src) => {
       try {
         const url = new URL(src);
         const name = url.pathname.split('/').pop().toLowerCase();
-        return (
-          (nameCounts[name] > 1) || !/-\d/.test(name)
-        );
+        return (nameCounts[name] > 1) || !/-\d/.test(name);
       } catch {
         return false;
       }
     });
+
     // Also collect standalone PDF URLs (direct links) in the page
     const pdfs = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
     const jsons = anchors.filter((h) => /\.json(\?|$)/i.test(h));
+
     // Deduplicate images by base filename: keep only one image (the first encountered) for each filename.
     const imagesByName = {};
     for (const src of candidateImages) {
@@ -240,9 +242,16 @@ async function collectLinks(page) {
         continue;
       }
     }
+
+    // From the deduplicated images, take only the first few (e.g. first two) to
+    // avoid including unrelated accessory photos. We rely on insertion order
+    // preserved by Object.values().
+    const allImages = Object.values(imagesByName);
+    const limitedImages = allImages.slice(0, 2);
+
     return {
       anchors: Array.from(new Set(pdfAnchors)),
-      images: Object.values(imagesByName),
+      images: limitedImages,
       pdfs: Array.from(new Set(pdfs)),
       jsons: Array.from(new Set(jsons)),
     };
