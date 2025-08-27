@@ -461,13 +461,18 @@ app.get("/ingest", async (req, res) => {
       : EXCLUDE_PNG_ENV;
 
     const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
-    const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
+    // Default sanitization to true. If the client explicitly sets sanitize to
+    // "false", disable sanitization; otherwise always sanitize the payload.
+    const doSanitize = String(req.query.sanitize || "true").toLowerCase() === "true";
     const doHarvest  = req.query.harvest != null
       ? String(req.query.harvest).toLowerCase() === "true"
       : true;
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
     const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
-    const wantPdf    = String(req.query.pdf || "false").toLowerCase();
+    // Always attempt to enrich from PDF manuals unless the client explicitly passes
+    // pdf=false. Using "true" as the default ensures manual data is extracted by
+    // default.
+    const wantPdf    = String(req.query.pdf || "true").toLowerCase();
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
 
