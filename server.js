@@ -814,7 +814,42 @@ app.get("/ingest", async (req, res) => {
             seen.add(key);
           }
         }
-        return uniq.join('\n\n');
+        let desc = uniq.join('\n\n');
+        // If description is short or missing key details, supplement with select feature lines
+        const descLower = desc.toLowerCase();
+        const extras = [];
+        if (Array.isArray(rec.features_raw)) {
+        const patterns = [
+            /hospital[-\s]?strength|hospital strength/i,
+            /efficiency,\s*power,\s*and\s*performance|benefit\s+from/i,
+            /maximum\s+suction|270mmhg|up\s+to\s+270|vacuum\s+suction/i,
+            /suction\s+is\s+adjustable|adjustable\s+suction/i,
+            /quiet\s+pump.*timer.*night\s+light|quiet\s+pump\s+also\s+includes\s+a\s+timer\s+and\s+night\s+light/i,
+            /natural\s+nursing/i,
+            // Capture notes about closed systems or built-in batteries for pumps like the Spectra S1 Plus
+            /closed\s+system/i,
+            /built[-\s]?in\s+battery/i,
+            /features\s+of\s+the\s+s2\s+plus|premier\s+rechargeable\s+double\s+electric\s+breast\s+pump/i,
+          ];
+          rec.features_raw.forEach((feat) => {
+            const line = String(feat).trim();
+            if (!line || line.split(/\s+/).length < 4) return;
+            for (const pat of patterns) {
+              if (pat.test(line)) {
+                const lowerLine = line.toLowerCase();
+                if (!descLower.includes(lowerLine) && !extras.some((e) => e.toLowerCase() === lowerLine)) {
+                  extras.push(line);
+                }
+                break;
+              }
+            }
+          });
+        }
+        if (extras.length) {
+          // Join supplementary lines with spaces to avoid overly long blocks; deduplicate keywords
+          desc += '\n\n' + extras.join(' ');
+        }
+        return desc;
       }
       return '';
     }
