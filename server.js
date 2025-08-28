@@ -784,6 +784,93 @@ app.get("/ingest", async (req, res) => {
       diag.warnings.push(`noise-clean-error: ${e && e.message ? e.message : String(e)}`);
     }
 
+    /* ==== Build structured sections for output ====
+     * Provide a consistent structure with headings (description, specifications, features, included).
+     * The helpers defined below assemble each section from the available fields on `norm`.
+     */
+    // Compile a description/overview: prefer Markdown description; fall back to raw description
+    // or tab-harvested description. Normalize whitespace and join multiple sources if needed.
+    function compileDescription(rec) {
+      const candidates = [];
+      if (rec.description_md && String(rec.description_md).trim()) {
+        candidates.push(String(rec.description_md).trim());
+      }
+      if (rec.description_raw && String(rec.description_raw).trim()) {
+        candidates.push(String(rec.description_raw).trim());
+      }
+      if (rec._browse && rec._browse.sections && rec._browse.sections.description && String(rec._browse.sections.description).trim()) {
+        candidates.push(String(rec._browse.sections.description).trim());
+      }
+      if (candidates.length) return candidates.join('\n\n');
+      return '';
+    }
+
+    // Compile specifications: return a shallow copy of the specs object to avoid mutations.
+    function compileSpecifications(rec) {
+      const specs = rec.specs && typeof rec.specs === 'object' ? rec.specs : {};
+      return { ...specs };
+    }
+
+    // Compile features: use the filtered features_raw array; trim each entry.
+    function compileFeatures(rec) {
+      if (Array.isArray(rec.features_raw)) {
+        return rec.features_raw
+          .filter((v) => String(v || '').trim())
+          .map((v) => String(v).trim());
+      }
+      return [];
+    }
+
+    // Guess included items: parse visible text or features for "Includes", "Comes with", etc.
+    function guessIncluded(rec) {
+      const included = [];
+      // 1) Look inside _browse.visible_text for lines after a cue phrase indicating contents
+      try {
+        const vis = rec._browse && rec._browse.visible_text ? String(rec._browse.visible_text) : '';
+        const lines = vis.split(/\n+/).map((l) => l.trim());
+        let capture = false;
+        for (const line of lines) {
+          const lower = line.toLowerCase();
+          if (/includes everything|includes.*needed/.test(lower)) {
+            capture = true;
+            continue;
+          }
+          if (capture) {
+            if (!line) break;
+            // Capture bullet-like lines or short list items
+            if (/^[-•\d]/.test(line) || /\b(breast|shield|bottle|tube|adapter|manual|pump|stand|case|kit)/i.test(line)) {
+              included.push(line.replace(/^[-•\d.\s]+/, '').trim());
+            } else {
+              if (line.split(/\s+/).length <= 10) included.push(line);
+            }
+          }
+        }
+      } catch {}
+      // 2) Look in features_raw for lines starting with includes/comes with
+      if (Array.isArray(rec.features_raw)) {
+        for (const raw of rec.features_raw) {
+          const line = String(raw || '').trim();
+          if (/^(includes|comes with|comes complete)/i.test(line)) {
+            let items = line.replace(/^(includes|comes with|comes complete)/i, '').trim();
+            items = items.replace(/\band\b/gi, ',');
+            for (const item of items.split(/,|;/)) {
+              const cleaned = item.replace(/^[\s:\-]+/, '').trim();
+              if (cleaned) included.push(cleaned);
+            }
+          }
+        }
+      }
+      return included;
+    }
+
+    // Attach structured sections to the normalized record
+    norm.sections = {
+      description: compileDescription(norm),
+      specifications: compileSpecifications(norm),
+      features: compileFeatures(norm),
+      included: guessIncluded(norm),
+    };
+
     const totalMs = now() - started;
     if (totalMs > MAX_TOTAL_TIMEOUT_MS){
       diag.warnings.push(`total-timeout ${totalMs}ms`);
