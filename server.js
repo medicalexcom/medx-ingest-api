@@ -9,6 +9,7 @@ import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
 import { harvestTabsFromHtml } from './tabHarvester.js';
+import { cleanProductRecord } from './lib/cleanForGPT.js';
 
 
 
@@ -780,8 +781,18 @@ app.get("/ingest", async (req, res) => {
       diag.warnings.push(`total-timeout ${totalMs}ms`);
     }
 
-    if (debug) return res.json({ ...norm, _debug: { ...diag, fetched } });
-    return res.json(norm);
+    // Always attach a cleaned GPT-ready payload if it's not already present.
+    if (!norm.gpt_ready) {
+      try {
+        norm.gpt_ready = cleanProductRecord(norm);
+      } catch (e) {
+        diag && diag.warnings && diag.warnings.push(`gpt-cleaner-error: ${e && e.message ? e.message : String(e)}`);
+      }
+    }
+    if (debug) {
+      return res.json({ ...norm, _debug: { ...diag, fetched }, gpt_ready: norm.gpt_ready });
+    }
+    return res.json(norm.gpt_ready || norm);
 
   } catch (e) {
     console.error("INGEST ERROR:", e);
