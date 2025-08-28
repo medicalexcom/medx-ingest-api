@@ -688,7 +688,12 @@ app.get("/ingest", async (req, res) => {
         .filter((l) => isEnglishLineFn(String(l).trim()))
         .filter((l) => !/[\\/]/.test(String(l)))
         .filter((l) => !/\b(español|français)\b/i.test(String(l)))
-        .filter((l) => String(l).trim().toLowerCase() !== 'englishespañolfrançais');
+        .filter((l) => String(l).trim().toLowerCase() !== 'englishespañolfrançais')
+        // Drop lines that look like part numbers (uppercase codes with three or more digits).
+        .filter((l) => {
+          const s = String(l).trim();
+          return !/(?:\b[A-Z]{2,}\d{3,}\b)/.test(s);
+        });
     }
     // Filter specs values
     if (norm.specs && typeof norm.specs === 'object') {
@@ -706,7 +711,7 @@ app.get("/ingest", async (req, res) => {
     // Limit images to a small set of representative product photos.  Keep at
     // most the first three images as they are usually the most relevant.
     if (Array.isArray(norm.images) && norm.images.length > 3) {
-      norm.images = norm.images.slice();
+      norm.images = norm.images.slice(0, 3);
     }
 
     // If the extracted name is identical to the brand, attempt to set the
@@ -1071,9 +1076,9 @@ function extractNormalized(baseUrl, html, opts) {
   const featSmart = extractFeaturesSmart($);
   const featPara  = deriveFeaturesFromParagraphs($);
   // Limit the number of features to a higher count to avoid truncating bullet lists.
-  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice();
+  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice(0, 40);
   if (mergedSD.features && mergedSD.features.length) {
-    features = dedupeList([...(mergedSD.features || []), ...features]).slice();
+    features = dedupeList([...(mergedSD.features || []), ...features]).slice(0, 40);
   }
 
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
@@ -1167,7 +1172,7 @@ function extractJsonLd($){
       // In case the filter removes all images, fall back to original list
       if (!filteredImages.length) filteredImages = images;
       // Limit to the first 3 images to reduce noise
-      filteredImages = filteredImages.slice();
+      filteredImages = filteredImages.slice(0, 3);
     }
   } catch {}
 
@@ -1316,7 +1321,7 @@ function mergeProductSD(a={}, b={}, c={}){
         });
       }
       if (!filteredImages.length) filteredImages = images;
-      filteredImages = filteredImages.slice();
+      filteredImages = filteredImages.slice(0, 3);
     }
   } catch {}
   const specs  = { ...(c.specs || {}), ...(b.specs || {}), ...(a.specs || {}) };
@@ -3065,7 +3070,7 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
   return {
     desc: add.desc,
     specs: prunePartsLikeSpecs(add.specs || {}),
-    features: dedupeList(add.features || []).slice(),
+    features: dedupeList(add.features || []).slice(0, 20),
     manuals: dedupeManualUrls(Array.from(add.manuals || [])),
     images
   };
@@ -3633,6 +3638,15 @@ function prunePartsLikeSpecs(specs = {}){
     // drop classic parts table headers masquerading as specs
     // drop banned keys and any keys starting with a hash (CSS selectors, PayPal iframe IDs, etc.)
     if (BAD_KEYS.test(key) || key.startsWith('#')) continue;
+
+    // Remove spec entries where the value looks like a part number.  A part number
+    // is typically an uppercase alphanumeric code (sometimes with dashes) and
+    // contains no lowercase letters.  These part numbers often appear in
+    // specifications as model codes or SKUs but are not meaningful for GPT.
+    const valClean = val.replace(/\s+/g, '');
+    if (/^[A-Z0-9][A-Z0-9\-_]{2,}$/.test(valClean) && !/[a-z]/.test(valClean)) {
+      continue;
+    }
     out[key] = val;
   }
   return out;
@@ -4007,10 +4021,10 @@ function sanitizeIngestPayload(p) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
       .filter((s) => s.length >= 7 && s.length <= 180)
-      .slice();
-    features = dedupeList([...features, ...specBullets]).slice();
+      .slice(0, 12);
+    features = dedupeList([...features, ...specBullets]).slice(0, 12);
   }
-  out.features_raw = features.slice();
+  out.features_raw = features.slice(0, 20);
 
   const allowManual = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|datasheet|spec(?:sheet)?|guide|brochure)/i;
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
@@ -4039,7 +4053,39 @@ function sanitizeIngestPayload(p) {
   ].join('|'), 'i');
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
-    .slice();
+    .slice(0, 12);
+
+  // Clean pdf_kv entries by removing part number values.  Each entry is an
+  // object of key/value pairs extracted from manuals.  Drop any key where
+  // the value looks like a part number (uppercase alphanumeric code with
+  // three or more digits) or the key itself refers to item numbers.
+  if (Array.isArray(out.pdf_kv)) {
+    const cleanedKv = [];
+    for (const kv of out.pdf_kv) {
+      const cleaned = {};
+      for (const [k, v] of Object.entries(kv || {})) {
+        const keyClean = String(k || '').trim().toLowerCase();
+        const valClean = String(v || '').trim();
+        // drop keys containing obvious part number markers like item# or model
+        if (/^(item[#_]?|model|part\b)/i.test(k)) continue;
+        // drop values that look like part numbers
+        if (/\b[A-Z]{2,}\d{3,}\b/.test(valClean) && !/[a-z]/.test(valClean)) continue;
+        cleaned[k] = v;
+      }
+      if (Object.keys(cleaned).length) cleanedKv.push(cleaned);
+    }
+    out.pdf_kv = cleanedKv;
+  }
+
+  // Surface the titles of any harvested tabs.  Tab objects contain a `title` field
+  // describing what the pane represented (e.g. "Description", "Specifications",
+  // "Features").  Expose these titles separately so downstream consumers can
+  // understand which sections were harvested without digging into tab HTML.
+  if (Array.isArray(out.tabs)) {
+    out.tab_titles = out.tabs
+      .map((t) => String((t && t.title) || '').trim())
+      .filter((t) => !!t);
+  }
 
   const badSpecKey = /\b(privacy|terms|copyright|©|™|®)\b/i;
   if (out.specs && typeof out.specs === 'object') {
