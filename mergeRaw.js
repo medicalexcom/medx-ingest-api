@@ -91,6 +91,17 @@ function removeNoise(record) {
     delete rec._browse.console;
   }
 
+  // Surface manual PDF URLs as `pdf_docs` for downstream GPT usage.
+  // If the record already has a `manuals` array and no `pdf_docs` field,
+  // copy the manuals array into a new property `pdf_docs`. This makes it
+  // explicit that these documents are intended to be referenced alongside the
+  // scraped data when generating SEO content. Do not rename or remove the
+  // original `manuals` array to preserve backwards compatibility with any
+  // existing consumers of the API.
+  if (Array.isArray(rec.manuals) && !rec.pdf_docs) {
+    rec.pdf_docs = [...rec.manuals];
+  }
+
   return rec;
 }
 
