@@ -1,4 +1,4 @@
-import { cleanProductRecord } from './lib/cleanForGPT.js';
+// Removed cleanProductRecord import – send full merged object directly to GPT
 
 // mergeRaw.js
 // Utility to combine the existing raw scraper output with the
@@ -23,6 +23,6 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
   // arrangement of the scraped data intact. Clients can access `_browse` to
   // consume the dynamic content separately.
   out._browse = raw_browse;
-  const gpt_ready = cleanProductRecord(out);
-  return { ...out, gpt_ready };
+  // Return the merged raw object without a gpt_ready field
+  return out;
 }
