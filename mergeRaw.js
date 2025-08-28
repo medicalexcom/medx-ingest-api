@@ -1,3 +1,5 @@
+import { cleanProductRecord } from './lib/cleanForGPT.js';
+
 // mergeRaw.js
 // Utility to combine the existing raw scraper output with the
 // output from the Playwright browser collector. The merge is
@@ -21,5 +23,6 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
   // arrangement of the scraped data intact. Clients can access `_browse` to
   // consume the dynamic content separately.
   out._browse = raw_browse;
-  return out;
+  const gpt_ready = cleanProductRecord(out);
+  return { ...out, gpt_ready };
 }
