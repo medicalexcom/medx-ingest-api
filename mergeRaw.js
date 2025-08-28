@@ -60,14 +60,45 @@ function removeNoise(record) {
       if (/hcpcs|hcpcs code/.test(lower)) return false;
       // Remove language-specific labels or duplicates (e.g., multiple translations)
       if (/\bsoporte de|embouts|dossier|puntas de la|silla inodoro|tres en uno|couvercle|trois-en-un/i.test(lower)) return false;
+      // Remove lines containing quoted text (e.g., testimonials)
+      if (/"|“|”/.test(text)) return false;
       // Remove headings or non-descriptive labels
-      if (/^details$|^specifications$|^size & weight$|^accessories & components$|^features$|^what's in the box$|^features & benefits$/i.test(text)) return false;
+      if (/^details$|^specifications$|^size & weight$|^accessories & components$|^features$|^what's in the box$|^features & benefits:?$/i.test(text)) return false;
       // Remove generic one-word or two-word labels
       if (text.split(/\s+/).length < 3) return false;
       // Remove part numbers (combination of letters and digits)
       if (/\b[A-Za-z]{2,}[\d]{2,}/.test(text)) return false;
       // Remove copyright, domain names, or company names
       if (/©|\bcom\b|\.com|all rights reserved/.test(lower)) return false;
+
+      // Remove lines that duplicate specification details (e.g., 'Rechargeable: Portable with built-in battery.')
+      if (/^(rechargeable|massage mode|display|adjustable suction|closed system|ultra-quiet|night light)[^:]*:/i.test(text)) return false;
+
+      // Remove fragmented or multi-language feature lines that don't stand alone (e.g. 'with splash guard', 'Commode Pail only')
+      if (/support.*soporte|puntas de la|dossier|leg tip|commode pail only|with splash guard/i.test(lower)) return false;
+      // Remove lines starting with 'with ' that are too short (less than five words) and likely incomplete
+      if (/^with\s+/i.test(lower) && text.split(/\s+/).length <= 5) return false;
+      // Remove lines ending in 'only' with few words (likely incomplete)
+      if (/only$/i.test(lower) && text.split(/\s+/).length <= 4) return false;
+      // Remove spec-like lines that duplicate spec keys or values
+      if (rec.specs && typeof rec.specs === 'object') {
+        // Build a set of lowercase tokens from spec keys and values
+        const specTokens = new Set();
+        for (const [k, v] of Object.entries(rec.specs)) {
+          specTokens.add(String(k).toLowerCase());
+          if (typeof v === 'string') {
+            for (const w of v.toLowerCase().split(/\s+/)) {
+              specTokens.add(w);
+            }
+          }
+        }
+        const tokens = lower.split(/\s+/);
+        if (tokens.every((t) => specTokens.has(t))) return false;
+      }
+      // Remove lines that look like headings or assembly/benefits labels
+      if (/features\s*&?\s*benefits|assembly|very quiet|single pumping|dual pumping|s1 plus|check out faster/i.test(lower)) return false;
+      // Remove lines consisting solely of spec keys (e.g. 'seidentopf binocular head', 'built-in mechanical stage with abbe na1.25 condenser &iris')
+      if (/^(seidentopf|wf10x|built-in|4x,?\s*10x|vacuum suction up)/i.test(text)) return false;
       return true;
     });
   }
@@ -92,6 +123,17 @@ function removeNoise(record) {
       }
       // Remove store pricing and special promotion keys (e.g. simple_store_replacement_bags, covid updates)
       if (/simple_store|covid/.test(lowerKey)) {
+        delete rec.specs[key];
+        continue;
+      }
+
+      // Remove unnatural spec keys that resemble sentences or have multiple underscores.
+      // Heuristic: remove keys starting with 'the_' (e.g. 'the_most_advanced_hospital'),
+      // or having more than two underscores, or containing generic descriptor words like
+      // 'pump', 'modes', or 'grade'. Such keys are likely descriptive text rather than
+      // actual specification names.
+      const underscoreCount = (key.match(/_/g) || []).length;
+      if (/^the_/i.test(key) || underscoreCount > 2 || /pump|modes|grade/.test(lowerKey)) {
         delete rec.specs[key];
         continue;
       }
