@@ -801,7 +801,21 @@ app.get("/ingest", async (req, res) => {
       if (rec._browse && rec._browse.sections && rec._browse.sections.description && String(rec._browse.sections.description).trim()) {
         candidates.push(String(rec._browse.sections.description).trim());
       }
-      if (candidates.length) return candidates.join('\n\n');
+      if (candidates.length) {
+        // Combine and deduplicate lines to avoid repeated paragraphs
+        const combined = candidates.join('\n\n');
+        const lines = combined.split(/\n+/).map((l) => l.trim()).filter((l) => l);
+        const seen = new Set();
+        const uniq = [];
+        for (const l of lines) {
+          const key = l.toLowerCase();
+          if (!seen.has(key)) {
+            uniq.push(l);
+            seen.add(key);
+          }
+        }
+        return uniq.join('\n\n');
+      }
       return '';
     }
 
@@ -814,9 +828,44 @@ app.get("/ingest", async (req, res) => {
     // Compile features: use the filtered features_raw array; trim each entry.
     function compileFeatures(rec) {
       if (Array.isArray(rec.features_raw)) {
-        return rec.features_raw
-          .filter((v) => String(v || '').trim())
-          .map((v) => String(v).trim());
+        // Normalize lines: trim and drop empties
+        const rawLines = rec.features_raw
+          .map((v) => String(v || '').trim())
+          .filter((v) => v);
+        const merged = [];
+        let buffer = '';
+        const finalize = () => {
+          if (buffer) {
+            merged.push(buffer.trim());
+            buffer = '';
+          }
+        };
+        for (let i = 0; i < rawLines.length; i++) {
+          const line = rawLines[i];
+          // Remove leading bullets or dashes when considering continuation
+          const trimmed = line.replace(/^[-–—]+\s*/, '').trim();
+          if (!buffer) {
+            buffer = trimmed;
+            continue;
+          }
+          // If the current line begins with a dash (bullet), append to current feature
+          if (/^[-–—]/.test(line.trim())) {
+            buffer += ' ' + trimmed;
+            continue;
+          }
+          // If the buffer ends with a comma, semicolon, colon or ends with 'and' or 'or', join lines
+          const bufTrim = buffer.trim();
+          const lastChar = bufTrim.slice(-1);
+          const lastWord = bufTrim.split(/\s+/).pop().toLowerCase();
+          if ([',', ';', ':'].includes(lastChar) || lastWord === 'and' || lastWord === 'or') {
+            buffer += ' ' + trimmed;
+          } else {
+            finalize();
+            buffer = trimmed;
+          }
+        }
+        finalize();
+        return merged;
       }
       return [];
     }
@@ -827,22 +876,27 @@ app.get("/ingest", async (req, res) => {
       // 1) Look inside _browse.visible_text for lines after a cue phrase indicating contents
       try {
         const vis = rec._browse && rec._browse.visible_text ? String(rec._browse.visible_text) : '';
-        const lines = vis.split(/\n+/).map((l) => l.trim());
+        const lines = vis.split(/\n+/).map((l) => l.trim()).filter(Boolean);
         let capture = false;
         for (const line of lines) {
           const lower = line.toLowerCase();
+          // Trigger capturing after a cue phrase about included items
           if (/includes everything|includes.*needed/.test(lower)) {
             capture = true;
             continue;
           }
           if (capture) {
-            if (!line) break;
-            // Capture bullet-like lines or short list items
-            if (/^[-•\d]/.test(line) || /\b(breast|shield|bottle|tube|adapter|manual|pump|stand|case|kit)/i.test(line)) {
-              included.push(line.replace(/^[-•\d.\s]+/, '').trim());
-            } else {
-              if (line.split(/\s+/).length <= 10) included.push(line);
+            // Stop capturing when we encounter unrelated sections, testimonials, headings, or pricing
+            if (!line || /recommended|review|reviews|customer|based on|write a review|\bi am\b|\bgynecologic\b|\bgynecologist\b|\boncologist\b|\bsurgeon\b|hospital|parts & accessories|use & operation|assembling|sanitizing|how to use|stand|case|kit|sold out|add to cart|\$|switch|trolley|power supply|hard case|cable|set/.test(lower)) {
+              break;
             }
+            // Only include lines that look like actual items (contain item keywords or numbers)
+            if (/\b(breast|shield|bottle|tube|adapter|manual|pump|diaphragm|cap|diaphragms|flange|flanges|air tube|stand|case|kit|tubing|body|bodies|bottles|cable|cables)\b/i.test(lower) || /\d/.test(lower)) {
+              // Remove leading bullets or numbers and trim
+              const cleaned = line.replace(/^[-•\d.\s]+/, '').trim();
+              if (cleaned) included.push(cleaned);
+            }
+            // If the line does not match item keywords or numbers, skip it but continue capturing
           }
         }
       } catch {}
@@ -860,7 +914,15 @@ app.get("/ingest", async (req, res) => {
           }
         }
       }
-      return included;
+      // Filter out any residual noise, such as testimonials, reviews, contact info, pricing, or accessory kits/stands/cases
+      return included.filter((item) => {
+        const lower = String(item).toLowerCase().trim();
+        // Remove testimonials, reviews, contact info, pricing, or accessory references
+        if (/(recommended|review|reviews|customer|based on|gynecologic|gynecologist|oncologist|surgeon|hospital|kit|stand|case|trolley|switch|power supply|hard case|cable|set|price|\$|add to cart|sold out|parts & accessories)/.test(lower)) return false;
+        // Remove lines that start with 'with' or 'and' and are very short (likely incomplete)
+        if (/^(with|and)\b/.test(lower) && lower.split(/\s+/).length <= 4) return false;
+        return true;
+      });
     }
 
     // Attach structured sections to the normalized record
