@@ -43,24 +43,31 @@ function removeNoise(record) {
       const text = String(line || '').trim();
       if (!text) return false;
       const lower = text.toLowerCase();
-      // Remove price or quantity info
-      if (/\$\s*\d/.test(lower) || /\bprice\b/.test(lower)) return false;
-      // Remove add to cart or checkout prompts
-      if (/add to cart|add to wishlist|add to compare|checkout|shopping cart/.test(lower)) return false;
+      // Remove price or quantity info, or upsell prompts
+      if (/\$\s*\d/.test(lower) || /\bprice\b/.test(lower) || /\bqty\b/.test(lower) || /sale|discount|clearance/.test(lower)) return false;
+      // Remove add to cart, checkout, or shopping cart prompts
+      if (/add to cart|add to wishlist|add to compare|checkout|shopping cart|add to bag/.test(lower)) return false;
       // Remove insurance or eligibility notes
       if (/insurance|eligible/.test(lower)) return false;
-      // Remove review/testimonial prompts
-      if (/reviews?|write a review|customer reviews/.test(lower)) return false;
-      // Remove phone or fax numbers
-      if (/phone|fax/.test(lower)) return false;
+      // Remove review/testimonial prompts or quoted testimonials
+      if (/reviews?|review|write a review|customer reviews|testimonial/.test(lower)) return false;
+      if (/\bi have recommended\b|\bi am able\b|\ball rights reserved\b|\bthank you\b|\bbased on\b/.test(lower)) return false;
+      // Remove phone or fax numbers and contact info
+      if (/phone|fax|tel|telephone|call us|contact us|\d{3}[\s.-]\d{3}[\s.-]\d{4}/.test(lower)) return false;
+      // Remove covid or pandemic updates
+      if (/covid|\b19 update\b/.test(lower)) return false;
+      // Remove HCPCS codes or similar
+      if (/hcpcs|hcpcs code/.test(lower)) return false;
+      // Remove language-specific labels or duplicates (e.g., multiple translations)
+      if (/\bsoporte de|embouts|dossier|puntas de la|silla inodoro|tres en uno|couvercle|trois-en-un/i.test(lower)) return false;
       // Remove headings or non-descriptive labels
-      if (/^details$|^specifications$|^size & weight$|^accessories & components$|^features$/i.test(text)) return false;
+      if (/^details$|^specifications$|^size & weight$|^accessories & components$|^features$|^what's in the box$|^features & benefits$/i.test(text)) return false;
       // Remove generic one-word or two-word labels
       if (text.split(/\s+/).length < 3) return false;
       // Remove part numbers (combination of letters and digits)
       if (/\b[A-Za-z]{2,}[\d]{2,}/.test(text)) return false;
-      // Remove copyright or domain names
-      if (/©|\bcom\b|\.com/.test(lower)) return false;
+      // Remove copyright, domain names, or company names
+      if (/©|\bcom\b|\.com|all rights reserved/.test(lower)) return false;
       return true;
     });
   }
@@ -80,6 +87,11 @@ function removeNoise(record) {
       }
       // Remove warranty details from specs; keep high-level warranty separately
       if (/warranty/.test(lowerKey)) {
+        delete rec.specs[key];
+        continue;
+      }
+      // Remove store pricing and special promotion keys (e.g. simple_store_replacement_bags, covid updates)
+      if (/simple_store|covid/.test(lowerKey)) {
         delete rec.specs[key];
         continue;
       }
