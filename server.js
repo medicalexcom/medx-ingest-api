@@ -9,6 +9,7 @@ import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
 import { harvestTabsFromHtml } from './tabHarvester.js';
+import { removeNoise } from './mergeRaw.js';
 // Removed GPT-ready helper: no longer needed
 
 
@@ -774,6 +775,13 @@ app.get("/ingest", async (req, res) => {
         norm.specs_md    = objectToMarkdownTable(norm.specs || {});
         if (!norm.description_md) norm.description_md = textToMarkdown(norm.description_raw || "");
       }
+    }
+
+    // Always remove noise from the normalized payload
+    try {
+      norm = removeNoise(norm);
+    } catch (e) {
+      diag.warnings.push(`noise-clean-error: ${e && e.message ? e.message : String(e)}`);
     }
 
     const totalMs = now() - started;
