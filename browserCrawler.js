@@ -162,7 +162,7 @@ async function collectVisibleText(page) {
      * fallback is now only triggered when the main extraction contains
      * fewer than 100 characters.
      */
-    if (!extracted || extracted.length < 30) {
+    if (!extracted || extracted.length < 10) {
       return document.body.innerText.replace(/\s+\n/g, '\n').trim();
     }
     return extracted;
