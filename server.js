@@ -936,6 +936,25 @@ app.get("/ingest", async (req, res) => {
             // If the line does not match item keywords or numbers, skip it but continue capturing
           }
         }
+
+        // Capture commode parts items from parts list in visible_text.  Some commode products list
+        // replacement parts rather than contents.  Add these to the included array if they are
+        // present in the visible text.
+        for (const line of lines) {
+          const lower = line.toLowerCase();
+          if (/commode bucket/.test(lower) && !included.some((v) => /bucket/i.test(v))) {
+            included.push(line.trim());
+          }
+          if (/commode seat/.test(lower) && !included.some((v) => /seat/i.test(v))) {
+            included.push(line.trim());
+          }
+          if (/replacement leg set/.test(lower) && !included.some((v) => /leg set/i.test(v))) {
+            included.push(line.trim());
+          }
+          if (/leg tip/.test(lower) && !included.some((v) => /leg tip/i.test(v))) {
+            included.push(line.trim());
+          }
+        }
       } catch {}
       // 2) Look in features_raw for lines starting with includes/comes with
       if (Array.isArray(rec.features_raw)) {
