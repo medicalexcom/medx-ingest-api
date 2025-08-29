@@ -113,6 +113,9 @@ async function autoExpand(page) {
  * @param {import('playwright').Page} page
  */
 async function collectVisibleText(page) {
+  // Evaluate in browser context to extract visible text.  If the typical main‑section
+  // extraction yields very little content (e.g. on highly dynamic sites), fall back
+  // to the entire body's innerText to capture dynamically rendered content.
   return page.evaluate(() => {
     function isVisible(el) {
       const style = window.getComputedStyle(el);
@@ -137,7 +140,12 @@ async function collectVisibleText(page) {
       return chunks.join('\n');
     }
     const main = document.querySelector('main') || document.body;
-    return textFrom(main);
+    const extracted = textFrom(main).trim();
+    // If no text or extremely short, use body.innerText as a fallback
+    if (!extracted || extracted.length < 50) {
+      return document.body.innerText.replace(/\s+\n/g, '\n').trim();
+    }
+    return extracted;
   });
 }
 
@@ -170,7 +178,13 @@ async function collectSections(page) {
           }
           return null;
         }
-    sections.description = serialize(findFirst(map.description));
+    // Description: prefer explicit description nodes; fallback to meta description if empty
+    const descEl = findFirst(map.description);
+    sections.description = serialize(descEl);
+    if (!sections.description) {
+      const meta = document.querySelector('meta[name="description"]');
+      if (meta && meta.content) sections.description = meta.content.trim();
+    }
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features = serialize(findFirst(map.features));
     sections.included = serialize(findFirst(map.included));
