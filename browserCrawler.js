@@ -134,6 +134,17 @@ async function collectVisibleText(page) {
       while (walker.nextNode()) {
         const node = walker.currentNode;
         if (!node.parentElement || blacklist.has(node.parentElement.tagName)) continue;
+        // Skip text inside navigation, header, footer or sidebar elements to reduce noise
+        let skip = false;
+        let p = node.parentElement;
+        while (p) {
+          const tag = p.tagName && p.tagName.toLowerCase();
+          if (tag && (tag === 'nav' || tag === 'header' || tag === 'footer' || tag === 'aside')) { skip = true; break; }
+          const cls = p.className ? String(p.className).toLowerCase() : '';
+          if (/(\bnav\b|\bheader\b|\bfooter\b|\bsidebar\b|\bbreadcrumb\b|\bmenu\b|\baccount\b)/.test(cls)) { skip = true; break; }
+          p = p.parentElement;
+        }
+        if (skip) continue;
         const t = node.nodeValue.replace(/\s+/g, ' ').trim();
         if (t) chunks.push(t);
       }
