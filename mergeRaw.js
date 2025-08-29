@@ -67,57 +67,52 @@ function removeNoise(record) {
       if (/\bsoporte de|embouts|dossier|puntas de la|silla inodoro|tres en uno|couvercle|trois-en-un/i.test(lower)) return false;
       // Remove lines containing quoted text (e.g., testimonials)
       if (/"|“|”/.test(text)) return false;
-      // Remove headings or non-descriptive labels
-      if (/^details$|^specifications$|^size & weight$|^accessories & components$|^features$|^what's in the box$|^features & benefits:?$/i.test(text)) return false;
-      // Remove generic single-word labels (allow two-word feature titles like "Night Light")
-      // Previously lines with fewer than three words were discarded, which removed
-      // meaningful two-word feature names. Only drop lines containing a single word.
-      if (text.split(/\s+/).length < 2) return false;
-      // Remove part numbers (combination of letters and digits)
-      if (/\b[A-Za-z]{2,}[\d]{2,}/.test(text)) return false;
+      // Preserve section headings such as "details", "specifications", "size & weight", etc.
+      // These headings may be followed by content and should not be removed.
+      // Similarly, do not remove single-word labels; keep them intact so they can
+      // accompany their content in downstream processing.
+      // Remove part numbers (combination of letters and digits) only if they do not
+      // match the product SKU or model.  Keep the main product SKU in features.
+      if (/\b[A-Za-z]{2,}[\d]{2,}/.test(text)) {
+        const sku = rec.sku ? String(rec.sku).toLowerCase() : '';
+        const model = rec.specs && rec.specs.model ? String(rec.specs.model).toLowerCase() : '';
+        if (lower === sku || lower === model) {
+          // keep
+        } else {
+          return false;
+        }
+      }
       // Remove copyright, domain names, or company names
       if (/©|\bcom\b|\.com|all rights reserved/.test(lower)) return false;
 
       // Remove lines that duplicate specification details (e.g., 'Rechargeable: Portable with built-in battery.')
       if (/^(rechargeable|massage mode|display|adjustable suction|closed system|ultra-quiet|night light)[^:]*:/i.test(text)) return false;
 
-      // Remove fragmented or multi-language feature lines that don't stand alone (e.g. 'with splash guard', 'Commode Pail only')
-      if (/support.*soporte|puntas de la|dossier|leg tip|commode pail only|with splash guard/i.test(lower)) return false;
-      // Remove lines starting with 'with ' that are too short (less than five words) and likely incomplete
-      if (/^with\s+/i.test(lower) && text.split(/\s+/).length <= 5) return false;
+      // Preserve fragmented or add-on lines.  Do not remove lines starting with
+      // "with" or lines like "commode pail only"; these may be part of a valid
+      // description.
 
 
       // Remove e‑commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
       if (/\bin\s*stock\b/.test(lower)) return false;
       if (/add to cart|quantity|check if you'?re eligible|recommended by professionals|customer reviews|write a review|use & operation|parts & accessories|sold out|use and operation|customer review/i.test(lower)) return false;
 
-      // Remove other storefront and account prompts or marketing copy that leaks into features/specs
-      if (/shopping cart|wish list|compare|create an account|sign in|log in|checkout|vacuum suction up to|assembly|eligibility|hsa|simple store|replacement bags|covid|19 update/i.test(lower)) return false;
+      // Remove other storefront and account prompts or marketing copy that leaks into features/specs.
+      // Keep descriptive phrases like "vacuum suction up to" as part of the feature set.
+      if (/shopping cart|wish list|compare|create an account|sign in|log in|checkout|assembly|eligibility|hsa|simple store|replacement bags|covid|19 update/i.test(lower)) return false;
 
-      // Remove headings or labels that are not product features, such as "weight capacity:" or "commode pail"
-      if (/^weight\s+capacity:?$/i.test(lower)) return false;
-      if (/^commode\s+pail$/i.test(lower)) return false;
-      // Remove lines ending in 'only' with few words (likely incomplete)
-      if (/only$/i.test(lower) && text.split(/\s+/).length <= 4) return false;
-      // Remove spec-like lines that duplicate spec keys or values
-      if (rec.specs && typeof rec.specs === 'object') {
-        // Build a set of lowercase tokens from spec keys and values
-        const specTokens = new Set();
-        for (const [k, v] of Object.entries(rec.specs)) {
-          specTokens.add(String(k).toLowerCase());
-          if (typeof v === 'string') {
-            for (const w of v.toLowerCase().split(/\s+/)) {
-              specTokens.add(w);
-            }
-          }
-        }
-        const tokens = lower.split(/\s+/);
-        if (tokens.every((t) => specTokens.has(t))) return false;
-      }
-      // Remove lines that look like headings or assembly/benefits labels
-      if (/features\s*&?\s*benefits|assembly|very quiet|single pumping|dual pumping|s1 plus|check out faster/i.test(lower)) return false;
-      // Remove lines consisting solely of spec keys (e.g. 'seidentopf binocular head', 'built-in mechanical stage with abbe na1.25 condenser &iris')
-      if (/^(seidentopf|wf10x|built-in|4x,?\s*10x|vacuum suction up)/i.test(text)) return false;
+      // Preserve headings like "weight capacity" and "commode pail"; these belong in the
+      // specifications or description sections and should not be removed.
+      // Do not drop lines that end with "only"; these may legitimately describe
+      // a component (e.g., "Commode Pail Only").
+      // Do not drop lines simply because all of their tokens match spec keys or values.
+      // Some features may duplicate spec terms and should still be kept.
+      // Remove only obvious e‑commerce phrases like "check out faster".  Keep
+      // other labels (e.g. "features & benefits", "assembly", "very quiet", etc.)
+      if (/check out faster/i.test(lower)) return false;
+      // Do not drop lines that start with model identifiers or technical descriptors
+      // like "Seidentopf", "WF10X", "Built-in", "4x, 10x", or "Vacuum suction up". These
+      // belong in the specification or description.
       return true;
     });
   }
