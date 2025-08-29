@@ -64,8 +64,10 @@ function removeNoise(record) {
       if (/"|“|”/.test(text)) return false;
       // Remove headings or non-descriptive labels
       if (/^details$|^specifications$|^size & weight$|^accessories & components$|^features$|^what's in the box$|^features & benefits:?$/i.test(text)) return false;
-      // Remove generic one-word or two-word labels
-      if (text.split(/\s+/).length < 3) return false;
+      // Remove generic single-word labels (allow two-word feature titles like "Night Light")
+      // Previously lines with fewer than three words were discarded, which removed
+      // meaningful two-word feature names. Only drop lines containing a single word.
+      if (text.split(/\s+/).length < 2) return false;
       // Remove part numbers (combination of letters and digits)
       if (/\b[A-Za-z]{2,}[\d]{2,}/.test(text)) return false;
       // Remove copyright, domain names, or company names
