@@ -949,13 +949,24 @@ app.get("/ingest", async (req, res) => {
           }
         }
       }
+      // 3) Look in features_raw for enumerated items (e.g., "Two (2) 24mm ...") and treat them as included
+      if (Array.isArray(rec.features_raw)) {
+        for (const raw of rec.features_raw) {
+          const line = String(raw || '').trim();
+          // Match lines that start with a spelled-out number or a numeric quantity (optionally in parentheses)
+          if (/^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(line)) {
+            included.push(line);
+          }
+        }
+      }
+
       // Filter out any residual noise, such as testimonials, reviews, contact info, pricing, or accessory kits/stands/cases
       return included.filter((item) => {
         const lower = String(item).toLowerCase().trim();
         // Remove testimonials, reviews, contact info, pricing, or accessory references
         if (/(recommended|review|reviews|customer|based on|gynecologic|gynecologist|oncologist|surgeon|hospital|kit|stand|case|trolley|switch|power supply|hard case|cable|set|price|\$|add to cart|sold out|parts & accessories)/.test(lower)) return false;
-        // Remove lines that start with 'with' or 'and' and are very short (likely incomplete)
-        if (/^(with|and)\b/.test(lower) && lower.split(/\s+/).length <= 4) return false;
+        // Remove lines that start with 'with' or 'and' and are very short (likely incomplete) unless they contain a quantity
+        if (/^(with|and)\b/.test(lower) && lower.split(/\s+/).length <= 4 && !/\d/.test(lower)) return false;
         return true;
       });
     }
