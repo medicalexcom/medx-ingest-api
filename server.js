@@ -927,8 +927,10 @@ app.get("/ingest", async (req, res) => {
             }
             // Only include lines that look like actual items (contain item keywords or numbers)
             if (/\b(breast|shield|bottle|tube|adapter|manual|pump|diaphragm|cap|diaphragms|flange|flanges|air tube|stand|case|kit|tubing|body|bodies|bottles|cable|cables)\b/i.test(lower) || /\d/.test(lower)) {
-              // Remove leading bullets or numbers and trim
-              const cleaned = line.replace(/^[-•\d.\s]+/, '').trim();
+              // Remove leading hyphens, bullets and whitespace but preserve quantity numbers.  Previously the regex
+              // removed any leading digits as well, which stripped quantity like "2 diaphragms".  Now only hyphens,
+              // bullet characters and whitespace are removed.
+              const cleaned = line.replace(/^[-•\s]+/, '').trim();
               if (cleaned) included.push(cleaned);
             }
             // If the line does not match item keywords or numbers, skip it but continue capturing
@@ -949,12 +951,18 @@ app.get("/ingest", async (req, res) => {
           }
         }
       }
-      // 3) Look in features_raw for enumerated items (e.g., "Two (2) 24mm ...") and treat them as included
+      // 3) Look in features_raw for enumerated items (e.g., "Two (2) 24mm ...") and treat them as included.
+      // Only treat a line as an included item if it looks like a quantity of a physical component (not a specification
+      // such as pressure in mmHg or a description like "4 Operating Modes").  We require the line to start with a
+      // spelled‑out number or a numeric quantity and to contain an item keyword (breast, shield, bottle, tube, valve, etc.),
+      // and we skip lines that contain measurement units such as mmHg, lb, oz, ml, cm, mm or hours.
       if (Array.isArray(rec.features_raw)) {
         for (const raw of rec.features_raw) {
           const line = String(raw || '').trim();
-          // Match lines that start with a spelled-out number or a numeric quantity (optionally in parentheses)
-          if (/^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(line)) {
+          const isQuantityLine = /^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(line);
+          const hasItemKeyword = /\b(breast|shield|bottle|tube|adapter|manual|pump|diaphragm|valve|flange|backflow|protector|bag|connector|body|bodies|duckbill|kit|flanges|caps|membrane)\b/i.test(line);
+          const hasMeasurementUnit = /\b(mmhg|kg|g|lb|lbs|oz|ml|mm|cm|in|inch|"|hours?|mins?)\b/i.test(line);
+          if (isQuantityLine && hasItemKeyword && !hasMeasurementUnit) {
             included.push(line);
           }
         }
