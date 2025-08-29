@@ -960,8 +960,9 @@ app.get("/ingest", async (req, res) => {
         for (const raw of rec.features_raw) {
           const line = String(raw || '').trim();
           const isQuantityLine = /^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(line);
-          const hasItemKeyword = /\b(breast|shield|bottle|tube|adapter|manual|pump|diaphragm|valve|flange|backflow|protector|bag|connector|body|bodies|duckbill|kit|flanges|caps|membrane)\b/i.test(line);
-          const hasMeasurementUnit = /\b(mmhg|kg|g|lb|lbs|oz|ml|mm|cm|in|inch|"|hours?|mins?)\b/i.test(line);
+          const hasItemKeyword = /\b(breast|shield|bottle|tube|tubing|adapter|manual|pump|diaphragm|valve|flange|backflow|protector|bag|connector|body|bodies|duckbill|kit|flanges|caps|membrane)\b/i.test(line);
+          // Only treat true measurement units as a reason to skip (mmHg, kg, g, lb, oz, mL) but allow size descriptors like "24mm" in item names
+          const hasMeasurementUnit = /\b(mmhg|kg|g|lb|lbs|oz|ml)\b/i.test(line);
           if (isQuantityLine && hasItemKeyword && !hasMeasurementUnit) {
             included.push(line);
           }
