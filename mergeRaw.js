@@ -80,6 +80,10 @@ function removeNoise(record) {
       if (/support.*soporte|puntas de la|dossier|leg tip|commode pail only|with splash guard/i.test(lower)) return false;
       // Remove lines starting with 'with ' that are too short (less than five words) and likely incomplete
       if (/^with\s+/i.test(lower) && text.split(/\s+/).length <= 5) return false;
+
+      // Remove headings or labels that are not product features, such as "weight capacity:" or "commode pail"
+      if (/^weight\s+capacity:?$/i.test(lower)) return false;
+      if (/^commode\s+pail$/i.test(lower)) return false;
       // Remove lines ending in 'only' with few words (likely incomplete)
       if (/only$/i.test(lower) && text.split(/\s+/).length <= 4) return false;
       // Remove spec-like lines that duplicate spec keys or values
