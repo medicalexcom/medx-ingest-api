@@ -43,6 +43,11 @@ function removeNoise(record) {
       const text = String(line || '').trim();
       if (!text) return false;
       const lower = text.toLowerCase();
+      // Preserve any line that mentions warranty details.  Product pages often
+      // include features about parts warranties or pump warranties, which
+      // should be retained even if other patterns might flag them as noise.
+      if (/warranty/i.test(lower)) return true;
+
       // Remove price or quantity info, or upsell prompts
       if (/\$\s*\d/.test(lower) || /\bprice\b/.test(lower) || /\bqty\b/.test(lower) || /sale|discount|clearance/.test(lower)) return false;
       // Remove add to cart, checkout, or shopping cart prompts
@@ -81,12 +86,6 @@ function removeNoise(record) {
       // Remove lines starting with 'with ' that are too short (less than five words) and likely incomplete
       if (/^with\s+/i.test(lower) && text.split(/\s+/).length <= 5) return false;
 
-      // Exclude enumerated included items from features (e.g., "Two (2) 24mm Spectra Breast Flanges").  These belong in
-      // the `included` section.  Detect lines that start with a quantity and contain item keywords, and skip them.
-      const isQuantityLine = /^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(text);
-      const hasItemKw = /\b(breast|shield|bottle|tubing|tube|adapter|manual|pump|diaphragm|valve|flange|backflow|protector|bag|connector|body|duckbill|caps?|diaphragms)\b/i.test(text);
-      const hasUnit = /\b(mmhg|kg|g|lb|lbs|oz|ml)\b/i.test(lower);
-      if (isQuantityLine && hasItemKw && !hasUnit) return false;
 
       // Remove e‑commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
       if (/\bin\s*stock\b/.test(lower)) return false;
