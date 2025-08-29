@@ -121,6 +121,9 @@ function removeNoise(record) {
       // diagrams or multilingual PDFs.
       if (/^three-in-one$|^commode$|^weight capacity:?$|^backrest support/i.test(lower)) return false;
       if (/^respaldo$|^soporte de|^commode pail$|^with splash guard$|^commode pail only$/i.test(lower)) return false;
+
+      // Remove generic tab headings from microscope product feature lists (these belong in sections)
+      if (/^details$|^specifications$|^accessories\s*&\s*components$|^size\s*&\s*weight$/i.test(lower)) return false;
       return true;
     });
   }
