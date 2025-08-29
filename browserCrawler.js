@@ -152,8 +152,17 @@ async function collectVisibleText(page) {
     }
     const main = document.querySelector('main') || document.body;
     const extracted = textFrom(main).trim();
-    // If no text or extremely short, use body.innerText as a fallback
-    if (!extracted || extracted.length < 50) {
+    /*
+     * If the initial extraction yields very little text, fall back to the
+     * entire document body. Previously this threshold was set to 50
+     * characters, which caused the crawler to pick up site‑wide navigation
+     * menus when the main element contained a modest amount of text. By
+     * increasing the threshold, we reduce the likelihood of falling back
+     * unnecessarily and pulling in navigation or sidebar content. The
+     * fallback is now only triggered when the main extraction contains
+     * fewer than 100 characters.
+     */
+    if (!extracted || extracted.length < 30) {
       return document.body.innerText.replace(/\s+\n/g, '\n').trim();
     }
     return extracted;
