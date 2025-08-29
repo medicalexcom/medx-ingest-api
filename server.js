@@ -948,10 +948,14 @@ app.get("/ingest", async (req, res) => {
           if (/commode seat/.test(lower) && !included.some((v) => /seat/i.test(v))) {
             included.push(line.trim());
           }
-          if (/replacement leg set/.test(lower) && !included.some((v) => /leg set/i.test(v))) {
+          if (/replacement\s*leg\s*set|replacement-leg-set/.test(lower) && !included.some((v) => /leg set/i.test(v))) {
             included.push(line.trim());
           }
           if (/leg tip/.test(lower) && !included.some((v) => /leg tip/i.test(v))) {
+            included.push(line.trim());
+          }
+          // Capture AC power adapters or chargers from visible text for pumps (e.g. Spectra, Unimom)
+          if (/\b(ac\s*power\s*adapter|power\s*adapter|adapter\/charger|charger)\b/.test(lower) && !included.some((v) => /adapter|charger/i.test(v))) {
             included.push(line.trim());
           }
         }
