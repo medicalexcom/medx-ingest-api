@@ -52,8 +52,8 @@ function removeNoise(record) {
       if (/\$\s*\d/.test(lower) || /\bprice\b/.test(lower) || /\bqty\b/.test(lower) || /sale|discount|clearance/.test(lower)) return false;
       // Remove add to cart, checkout, or shopping cart prompts
       if (/add to cart|add to wishlist|add to compare|checkout|shopping cart|add to bag/.test(lower)) return false;
-      // Remove insurance or eligibility notes
-      if (/insurance|eligible/.test(lower)) return false;
+      // Do not remove lines mentioning insurance or eligibility, as they may
+      // be important features (e.g. HSA eligibility).  Preserve them.
       // Remove review/testimonial prompts or quoted testimonials
       if (/reviews?|review|write a review|customer reviews|testimonial/.test(lower)) return false;
       if (/\bi have recommended\b|\bi am able\b|\ball rights reserved\b|\bthank you\b|\bbased on\b/.test(lower)) return false;
