@@ -81,9 +81,19 @@ function removeNoise(record) {
       // Remove lines starting with 'with ' that are too short (less than five words) and likely incomplete
       if (/^with\s+/i.test(lower) && text.split(/\s+/).length <= 5) return false;
 
+      // Exclude enumerated included items from features (e.g., "Two (2) 24mm Spectra Breast Flanges").  These belong in
+      // the `included` section.  Detect lines that start with a quantity and contain item keywords, and skip them.
+      const isQuantityLine = /^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(text);
+      const hasItemKw = /\b(breast|shield|bottle|tubing|tube|adapter|manual|pump|diaphragm|valve|flange|backflow|protector|bag|connector|body|duckbill|caps?|diaphragms)\b/i.test(text);
+      const hasUnit = /\b(mmhg|kg|g|lb|lbs|oz|ml)\b/i.test(lower);
+      if (isQuantityLine && hasItemKw && !hasUnit) return false;
+
       // Remove e‑commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
       if (/\bin\s*stock\b/.test(lower)) return false;
       if (/add to cart|quantity|check if you'?re eligible|recommended by professionals|customer reviews|write a review|use & operation|parts & accessories|sold out|use and operation|customer review/i.test(lower)) return false;
+
+      // Remove other storefront and account prompts or marketing copy that leaks into features/specs
+      if (/shopping cart|wish list|compare|create an account|sign in|log in|checkout|vacuum suction up to|assembly|eligibility|hsa|simple store|replacement bags|covid|19 update/i.test(lower)) return false;
 
       // Remove headings or labels that are not product features, such as "weight capacity:" or "commode pail"
       if (/^weight\s+capacity:?$/i.test(lower)) return false;
