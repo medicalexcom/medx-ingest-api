@@ -81,6 +81,10 @@ function removeNoise(record) {
       // Remove lines starting with 'with ' that are too short (less than five words) and likely incomplete
       if (/^with\s+/i.test(lower) && text.split(/\s+/).length <= 5) return false;
 
+      // Remove e‑commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
+      if (/\bin\s*stock\b/.test(lower)) return false;
+      if (/add to cart|quantity|check if you'?re eligible|recommended by professionals|customer reviews|write a review|use & operation|parts & accessories|sold out|use and operation|customer review/i.test(lower)) return false;
+
       // Remove headings or labels that are not product features, such as "weight capacity:" or "commode pail"
       if (/^weight\s+capacity:?$/i.test(lower)) return false;
       if (/^commode\s+pail$/i.test(lower)) return false;
