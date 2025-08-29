@@ -56,7 +56,9 @@ function removeNoise(record) {
       // be important features (e.g. HSA eligibility).  Preserve them.
       // Remove review/testimonial prompts or quoted testimonials
       if (/reviews?|review|write a review|customer reviews|testimonial/.test(lower)) return false;
-      if (/\bi have recommended\b|\bi am able\b|\ball rights reserved\b|\bthank you\b|\bbased on\b/.test(lower)) return false;
+      // Remove common testimonial phrases (e.g. "I have recommended", "I am able", "Thank you", etc.).  Also drop
+      // specific sentences like "While I wish my insurance" which are testimonials rather than features.
+      if (/\bi have recommended\b|\bi am able\b|\ball rights reserved\b|\bthank you\b|\bbased on\b|\bi wish my insurance\b/.test(lower)) return false;
       // Remove phone or fax numbers and contact info
       if (/phone|fax|tel|telephone|call us|contact us|\d{3}[\s.-]\d{3}[\s.-]\d{4}/.test(lower)) return false;
       // Remove covid or pandemic updates
@@ -113,6 +115,12 @@ function removeNoise(record) {
       // Do not drop lines that start with model identifiers or technical descriptors
       // like "Seidentopf", "WF10X", "Built-in", "4x, 10x", or "Vacuum suction up". These
       // belong in the specification or description.
+
+      // Remove specific stray labels or fragments that are not useful as features, particularly
+      // for the ProBasics commode product.  These include generic headings duplicated from
+      // diagrams or multilingual PDFs.
+      if (/^three-in-one$|^commode$|^weight capacity:?$|^backrest support/i.test(lower)) return false;
+      if (/^respaldo$|^soporte de|^commode pail$|^with splash guard$|^commode pail only$/i.test(lower)) return false;
       return true;
     });
   }
