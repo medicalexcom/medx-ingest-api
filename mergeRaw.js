@@ -233,6 +233,48 @@ function removeNoise(record) {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Sanitize the browser's visible_text property.  Some scraped pages leak
+  // navigation menus or category lists into `_browse.visible_text`, which makes
+  // it unreadable and irrelevant for GPT.  Detect obviously noisy visible text
+  // and replace it with a human‑readable fallback (typically the product
+  // description) without altering any other fields.  This logic triggers only
+  // when the visible text is very long, contains many newline‑separated lines,
+  // and does not appear to mention the product's name.  Otherwise, the
+  // original visible_text is preserved.
+  if (rec._browse && typeof rec._browse.visible_text === 'string') {
+    const vt = rec._browse.visible_text.trim();
+    // Count newline‑separated lines; noisy category lists often have dozens
+    // of single‑word lines.
+    const lines = vt.split(/\n+/);
+    // Extract salient words from the product name (words longer than 3 chars)
+    const nameWords = Array.isArray(rec.name_raw ? rec.name_raw.split(/\s+/) : [])
+      ? rec.name_raw.split(/\s+/).filter(w => w.length > 3).map(w => w.toLowerCase())
+      : [];
+    const lowerVt = vt.toLowerCase();
+    const containsName = nameWords.some(w => lowerVt.includes(w));
+    // If the visible text looks like a long list of categories (over 30 lines)
+    // and does not contain any of the product name words, treat it as noise.
+    if (lines.length > 30 && !containsName) {
+      // Prefer description_raw for the fallback; otherwise use the cleaned
+      // description from sections or leave empty.  Do not remove the existing
+      // description or other fields.
+      let fallback = '';
+      if (rec.description_raw && typeof rec.description_raw === 'string') {
+        fallback = rec.description_raw.trim();
+      } else if (rec.description_md && typeof rec.description_md === 'string') {
+        fallback = rec.description_md.trim();
+      } else if (rec.sections && typeof rec.sections.description === 'string') {
+        fallback = rec.sections.description.trim();
+      }
+      // Only set visible_text if a fallback is available.  If no fallback is
+      // present, leave the existing visible_text unchanged.
+      if (fallback) {
+        rec._browse.visible_text = fallback;
+      }
+    }
+  }
+
   return rec;
 }
 
