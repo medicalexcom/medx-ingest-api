@@ -203,7 +203,21 @@ function removeNoise(record) {
   // original `manuals` array to preserve backwards compatibility with any
   // existing consumers of the API.
   if (Array.isArray(rec.manuals) && !rec.pdf_docs) {
-    rec.pdf_docs = [...rec.manuals];
+    // Encode spaces in PDF URLs so downstream fetchers can retrieve
+    // documents with spaces in their filenames (e.g. "Product Information.pdf").
+    rec.pdf_docs = rec.manuals.map(url => {
+      if (typeof url !== 'string') return url;
+      // Only replace literal spaces; avoid double‑encoding already encoded strings.
+      return url.replace(/ /g, '%20');
+    });
+  }
+
+  // If pdf_docs already exists, ensure spaces are encoded for consistency
+  if (Array.isArray(rec.pdf_docs)) {
+    rec.pdf_docs = rec.pdf_docs.map(url => {
+      if (typeof url !== 'string') return url;
+      return url.replace(/ /g, '%20');
+    });
   }
 
   // Deduplicate feature lists to prevent duplicate bullets leaking into
@@ -218,6 +232,17 @@ function removeNoise(record) {
       const normalised = typeof item === 'string' ? item.trim().toLowerCase() : '';
       if (normalised === '') return false;
       if (seen.has(normalised)) return false;
+      // Filter out obvious instruction lines or warnings from manuals which are not
+      // true product features.  Heuristics: exclude lines that include common
+      // instructional words (e.g. "do not", "warning", "caution", "manual"),
+      // or that are excessively long (over ~150 characters) or contain
+      // newline characters.
+      if (/do\s+not|warning|caution|manual|future\s+reference|pendant|control|allow\s+a\s+slight/.test(normalised)) {
+        return false;
+      }
+      if (typeof item === 'string' && (item.length > 150 || /\n/.test(item))) {
+        return false;
+      }
       seen.add(normalised);
       return true;
     });
