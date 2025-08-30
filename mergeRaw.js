@@ -410,8 +410,332 @@ function removeNoise(record) {
     }
   }
 
-  return rec;
+      // ---------------------------------------------------------------------------
+      // Additional enrichment and provenance tracking
+      //
+      // After the existing noise removal and deduplication logic, extract and
+      // normalise feature/spec sections from the Playwright browse results,
+      // categorise feature sentences, perform fuzzy deduplication across
+      // sources, isolate HTML/structured features/specs, and compute a
+      // simple quality score.  These enhancements preserve source provenance
+      // while maintaining backwards‑compatible top‑level fields.
+
+      // 1. Extract features and specs from the dynamic browse sections.
+      if (rec._browse && rec._browse.sections && typeof rec._browse.sections === 'object') {
+        const sections = rec._browse.sections;
+        // Gather feature text from the 'features' and 'included' sections.  These
+        // sections may be arrays of strings or a single string; split on
+        // newlines to normalise.  Store the result in rec.features_browse.
+        let featuresBrowseList = [];
+        const featureSources = ['features', 'included'];
+        for (const key of featureSources) {
+          const raw = sections[key];
+          if (!raw) continue;
+          if (Array.isArray(raw)) {
+            for (const item of raw) {
+              if (typeof item === 'string') {
+                featuresBrowseList.push(...item.split(/\n+/));
+              }
+            }
+          } else if (typeof raw === 'string') {
+            featuresBrowseList.push(...raw.split(/\n+/));
+          }
+        }
+        featuresBrowseList = featuresBrowseList
+          .map(s => String(s).trim())
+          .filter(s => s.length > 0);
+        // Assign to rec.features_browse after deduplication.  Do not remove
+        // from rec.features_raw; the top‑level list should continue to
+        // aggregate all features for backwards compatibility.
+        if (featuresBrowseList.length) {
+          const dedupedBrowse = deduplicateSimilarLines(featuresBrowseList);
+          rec.features_browse = dedupedBrowse;
+          // Push unique browse lines into features_raw if they are not already
+          // present.  Maintain a set for quick lookups.
+          const seen = new Set(Array.isArray(rec.features_raw) ? rec.features_raw.map(v => String(v).toLowerCase()) : []);
+          for (const line of dedupedBrowse) {
+            const norm = String(line).toLowerCase();
+            if (!seen.has(norm)) {
+              (rec.features_raw ||= []).push(line);
+              seen.add(norm);
+            }
+          }
+        }
+        // Gather specifications from the 'specifications' section.  It may be an
+        // array of strings or a single string containing multiple lines.  Parse
+        // each line into key/value pairs using parseSpecLine.  Store them in
+        // rec.specs_browse and also merge into rec.specs when the key is
+        // absent.  Keys are normalised to lowercase with underscores.
+        let specsBrowse = {};
+        const specsRaw = sections.specifications;
+        if (specsRaw) {
+          let specLines = [];
+          if (Array.isArray(specsRaw)) {
+            for (const item of specsRaw) {
+              if (typeof item === 'string') {
+                specLines.push(...item.split(/\n+/));
+              }
+            }
+          } else if (typeof specsRaw === 'string') {
+            specLines = specsRaw.split(/\n+/);
+          }
+          for (const line of specLines) {
+            const [key, value] = parseSpecLine(line);
+            if (key && value) {
+              specsBrowse[key] = value;
+            }
+          }
+        }
+        if (Object.keys(specsBrowse).length) {
+          rec.specs_browse = specsBrowse;
+          // Merge browse specs into unified specs without overwriting existing
+          // keys.  rec.specs is expected to be an object.
+          rec.specs = rec.specs && typeof rec.specs === 'object' ? rec.specs : {};
+          for (const [k, v] of Object.entries(specsBrowse)) {
+            if (!(k in rec.specs)) {
+              rec.specs[k] = v;
+            }
+          }
+        }
+      }
+
+      // 2. Ensure per-source arrays for PDF and structured data exist.  These
+      // arrays may have been populated earlier by pdfEnrichment or other
+      // modules.  Normalise undefined values to empty arrays.
+      rec.features_pdf = Array.isArray(rec.features_pdf) ? rec.features_pdf : [];
+      rec.specs_pdf = Array.isArray(rec.specs_pdf) ? rec.specs_pdf : [];
+      rec.features_structured = Array.isArray(rec.features) ? [...rec.features] : [];
+      // Compute specs_structured by subtracting keys that appear in specs_pdf and specs_browse.
+      const pdfSpecKeys = new Set(rec.specs_pdf.map(obj => obj.key));
+      const browseSpecKeys = rec.specs_browse ? new Set(Object.keys(rec.specs_browse)) : new Set();
+      rec.specs_structured = {};
+      if (rec.specs && typeof rec.specs === 'object') {
+        for (const [k, v] of Object.entries(rec.specs)) {
+          if (!pdfSpecKeys.has(k) && !browseSpecKeys.has(k)) {
+            rec.specs_structured[k] = v;
+          }
+        }
+      }
+
+      // 3. Derive HTML features by subtracting PDF, browse and structured
+      // features from the aggregate features_raw.  Use lowercase normalised
+      // strings for set membership tests.  Keep ordering consistent with
+      // features_raw.
+      const pdfFeaturesSet = new Set(rec.features_pdf.map(f => String(f).toLowerCase()));
+      const browseFeaturesSet = new Set(Array.isArray(rec.features_browse) ? rec.features_browse.map(f => String(f).toLowerCase()) : []);
+      const structuredFeaturesSet = new Set(rec.features_structured.map(f => String(f).toLowerCase()));
+      rec.features_html = [];
+      if (Array.isArray(rec.features_raw)) {
+        for (const feat of rec.features_raw) {
+          const lower = String(feat).toLowerCase();
+          if (!pdfFeaturesSet.has(lower) && !browseFeaturesSet.has(lower) && !structuredFeaturesSet.has(lower)) {
+            rec.features_html.push(feat);
+          }
+        }
+      }
+
+      // 4. Fuzzy deduplication across all feature lists.  Use a high threshold
+      // to collapse near-duplicate phrases without losing genuinely distinct
+      // features.  Perform deduplication separately on each source list and
+      // update the aggregate features_raw accordingly.
+      rec.features_pdf = deduplicateSimilarLines(rec.features_pdf, 0.8);
+      rec.features_browse = Array.isArray(rec.features_browse) ? deduplicateSimilarLines(rec.features_browse, 0.8) : rec.features_browse;
+      rec.features_structured = deduplicateSimilarLines(rec.features_structured, 0.8);
+      rec.features_html = deduplicateSimilarLines(rec.features_html, 0.8);
+      // Rebuild features_raw as the union of per-source lists, preserving order.
+      const combinedSeen = new Set();
+      const combined = [];
+      for (const list of [rec.features_structured, rec.features_pdf, rec.features_browse, rec.features_html]) {
+        if (!Array.isArray(list)) continue;
+        for (const line of list) {
+          const norm = String(line).toLowerCase();
+          if (!combinedSeen.has(norm)) {
+            combined.push(line);
+            combinedSeen.add(norm);
+          }
+        }
+      }
+      rec.features_raw = combined;
+
+      // 5. Filter out non‑English lines using a simple heuristic.  Iterate
+      // through features_raw and keep only lines that appear to be English.
+      rec.features_raw = rec.features_raw.filter(item => isEnglishLine(String(item)));
+      rec.features_pdf = rec.features_pdf.filter(item => isEnglishLine(String(item)));
+      rec.features_browse = Array.isArray(rec.features_browse) ? rec.features_browse.filter(item => isEnglishLine(String(item))) : rec.features_browse;
+      rec.features_structured = rec.features_structured.filter(item => isEnglishLine(String(item)));
+      rec.features_html = rec.features_html.filter(item => isEnglishLine(String(item)));
+
+      // 6. Categorise feature sentences into features, benefits and included
+      // items.  Use classifySentence to assign each line to a category and
+      // accumulate into an object keyed by category.  Consumers may use
+      // these categories to generate more targeted copy.
+      const categories = { feature: [], benefit: [], included: [] };
+      for (const line of rec.features_raw) {
+        const cat = classifySentence(String(line));
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(line);
+      }
+      rec.features_by_category = categories;
+
+      // 7. Compute a quality score based on the number of features and
+      // specifications present and whether PDF manuals were available.  The
+      // resulting score ranges from 0 to 1.  Flag records with low scores
+      // for manual review.
+      const score = computeQualityScore(rec);
+      rec.quality_score = score;
+      rec.needs_review = score < 0.7;
+
+      return rec;
 }
 
 // Export removeNoise for use in other modules (e.g., server.js)
 export { removeNoise };
+
+/* --------------------------------------------------------------------------
+ * Helper functions for advanced deduplication, language detection,
+ * specification parsing, sentence classification and quality scoring.
+ * These functions are defined outside of removeNoise to keep the
+ * implementation modular and reusable.  They are intentionally simple
+ * heuristics; more sophisticated natural language processing could be
+ * introduced in the future without breaking the API.
+ */
+
+// Tokenise a string into lowercase words, removing punctuation and extra
+// whitespace.  Useful for similarity comparisons.
+function tokenize(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// Compute the Jaccard similarity between two strings.  The Jaccard
+// coefficient measures the intersection over union of token sets.  Values
+// range from 0 (no overlap) to 1 (identical sets).
+function jaccardSimilarity(a, b) {
+  const setA = new Set(tokenize(a));
+  const setB = new Set(tokenize(b));
+  const intersectionSize = [...setA].filter(x => setB.has(x)).length;
+  const unionSize = new Set([...setA, ...setB]).size;
+  return unionSize === 0 ? 0 : intersectionSize / unionSize;
+}
+
+// Remove near-duplicate lines from an array of strings.  Two strings are
+// considered duplicates when their Jaccard similarity meets or exceeds
+// the provided threshold (default 0.8).  The first occurrence is kept.
+function deduplicateSimilarLines(lines, threshold = 0.8) {
+  const out = [];
+  for (const line of lines || []) {
+    let duplicate = false;
+    for (const existing of out) {
+      if (jaccardSimilarity(line, existing) >= threshold) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) out.push(line);
+  }
+  return out;
+}
+
+// Parse a specification line into a [key, value] pair.  Recognises
+// patterns like "Key: Value", "Key – Value" (with an en dash), or
+// measurements such as "Total weight capacity 700 lbs".  Returns
+// [null, null] if no plausible spec is found.
+function parseSpecLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return [null, null];
+  // Colon or en dash separated key/value
+  let m = text.match(/^([^:–]+):\s*(.+)$/);
+  if (m) {
+    const keyRaw = m[1].trim();
+    const value = m[2].trim();
+    const valLower = value.toLowerCase();
+    if (keyRaw && value && (/[0-9]/.test(value) || /(lb|lbs|kg|g|oz|ft|in|cm|mm|inch|inches|year|warranty|pcs|pieces)/i.test(valLower))) {
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      return [key, value];
+    }
+  }
+  // Hyphen separated key/value (with spaces around the hyphen)
+  m = text.match(/^(.+?)\s+-\s+(.+)$/);
+  if (m) {
+    const keyRaw = m[1].trim();
+    const value = m[2].trim();
+    const valLower = value.toLowerCase();
+    if (keyRaw && value && (/[0-9]/.test(value) || /(lb|lbs|kg|g|oz|ft|in|cm|mm|inch|inches|year|warranty|pcs|pieces)/i.test(valLower))) {
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      return [key, value];
+    }
+  }
+  // Measurement pattern without colon/hyphen (e.g. "Total weight capacity 700 lbs")
+  const m2 = text.match(/^(.*?)(?:\s+)(\d+\s*(?:lb|lbs|kg|g|oz|ft|in|cm|mm|"|inch|inches)\b.*)$/i);
+  if (m2) {
+    const keyRaw = m2[1].trim();
+    const value = m2[2].trim();
+    if (keyRaw && value) {
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      return [key, value];
+    }
+  }
+  return [null, null];
+}
+
+// Heuristic to detect whether a line appears to be English.  Counts the
+// proportion of ASCII letters relative to the total number of characters
+// (excluding whitespace) and ensures at least one common English stopword
+// appears.  Lines failing these checks are treated as non‑English and
+// filtered out.
+function isEnglishLine(text) {
+  const cleaned = String(text || '');
+  const letters = cleaned.replace(/[^A-Za-z]/g, '').length;
+  const total = cleaned.replace(/\s+/g, '').length;
+  if (total === 0) return false;
+  const ratio = letters / total;
+  if (ratio < 0.6) return false;
+  const lower = cleaned.toLowerCase();
+  const stopwords = [' the ', ' and ', ' with ', ' for ', ' from ', ' of ', ' to ', ' an ', ' a ', ' in '];
+  let hasStop = false;
+  for (const w of stopwords) {
+    if (lower.includes(w)) { hasStop = true; break; }
+  }
+  return hasStop;
+}
+
+// Simple rule‑based classifier to categorise a feature sentence as a
+// 'feature', 'benefit' or 'included' item.  Looks for indicative
+// keywords and falls back to 'feature' when ambiguous.
+function classifySentence(text) {
+  const s = String(text || '').toLowerCase();
+  const includedKeywords = ['includes', 'comes with', 'in the box', 'kit includes', 'package includes', 'included'];
+  for (const kw of includedKeywords) {
+    if (s.includes(kw)) return 'included';
+  }
+  const benefitKeywords = ['ideal for', 'helps', 'benefit', 'provides', 'for use', 'designed to', 'allows you', 'great for', 'beneficial'];
+  for (const kw of benefitKeywords) {
+    if (s.includes(kw)) return 'benefit';
+  }
+  return 'feature';
+}
+
+// Compute a quality score for a record.  The score ranges from 0 to 1 and
+// reflects the richness of the product description.  Points are awarded
+// for having multiple features, multiple specification entries, and
+// available PDF documents.  Additional points are given when PDF‑
+// sourced features exist.  The weighting can be tuned empirically.
+function computeQualityScore(rec) {
+  let score = 0;
+  // Base points for having at least a handful of features
+  const featureCount = Array.isArray(rec.features_raw) ? rec.features_raw.length : 0;
+  if (featureCount >= 3) score += 0.4; else if (featureCount >= 1) score += 0.2;
+  // Base points for having specification entries
+  const specCount = rec.specs && typeof rec.specs === 'object' ? Object.keys(rec.specs).length : 0;
+  if (specCount >= 3) score += 0.4; else if (specCount >= 1) score += 0.2;
+  // Bonus for PDF documents available
+  if (Array.isArray(rec.pdf_docs) && rec.pdf_docs.length > 0) score += 0.1;
+  // Bonus for having at least one PDF‑sourced feature
+  if (Array.isArray(rec.features_pdf) && rec.features_pdf.length > 0) score += 0.1;
+  // Clamp score to [0, 1]
+  if (score > 1) score = 1;
+  return score;
+}
