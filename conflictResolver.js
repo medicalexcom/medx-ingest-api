@@ -85,4 +85,4 @@ function resolveData(A = {}, B = {}, C = {}) {
   return { output, conflicts };
 }
 
-export { resolveField, resolveData }; 
+export { resolveField, resolveData };
