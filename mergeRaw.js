@@ -28,8 +28,76 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
 }
 
 /**
+ * A list of phrases commonly found in site navigation or promotional
+ * copy that are not relevant to the actual product.  Lines containing
+ * any of these keywords will be removed from textual fields.  Note that
+ * this list is intentionally conservative: it targets only clearly
+ * non‑product categories (e.g. site sections or general services) and
+ * seasonal promotions.  Feel free to extend this list as needed.
+ */
+const NOISE_KEYWORDS = [
+  'inventory management',
+  'vaccine management',
+  'biomedical equipment solutions',
+  'instrument management services',
+  'technology consultants',
+  'distribution',
+  'medical waste management',
+  'drug disposal',
+  'patient home delivery',
+  'medical freight management',
+  'lab management',
+  'lab consulting',
+  'lab information systems',
+  'lab results',
+  'clinical and equipment setup',
+  'training and compliance',
+  'patient care and engagement',
+  'remote patient monitoring',
+  'financial services',
+  'revenue cycle management',
+  'invoice management',
+  'capital medical equipment',
+  'real estate solutions',
+  'analytics',
+  'ecommerce services',
+  'flu season',
+  'pre-book',
+  'covid-19 vaccines',
+];
+
+/**
+ * Helper to remove noise keywords from a block of text.  Splits the text
+ * into lines, filters out any line containing one of the configured
+ * noise keywords, then rejoins the remaining lines.  Trims trailing
+ * whitespace from the result.
+ *
+ * @param {string} text The raw text to clean
+ * @returns {string} A cleaned version of the text with noise removed
+ */
+function removeNoiseFromString(text) {
+  if (!text) return '';
+  const lines = String(text).split('\n');
+  const filtered = lines.filter((line) => {
+    const lower = line.toLowerCase().trim();
+    if (!lower) return false;
+    // Drop the line if it contains any noise keyword
+    for (const kw of NOISE_KEYWORDS) {
+      if (lower.includes(kw)) return false;
+    }
+    return true;
+  });
+  return filtered.join('\n').trim();
+}
+
+/**
  * Remove noise from a merged record.
  * Filters out e-commerce clutter, pricing, part numbers, and other non-product data.
+ * In addition to the existing heuristics on `features_raw` and `specs`, this
+ * function now also strips out navigation and promotional keywords from
+ * textual fields such as `description_raw`, `tabs`, and the dynamic
+ * browse fields.  The `pdf_text` field is left unchanged to allow
+ * manual tuning later.
  *
  * @param {object} record The merged product record.
  * @returns {object} A cleaned product record.
@@ -94,7 +162,6 @@ function removeNoise(record) {
       // "with" or lines like "commode pail only"; these may be part of a valid
       // description.
 
-
       // Remove e‑commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
       if (/\bin\s*stock\b/.test(lower)) return false;
       if (/add to cart|quantity|check if you'?re eligible|recommended by professionals|customer reviews|write a review|use & operation|parts & accessories|sold out|use and operation|customer review/i.test(lower)) return false;
@@ -116,14 +183,12 @@ function removeNoise(record) {
       // like "Seidentopf", "WF10X", "Built-in", "4x, 10x", or "Vacuum suction up". These
       // belong in the specification or description.
 
-      // Remove specific stray labels or fragments that are not useful as features, particularly
-      // for the ProBasics commode product.  These include generic headings duplicated from
-      // diagrams or multilingual PDFs.
-      if (/^three-in-one$|^commode$|^weight capacity:?$|^backrest support/i.test(lower)) return false;
-      if (/^respaldo$|^soporte de|^commode pail$|^with splash guard$|^commode pail only$/i.test(lower)) return false;
+      // Finally, filter out navigation/promotional keywords from features_raw.
+      for (const kw of NOISE_KEYWORDS) {
+        if (lower.includes(kw)) return false;
+      }
 
-      // Remove generic tab headings from microscope product feature lists (these belong in sections)
-      if (/^details$|^specifications$|^accessories\s*&\s*components$|^size\s*&\s*weight$/i.test(lower)) return false;
+      // Otherwise keep the line
       return true;
     });
   }
@@ -133,7 +198,7 @@ function removeNoise(record) {
     for (const key of Object.keys(rec.specs)) {
       const lowerKey = key.toLowerCase();
       // Part number keys: contain digits and underscores (e.g. ip730_2101) or are obviously ordering references
-      if (/(\d.*_.*\d)|(_\d+$)/.test(key)) {
+      if (/([0-9].*_.*[0-9])|(_[0-9]+$)/.test(key)) {
         delete rec.specs[key];
         continue;
       }
@@ -206,6 +271,45 @@ function removeNoise(record) {
       seen.add(normalised);
       return true;
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Additional cleaning: remove navigation and promotional noise from other
+  // textual fields.  We avoid altering pdf_text so that manual content can
+  // be tuned independently later.
+
+  // Clean description_raw (if present) by removing noisy lines
+  if (typeof rec.description_raw === 'string') {
+    rec.description_raw = removeNoiseFromString(rec.description_raw);
+  }
+
+  // Clean tabs: drop any tab whose title or text contains a noise keyword
+  if (Array.isArray(rec.tabs)) {
+    rec.tabs = rec.tabs.filter((tab) => {
+      const title = (tab.title || '').toString().toLowerCase();
+      const text = (tab.text || '').toString().toLowerCase();
+      for (const kw of NOISE_KEYWORDS) {
+        if (title.includes(kw) || text.includes(kw)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  // Clean browser-collected visible text and sections
+  if (rec._browse) {
+    if (typeof rec._browse.visible_text === 'string') {
+      rec._browse.visible_text = removeNoiseFromString(rec._browse.visible_text);
+    }
+    if (rec._browse.sections && typeof rec._browse.sections === 'object') {
+      for (const key of Object.keys(rec._browse.sections)) {
+        const val = rec._browse.sections[key];
+        if (typeof val === 'string') {
+          rec._browse.sections[key] = removeNoiseFromString(val);
+        }
+      }
+    }
   }
 
   return rec;
