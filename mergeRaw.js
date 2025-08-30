@@ -48,6 +48,22 @@ function removeNoise(record) {
       // should be retained even if other patterns might flag them as noise.
       if (/warranty/i.test(lower)) return true;
 
+      // Remove headings or instructions from user manuals that should not appear in feature lists.
+      // Many scraped pages include manual lines like "Dealer: This manual must be given to the user",
+      // "User: Before using this bed, read this manual and save for future reference", and similar.
+      // Drop any line that starts with these generic labels or safety warnings.
+      if (/^(dealer\s*:|user\s*:|warning|notice|special notes|save these instructions|important|safety summary)/i.test(lower)) return false;
+      // Remove lines that instruct the reader to read the manual or caution about using the product.
+      if (/(read\s+this\s+manual|before\s+using\s+this|before\s+attempting\s+to\s+use|before\s+attempting\s+to\s+operate)/i.test(lower)) return false;
+      // Remove generic headings commonly found in manuals or product pages that do not describe the product itself.
+      // Examples include "parts diagram", "technical resources", "download catalog", "accessories", "specification",
+      // "specifications", "product specifications", "dimensions" and "features/benefits".  These headings often accompany
+      // non‑feature content such as links or tables and should not be emitted as features.
+      if (/(parts\s+diagram|technical\s+resources|technical\s+documents|technical\s+downloads|owners?\s+manual|owner's\s+manual|download\s+catalog|accessories\b|hcpcs\s+reimbursement|specification(s)?\b|product\s+specifications?|dimension(s)?\b|features\s*\/\s*benefits|features\s+and\s+benefits)/i.test(lower)) return false;
+      // Remove lines that are entirely uppercase and contain more than two words.
+      // Such lines are often section headings or navigation prompts rather than product features.
+      if (/^[^a-z]*$/.test(text) && text.trim().split(/\s+/).length > 2) return false;
+
       // Remove price or quantity info, or upsell prompts
       if (/\$\s*\d/.test(lower) || /\bprice\b/.test(lower) || /\bqty\b/.test(lower) || /sale|discount|clearance/.test(lower)) return false;
       // Remove add to cart, checkout, or shopping cart prompts
