@@ -246,6 +246,46 @@ function removeNoise(record) {
       seen.add(normalised);
       return true;
     });
+
+    // Combine fragmented feature lines back together and remove obvious non-feature
+    // entries.  Many product pages break a single feature across multiple list
+    // items (e.g. "Split-pan design with removable bed ends is easy", "to setup.").
+    // Merge such fragments by appending lines that begin with lowercase letters
+    // to the previous line when the previous line does not end in punctuation.
+    if (Array.isArray(rec.features_raw)) {
+      const merged = [];
+      let current = '';
+      for (const rawItem of rec.features_raw) {
+        if (!rawItem || typeof rawItem !== 'string') continue;
+        const trimmed = rawItem.trim();
+        if (!trimmed) continue;
+        if (current === '') {
+          current = trimmed;
+          continue;
+        }
+        // Append fragments that start with lowercase letters when the current
+        // line does not end with punctuation, or when the fragment begins
+        // with a conjunction or preposition (e.g. "and", "as", "to", "for").
+        const isLowerStart = /^[a-z].*/.test(trimmed);
+        const isContinuation = /^(and|as|to|for|with|in|on)\b/.test(trimmed);
+        if ((!/[.!?]$/.test(current.trim()) && isLowerStart) || isContinuation) {
+          current = `${current} ${trimmed}`;
+        } else {
+          merged.push(current);
+          current = trimmed;
+        }
+      }
+      if (current) merged.push(current);
+      // Remove entries that look like specification labels or key/value pairs.
+      rec.features_raw = merged.filter(item => {
+        const text = item.trim().toLowerCase();
+        // Exclude spec-like items such as dimensions or warranty statements.
+        if (/^(bed height|sleep surface|weight capacity|max patient weight|assembled bed|assembled bed weight|limited warranty)/i.test(text)) return false;
+        // Exclude items containing a colon (these are likely spec key/value pairs).
+        if (item.includes(':')) return false;
+        return true;
+      });
+    }
   }
   if (Array.isArray(rec.features)) {
     const seen = new Set();
@@ -256,6 +296,67 @@ function removeNoise(record) {
       seen.add(normalised);
       return true;
     });
+  }
+
+  // Populate specs from feature lines when no specs were extracted.  Some sites
+  // embed technical specifications within the bullet list rather than in a
+  // dedicated table.  When the `specs` object is empty, attempt to parse
+  // colon-separated or measurement lines from the features and move them
+  // into the specs map.
+  if (rec.specs && typeof rec.specs === 'object' && Object.keys(rec.specs).length === 0 && Array.isArray(rec.features_raw)) {
+    const extractedSpecs = {};
+    const remaining = [];
+    for (const item of rec.features_raw) {
+      const line = (item || '').trim();
+      let matched = false;
+      // Match patterns like "Key: Value" or "Key – Value" (colon or en dash). Only
+      // treat it as a specification if the value contains digits or known
+      // measurement units. This helps avoid capturing feature sentences that
+      // happen to contain a colon (e.g. marketing taglines).
+      let m = line.match(/^([^:–]+):\s*(.+)$/);
+      if (m) {
+        const keyRaw = m[1].trim();
+        const value = m[2].trim();
+        const valLower = value.toLowerCase();
+        if (keyRaw && value && (/[0-9]/.test(value) || /(lb|lbs|kg|g|oz|ft|in|cm|mm|inch|inches|year|warranty|pcs|pieces)/i.test(valLower))) {
+          const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+          extractedSpecs[key] = value;
+          matched = true;
+        }
+      } else {
+        // Match patterns like "Key - Value" only when the hyphen has spaces on both sides.
+        m = line.match(/^(.+?)\s+-\s+(.+)$/);
+        if (m) {
+          const keyRaw = m[1].trim();
+          const value = m[2].trim();
+          const valLower = value.toLowerCase();
+          if (keyRaw && value && (/[0-9]/.test(value) || /(lb|lbs|kg|g|oz|ft|in|cm|mm|inch|inches|year|warranty|pcs|pieces)/i.test(valLower))) {
+            const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+            extractedSpecs[key] = value;
+            matched = true;
+          }
+        } else {
+          // Match patterns like "Total weight capacity 700 lbs" or similar.  Only
+          // parse lines with numbers and measurement units to avoid capturing
+          // descriptive sentences.
+          const m2 = line.match(/^(.*?)(?:\s+)(\d+\s*(?:lb|lbs|kg|g|oz|ft|in|cm|mm|"|inch|inches)\b.*)$/i);
+          if (m2) {
+            const keyRaw = m2[1].trim();
+            const value = m2[2].trim();
+            if (keyRaw && value) {
+              const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+              extractedSpecs[key] = value;
+              matched = true;
+            }
+          }
+        }
+      }
+      if (!matched) remaining.push(item);
+    }
+    if (Object.keys(extractedSpecs).length > 0) {
+      rec.specs = { ...extractedSpecs };
+      rec.features_raw = remaining;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -278,9 +379,18 @@ function removeNoise(record) {
       : [];
     const lowerVt = vt.toLowerCase();
     const containsName = nameWords.some(w => lowerVt.includes(w));
-    // If the visible text looks like a long list of categories (over 30 lines)
-    // and does not contain any of the product name words, treat it as noise.
-    if (lines.length > 30 && !containsName) {
+    // Compute punctuation and name mention ratios to detect navigation menus or
+    // category lists.  These lists typically have many lines, very few
+    // punctuation marks, and rarely mention the product name.
+    const punctuationLines = lines.filter(l => /[.,;:!?]/.test(l));
+    const punctuationRatio = lines.length > 0 ? (punctuationLines.length / lines.length) : 0;
+    const nameMentionLinesCount = lines.filter(l => nameWords.some(w => l.toLowerCase().includes(w))).length;
+    const nameMentionRatio = lines.length > 0 ? (nameMentionLinesCount / lines.length) : 0;
+    const looksLikeMenu = lines.length > 10 && punctuationRatio < 0.15 && nameMentionRatio < 0.2;
+    // If the visible text looks like a long list of categories or navigation links,
+    // or if there are more than 30 lines and none of the product name words
+    // appear, treat it as noise and fall back to a known description.
+    if ((lines.length > 30 && !containsName) || looksLikeMenu) {
       // Prefer description_raw for the fallback; otherwise use the cleaned
       // description from sections or leave empty.  Do not remove the existing
       // description or other fields.
