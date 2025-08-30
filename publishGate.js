@@ -53,5 +53,5 @@ export function computeCompleteness(record = {}, options = {}) {
 export function shouldPublish(record = {}, options = {}) {
   const threshold = options.threshold ?? 95;
   const { completeness_score_0_100: score, missing } = computeCompleteness(record, options);
-  return { ok: missing.length === 0 && score >= threshold, missing, score };
+  return { ok: missing.length === 0 && score >= threshold, missing, score }; 
 }
