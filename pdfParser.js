@@ -520,6 +520,15 @@ const KEYMAP = {
   color: /\bcolor\b/i,
   controller: /\bcontroller\b/i,
   ground_clearance: /\bground\s*clearance\b/i,
+
+  // Additional spec synonyms for broader coverage across products. These
+  // patterns catch fields that occasionally appear in manufacturer
+  // datasheets but were not previously mapped.  Recognizing these
+  // synonyms helps normalize scraped specifications across a wider
+  // variety of products.
+  product_dimensions: [/\bproduct\s*dimensions?\b/i],
+  maximum_range: [/\b(?:maximum\s*)?range\b/i, /\btravel\s*range\b/i],
+  seat_type: [/\bseat\s*type\b/i, /\bseat\s*style\b/i],
 };
 
 // Select the canonical spec names based on synonyms.  Falls back to a raw
@@ -799,6 +808,36 @@ export async function parsePdfFromUrl(url) {
       return { text, pairs, kv, tables, hits };
 }
 
+// Extend KEYMAP with additional synonyms for environmental specifications found in manuals.
+// These extra patterns allow the parser to recognize and map specification headings
+// that appear in standards tables (e.g. IEC 60601) across a variety of product manuals.
+// Without these synonyms, keys like “Power frequency and magnetic field” or
+// “Voltage dips and interruptions” would be ignored because they are not present in the
+// core KEYMAP.  By adding them here we ensure the parsed pdf_kv captures these
+// specifications under consistent canonical names.
+Object.assign(KEYMAP, {
+  power_frequency_and_magnetic_field: [
+    /power\s*frequency.*magnetic.*field/i,
+    /power\s*frequency.*magnetic.*field.*iec.*/i
+  ],
+  voltage_dips_and_interruptions: [
+    /voltage\s*dips.*interruptions/i,
+    /voltage\s*dips.*interruptions.*iec.*/i
+  ],
+  electric_fast_transient_burst: [
+    /electric.*fast.*transient.*burst/i,
+    /fast\s*transient\s*\/\s*burst/i,
+    /fast\s*transient.*burst.*iec.*/i
+  ],
+  surge: [
+    /\bsurge\b/i,
+    /surge.*iec.*/i
+  ],
+  recommended_separation_distances: [
+    /recommended\s*separation\s*distances/i,
+    /table\s*3.*recommended\s*separation\s*distances/i
+  ]
+});
+
 // Named exports for helper functions (optional)
 export { kvPairs, pickBySynonyms, normText };
-
