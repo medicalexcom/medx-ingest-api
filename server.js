@@ -690,7 +690,24 @@ app.get("/ingest", async (req, res) => {
         .filter((l) => isEnglishLineFn(String(l).trim()))
         .filter((l) => !/[\\/]/.test(String(l)))
         .filter((l) => !/\b(español|français)\b/i.test(String(l)))
-        .filter((l) => String(l).trim().toLowerCase() !== 'englishespañolfrançais');
+        .filter((l) => String(l).trim().toLowerCase() !== 'englishespañolfrançais')
+        // Remove generic site navigation categories that appear as features.  These
+        // strings often come from scraped menu or navigation labels (e.g., “Mobility”,
+        // “Beds”, “Commodes”) and do not describe the product itself.  Filtering
+        // them here prevents contamination of the final features list.
+        .filter((l) => {
+          const val = String(l).trim();
+          const lower = val.toLowerCase();
+          const excluded = [
+            'products', 'bath safety', 'beds', 'commodes', 'inspired', 'mobility',
+            'patient room', 'personal care', 'respiratory', 'sleep therapy',
+            'therapeutic support surfaces', 'new arrivals', 'support & resources',
+            'who we are', 'who we serve', 'account', 'get in touch',
+            'press releases', 'articles & blogs', 'leadership', 'work with us',
+            'faqs', 'knowledge base'
+          ];
+          return !excluded.includes(lower);
+        });
     }
     // Filter specs values
     if (norm.specs && typeof norm.specs === 'object') {
@@ -2770,13 +2787,50 @@ function extractFeaturesSmart($){
     '.frequently-bought','.frequently-bought-together','.also-viewed','.people-also-viewed','.recommendations','.product-recommendations'
   ].join(', ');
 
+  // A helper to decide if a candidate feature text should be kept.  We try to
+  // aggressively filter out marketing/UX boilerplate and unrelated navigation
+  // that commonly appears on ecommerce pages (e.g. site navigation, footer
+  // categories, service offerings, etc.).  See README for more details.
+  const BAD_FEATURE_KEYWORDS = [
+    'inventory management',
+    'vaccine management',
+    'biomedical equipment',
+    'instrument management services',
+    'technology consultants',
+    'medical waste management',
+    'patient home delivery',
+    'medical freight management',
+    'lab management',
+    'lab consulting',
+    'lab information systems',
+    'lab results',
+    'remote patient monitoring',
+    'revenue cycle management',
+    'invoice management',
+    'capital medical equipment',
+    'real estate solutions',
+    'analytics',
+    'ecommerce services',
+    'training and compliance',
+    'patient care and engagement',
+    'financial services'
+  ];
   const pushIfGood = (txt) => {
     const t = cleanup(txt);
     if (!t) return;
+    // Skip very short or very long fragments
     if (t.length < 7 || t.length > 220) return;
+    // Skip texts that appear to be breadcrumbs or navigational arrows
     if (/>|›|»/.test(t)) return;
+    // Skip generic footer/legal copy
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    // Skip anything containing a URL
     if (/(https?:\/\/|www\.)/i.test(t)) return;
+    // Skip marketing or site navigation categories (see BAD_FEATURE_KEYWORDS list)
+    const lower = t.toLowerCase();
+    for (const bad of BAD_FEATURE_KEYWORDS){
+      if (lower.includes(bad)) return;
+    }
     items.push(t);
   };
 
