@@ -181,6 +181,33 @@ function removeNoise(record) {
     rec.pdf_docs = [...rec.manuals];
   }
 
+  // Deduplicate feature lists to prevent duplicate bullets leaking into
+  // downstream content. Some sites repeat the same feature text multiple
+  // times (e.g. in summary and feature sections). We normalise by
+  // trimming and comparing lower‑cased strings and then filter the
+  // arrays in place. Do this for both the raw and cleaned feature lists
+  // when present on the record.
+  if (Array.isArray(rec.features_raw)) {
+    const seen = new Set();
+    rec.features_raw = rec.features_raw.filter(item => {
+      const normalised = typeof item === 'string' ? item.trim().toLowerCase() : '';
+      if (normalised === '') return false;
+      if (seen.has(normalised)) return false;
+      seen.add(normalised);
+      return true;
+    });
+  }
+  if (Array.isArray(rec.features)) {
+    const seen = new Set();
+    rec.features = rec.features.filter(item => {
+      const normalised = typeof item === 'string' ? item.trim().toLowerCase() : '';
+      if (normalised === '') return false;
+      if (seen.has(normalised)) return false;
+      seen.add(normalised);
+      return true;
+    });
+  }
+
   return rec;
 }
 
