@@ -1036,6 +1036,10 @@ function normalizeSpecsToSpecMap(rawSpecs = {}) {
   // Backfills if only alternates exist
   if (!out.mpn && rawSpecs['manufacturer_#']) out.mpn = rawSpecs['manufacturer_#'];
   if (!out.mckesson_item && rawSpecs['mckesson']) out.mckesson_item = rawSpecs['mckesson'];
+  if (!out.brand && out.manufacturer) {
+    out.brand = out.manufacturer;
+  }
+
   return out;
 }
 
