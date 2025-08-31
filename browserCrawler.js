@@ -728,14 +728,8 @@ export async function browseProduct(url, opts = {}) {
       }
     }
 
-    const { links, links_extra } = await collectLinks(page, { productImageLimit });
-    const seo_meta = await collectSeoMeta(page);
-    const microdata = await collectMicrodata(page);
-    const inline_data = await collectInlineData(page);
-    const link_hints = await collectLinkHints(page);
-    const shadow_text = await collectShadowText(page);
+    const { links } = await collectLinks(page, { productImageLimit });
     const css_backgrounds = await collectCssBackgrounds(page);
-    const images_with_alt = await collectImagesWithAlt(page);
 
     const payload = {
       source_url: url,
@@ -744,14 +738,7 @@ export async function browseProduct(url, opts = {}) {
       visible_text,
       sections, // includes .dl and .tabs
       links,    // Code B-compatible: {anchors, images, pdfs, jsons}
-      links_extra, // richer link context
-      microdata,   // { json_ld: [...], microdata: [...] }
-      inline_data, // { application_json_scripts: [...], window_vars: {...} }
-      link_hints,  // probable manuals/datasheets/etc.
-      shadow_text,
-      css_backgrounds,
       seo_meta,
-      images_with_alt,
       console: consoleLogs,
     };
 
