@@ -26,7 +26,7 @@ const CLICK_SELECTORS = [
   '.tabs [role="tab"]',
   '.accordion button',
   '.accordion .accordion-button',
-  '.accordion .accordion-header]',
+  '.accordion .accordion-header',
   'details > summary',
   'button:has-text("Show more")',
   'button:has-text("View more")',
@@ -90,20 +90,20 @@ async function collectVisibleText(page) {
         const n = walker.currentNode;
         if (!n.parentElement || blk.has(n.parentElement.tagName)) continue;
         let p = n.parentElement, skip=false;
-        while (p) {
-          const t = p.tagName.toLowerCase();
-          if (/nav|header|footer|aside/.test(t) || /\b(nav|header|footer|sidebar)\b/.test(p.className||"")) { skip = true; break; }
-          p = p.parentElement;
+        while(p) {
+          const t=p.tagName.toLowerCase();
+          if(/nav|header|footer|aside/.test(t) || /\b(nav|header|footer|sidebar)\b/.test(p.className||"")) { skip=true; break; }
+          p=p.parentElement;
         }
-        if (skip) continue;
+        if(skip) continue;
         const txt = n.nodeValue.replace(/\s+/g,' ').trim();
-        if (txt) out.push(txt);
+        if(txt) out.push(txt);
       }
       return out.join('\n');
     }
     const main = document.querySelector('main')||document.body;
     let txt = textFrom(main).trim();
-    if (!txt || txt.length < 10) txt = document.body.innerText.replace(/\s+\n/g,'\n').trim();
+    if(!txt||txt.length<10) txt=document.body.innerText.replace(/\s+\n/g,'\n').trim();
     return txt;
   });
 }
@@ -113,7 +113,7 @@ async function collectNetworkData(page) {
   page.on('response', async res => {
     try {
       const ct = res.headers()['content-type']||'';
-      if (ct.includes('application/json')||ct.includes('application/xml')) {
+      if(ct.includes('application/json')||ct.includes('application/xml')) {
         const url = res.url();
         const body = await res.text().catch(()=>null);
         calls.push({ url, body });
@@ -130,12 +130,12 @@ async function collectSections(page) {
       description: ['#description','.product-description','.description','section#description','.desc','#desc','.product-desc'],
       specifications: ['#specifications','.specs','.specifications','section#specifications','.product-specs','.tech-specs','.spec-list','.specification-list','.spec-table'],
       features: ['.features','#features','section#features','.feature-list','.product-features','#key-features','#feature-highlights','.benefits','.feature-benefits','.highlight-list'],
-      included: ['text="What’s in the box"','text="Included Items"','text="Product Includes"','.included','.includes','.in-the-box','.box-contents','#included-items','#package-contents','.accessories','.accessory-list','.item-included','#tab-id-2-container','[id$="-container"]']
+      included: ['text="What’s in the box"','text="Included Items"','text="Product Includes"','.included','.includes','.in-the-box','.box-contents','#included-items','#package-contents','.accessories','.accessory-list','.item-included','#tab-id-2','[id$="-container"]']
     };
     const serialize = el => el ? el.innerText.replace(/\s+\n/g,'\n').trim() : '';
     function findFirst(arr) {
       for (const s of arr) {
-        try { const e = document.querySelector(s); if (e) return e; } catch {}
+        try { const e=document.querySelector(s); if(e) return e; } catch {}
       }
       return null;
     }
@@ -144,13 +144,13 @@ async function collectSections(page) {
     sections.description    = serialize(findFirst(map.description)) || document.querySelector('meta[name="description"]')?.content.trim() || '';
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features       = serialize(findFirst(map.features));
-    if (!sections.features) {
-      for (const h of document.querySelectorAll('h2,h3,h4')) {
-        const t = h.innerText.toLowerCase();
-        if (t.includes('feature')) {
-          let e = h.nextElementSibling;
-          while (e && !/^ul|ol$/i.test(e.tagName)) e = e.nextElementSibling;
-          if (e) { sections.features = e.innerText.trim(); break; }
+    if(!sections.features) {
+      for(const h of document.querySelectorAll('h2,h3,h4')) {
+        const t=h.innerText.toLowerCase();
+        if(t.includes('feature')) {
+          let e=h.nextElementSibling;
+          while(e && !/^ul|ol$/i.test(e.tagName)) e=e.nextElementSibling;
+          if(e){ sections.features=e.innerText.trim(); break; }
         }
       }
     }
@@ -165,13 +165,9 @@ async function collectSections(page) {
         '.tab-content','.tab-panel','.accordion-content',
         '[id^="tab-"]','[class*="tab-"]','[class*="Tab"]','[id$="-container"]'
       ].join(',');
-      for (const p of document.querySelectorAll(sel)) {
+      for(const p of document.querySelectorAll(sel)) {
         const txt = p.innerText.trim().toLowerCase();
-        if (
-          txt.includes("what’s in the box") ||
-          txt.includes("included items") ||
-          txt.includes("product includes")
-        ) {
+        if(txt.includes("what’s in the box")||txt.includes("included items")||txt.includes("product includes")) {
           sections.included = p.innerText.replace(/\s+\n/g,'\n').trim();
           break;
         }
@@ -179,18 +175,18 @@ async function collectSections(page) {
     }
 
     // Definition lists
-    const dls = [...document.querySelectorAll('dl')].map(dl => dl.innerText.trim());
-    if (dls.length) sections.dl = dls.join('\n---\n');
+    const dls=[...document.querySelectorAll('dl')].map(dl=>dl.innerText.trim());
+    if(dls.length) sections.dl=dls.join('\n---\n');
 
     // Capture all panels
-    const panels = document.querySelectorAll([
+    const panels=document.querySelectorAll([
       '[role="tabpanel"]',
       '.tab-content','.tab-panel','.accordion-content',
       '[id^="tab-"]','[class*="tab-"]','[class*="Tab"]','[id$="-container"]'
     ].join(','));
-    sections.tabs = {};
-    panels.forEach(p => {
-      const key = p.getAttribute('aria-labelledby') || p.id || p.previousElementSibling?.innerText || 'tab';
+    sections.tabs={};
+    panels.forEach(p=>{
+      const key=p.getAttribute('aria-labelledby')||p.id||p.previousElementSibling?.innerText||'tab';
       sections.tabs[key.trim().slice(0,30)] = p.innerText.trim();
     });
 
@@ -219,59 +215,41 @@ export async function browseProduct(url, opts = {}) {
   let browser;
   try {
     browser = await chromium.launch({ headless });
-  } catch (err) {
+  } catch(err) {
     const msg = String(err);
-    if (/doesn't.*exist/.test(msg)) {
-      try {
-        execSync('npx playwright install chromium', { stdio:'ignore' });
-        browser = await chromium.launch({ headless });
-      } catch(e) {
-        return { ok:false, error:String(e) };
-      }
-    } else {
-      return { ok:false, error:msg };
-    }
+    if(/doesn't.*exist/.test(msg)) {
+      try { execSync('npx playwright install chromium',{stdio:'ignore'}); browser=await chromium.launch({ headless }); }
+      catch(e){ return { ok:false, error:String(e) }; }
+    } else return { ok:false, error:msg };
   }
 
   const context = await browser.newContext({ userAgent, viewport });
   const page = await context.newPage();
   const consoleLogs = [];
-  page.on('console', msg => {
-    if (['error','warning'].includes(msg.type())) {
-      consoleLogs.push({ type:msg.type(), text:msg.text() });
-    }
-  });
+  page.on('console', msg => { if(['error','warning'].includes(msg.type())) consoleLogs.push({ type:msg.type(), text:msg.text() }); });
   const networkCalls = collectNetworkData(page);
 
   try {
     await page.goto(url, { waitUntil:'domcontentloaded', timeout:navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout:navigationTimeoutMs }).catch(()=>{});
-    // expand tabs/accordions
     await autoExpand(page);
 
-    // explicitly click each hash-link tab and wait for its container
+    // Explicitly click all hash-link tabs (including Spectra's tab-2)
     try {
       const tabLinks = await page.$$('[href^="#tab-"]');
       for (const link of tabLinks) {
         const href = await link.getAttribute('href');
         await link.click().catch(() => {});
-        // wait for either the panel ID or its "-container" sibling
-        if (href) {
-          await Promise.all([
-            page.waitForSelector(href, { timeout: 1000 }).catch(()=>{}),
-            page.waitForSelector(`${href}-container`, { timeout: 1000 }).catch(()=>{})
-          ]);
-        }
+        if (href) await page.waitForSelector(href, { timeout: 1000 }).catch(() => {});
         await page.waitForTimeout(300);
       }
     } catch {}
 
-    // trigger lazy-load scrolling
     for(let i=0;i<4;i++){ await page.mouse.wheel(0,2000); await page.waitForTimeout(350); }
 
     const visible_text = await collectVisibleText(page);
     const sections     = await collectSections(page);
-    // ... other collections unchanged ...
+    // ... other data collectors unchanged ...
 
     await context.close();
     await browser.close();
