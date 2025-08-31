@@ -3,10 +3,11 @@
 //
 // This module uses Playwright to fetch and expand product pages. It collects
 // the fully rendered HTML after interacting with common tab/accordion UI
-// elements, extracts visible text, and grabs various sections (description,
-// specifications, features, included) as well as outbound links. The result
+// elements, extracts visible text, grabs various sections (description,
+// specifications, features, included), plus tabs, microdata, link hints,
+// inline data objects, templates, and monitors XHR/Fetch. The result
 // is designed to augment the existing static scraper output without
-// modifying the existing scraping logic.
+// modifying existing scraping logic.
 
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
@@ -17,10 +18,6 @@ import { execSync } from 'child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Click selectors attempt to expand tabs, accordions, and other lazy
-// sections. Many e‑commerce sites hide important content behind UI
-// interactions. These selectors should remain fairly generic; per-site
-// customisations can be layered on top if necessary.
 const CLICK_SELECTORS = [
   // common tabs/accordions
   'button[aria-controls]',
@@ -38,7 +35,7 @@ const CLICK_SELECTORS = [
   'a:has-text("Show more")',
   'a:has-text("View more")',
   'a:has-text("Read more")',
-  // product-specific patterns we often see
+  // product-specific patterns
   'a:has-text("Specifications")',
   'a:has-text("Features")',
   'a:has-text("Included")',
@@ -61,400 +58,145 @@ const WAITERS = [
   'article',
 ];
 
-/**
- * Utility to scroll and click through interactive elements on the page.
- * Performs multiple passes to ensure that content hidden behind tabs or
- * accordions is revealed. During each pass the function clicks any
- * matching selectors, waits briefly for content to load, and waits for
- * network activity to settle.
- *
- * @param {import('playwright').Page} page
- */
 async function autoExpand(page) {
   for (let pass = 0; pass < 3; pass++) {
     for (const sel of CLICK_SELECTORS) {
-      let elements = [];
-      try {
-        elements = await page.$$(sel);
-      } catch {
-        // ignore bad selectors on sites that do not support :has
-      }
-      for (const el of elements) {
-        try {
-          const box = await el.boundingBox();
-          if (!box) continue;
-          await el.click({ timeout: 1500 }).catch(() => {});
-        } catch {
-          /* swallow */
-        }
+      let els = [];
+      try { els = await page.$$(sel); } catch {}
+      for (const el of els) {
+        try { if (await el.boundingBox()) await el.click({ timeout:1500 }).catch(()=>{}); } catch {}
       }
     }
     for (const w of WAITERS) {
       await page.waitForTimeout(300);
-      try {
-        await page.locator(w).first().waitFor({ timeout: 1200 });
-      } catch {
-        /* ignore */
-      }
+      try { await page.locator(w).first().waitFor({ timeout:1200 }); } catch {}
     }
-    // Wait for network idle to flush any lazy loads
-    try {
-      await page.waitForLoadState('networkidle');
-    } catch {
-      /* ignore */
-    }
+    try { await page.waitForLoadState('networkidle'); } catch {}
   }
 }
 
-/**
- * Extract user-visible text from the document. Cheerio cannot see
- * dynamically rendered content, so we do this in the browser context.
- *
- * @param {import('playwright').Page} page
- */
 async function collectVisibleText(page) {
-  // Evaluate in browser context to extract visible text.  If the typical main‑section
-  // extraction yields very little content (e.g. on highly dynamic sites), fall back
-  // to the entire body's innerText to capture dynamically rendered content.
   return page.evaluate(() => {
     function isVisible(el) {
-      const style = window.getComputedStyle(el);
-      return (
-        style &&
-        style.visibility !== 'hidden' &&
-        style.display !== 'none' &&
-        el.offsetParent !== null
-      );
+      const s = getComputedStyle(el);
+      return s && s.visibility!=='hidden' && s.display!=='none' && el.offsetParent!==null;
     }
     function textFrom(el) {
       if (!isVisible(el)) return '';
-      const blacklist = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT']);
-      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
-      const chunks = [];
+      const blk = new Set(['SCRIPT','STYLE','NOSCRIPT']);
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      const out = [];
       while (walker.nextNode()) {
-        const node = walker.currentNode;
-        if (!node.parentElement || blacklist.has(node.parentElement.tagName)) continue;
-        // Skip text inside navigation, header, footer or sidebar elements to reduce noise
-        let skip = false;
-        let p = node.parentElement;
-        while (p) {
-          const tag = p.tagName && p.tagName.toLowerCase();
-          if (tag && (tag === 'nav' || tag === 'header' || tag === 'footer' || tag === 'aside')) { skip = true; break; }
-          const cls = p.className ? String(p.className).toLowerCase() : '';
-          if (/(\bnav\b|\bheader\b|\bfooter\b|\bsidebar\b|\bbreadcrumb\b|\bmenu\b|\baccount\b)/.test(cls)) { skip = true; break; }
-          p = p.parentElement;
-        }
-        if (skip) continue;
-        const t = node.nodeValue.replace(/\s+/g, ' ').trim();
-        if (t) chunks.push(t);
+        const n = walker.currentNode;
+        if (!n.parentElement || blk.has(n.parentElement.tagName)) continue;
+        let p = n.parentElement, skip=false;
+        while(p){ const t=p.tagName.toLowerCase(); if(/nav|header|footer|aside/.test(t)||/(\bnav\b|\bheader\b|\bfooter\b|\bsidebar\b)/.test(p.className||"")){skip=true;break;} p=p.parentElement; }
+        if(skip) continue;
+        const txt = n.nodeValue.replace(/\s+/g,' ').trim(); if(txt) out.push(txt);
       }
-      return chunks.join('\n');
+      return out.join('\n');
     }
-    const main = document.querySelector('main') || document.body;
-    const extracted = textFrom(main).trim();
-    /*
-     * If the initial extraction yields very little text, fall back to the
-     * entire document body. Previously this threshold was set to 50
-     * characters, which caused the crawler to pick up site‑wide navigation
-     * menus when the main element contained a modest amount of text. By
-     * increasing the threshold, we reduce the likelihood of falling back
-     * unnecessarily and pulling in navigation or sidebar content. The
-     * fallback is now only triggered when the main extraction contains
-     * fewer than 100 characters.
-     */
-    if (!extracted || extracted.length < 10) {
-      return document.body.innerText.replace(/\s+\n/g, '\n').trim();
-    }
-    return extracted;
+    const main = document.querySelector('main')||document.body;
+    let txt = textFrom(main).trim();
+    if(!txt||txt.length<10) txt=document.body.innerText.replace(/\s+\n/g,'\n').trim();
+    return txt;
   });
 }
 
-/**
- * Gather common product sections by querying the DOM. This is a best effort
- * attempt: if a section is not found the field will be an empty string.
- *
- * @param {import('playwright').Page} page
- */
+async function collectNetworkData(page) {
+  const calls = [];
+  page.on('response', async res => {
+    try {
+      const ct = res.headers()['content-type']||'';
+      if(ct.includes('application/json')||ct.includes('application/xml')){
+        const url = res.url();
+        const body = await res.text().catch(()=>null);
+        calls.push({ url, body });
+      }
+    } catch {};
+  });
+  return calls;
+}
+
 async function collectSections(page) {
   return page.evaluate(() => {
-    const sections = {};
-    const map = {
-      description: ['#description', '.product-description', '.description', 'section#description'],
-      specifications: ['#specifications', '.specs', '.specifications', 'section#specifications'],
-      features: ['.features', '#features', 'section#features', 'h2:has(+ ul)', 'h3:has(+ ul)'],
-      included: ['text="What’s in the box"', 'text="Included Items"', 'text="Package Includes"'],
+    const sections={}, map={
+      description: ['#description','.product-description','.description','section#description','.desc','#desc','.product-desc'],
+      specifications: ['#specifications','.specs','.specifications','section#specifications','.product-specs','.tech-specs','.spec-list','.specification-list','.spec-table'],
+      features: ['.features','#features','section#features','.feature-list','.product-features','#key-features','#feature-highlights','.benefits','.feature-benefits','.highlight-list'],
+      included: ['text="What’s in the box"','text="Included Items"','text="Package Includes"','.included','.includes','.in-the-box','.box-contents','#included-items','#package-contents','.accessories','.accessory-list','.item-included']
     };
-    const serialize = (el) => (el ? el.innerText.replace(/\s+\n/g, '\n').trim() : '');
-        function findFirst(selectors) {
-          for (const s of selectors) {
-            try {
-              const el = document.querySelector(s);
-              if (el) return el;
-            } catch (e) {
-              // Ignore invalid CSS selectors (e.g., Playwright-specific selectors like text="..."),
-              // and continue checking the next selector.
-              continue;
-            }
-          }
-          return null;
-        }
-    // Description: prefer explicit description nodes; fallback to meta description if empty
-    const descEl = findFirst(map.description);
-    sections.description = serialize(descEl);
-    if (!sections.description) {
-      const meta = document.querySelector('meta[name="description"]');
-      if (meta && meta.content) sections.description = meta.content.trim();
-    }
-    sections.specifications = serialize(findFirst(map.specifications));
-    sections.features = serialize(findFirst(map.features));
-    // Fallback: if no features were found by the default selectors, search for
-    // headings containing “feature” and take the next <ul>/<ol> list as the
-    // feature list.  This captures “Features & Benefits” lists without a dedicated selector.
-    try {
-      if (!sections.features) {
-        const headings = Array.from(document.querySelectorAll('h2, h3, h4'));
-        for (const h of headings) {
-          const txt = (h.innerText || '').trim().toLowerCase();
-          if (!txt) continue;
-          if (txt.includes('feature')) {
-            let el = h.nextElementSibling;
-            while (el && !(el.tagName && (/^ul$/i.test(el.tagName) || /^ol$/i.test(el.tagName)))) {
-              el = el.nextElementSibling;
-            }
-            if (el && el.innerText) {
-              sections.features = el.innerText
-                .replace(/\s+\n/g, '\n')
-                .trim();
-              break;
-            }
-          }
-        }
-      }
-    } catch (_) {
-      /* swallow */
-    }
-    sections.included = serialize(findFirst(map.included));
+    const serialize=el=>el?el.innerText.replace(/\s+\n/g,'\n').trim():'';
+    function findFirst(arr){ for(const s of arr){ try{const e=document.querySelector(s); if(e) return e;}catch{} } return null; }
+    sections.description=serialize(findFirst(map.description))||document.querySelector('meta[name="description"]')?.content.trim()||'';
+    sections.specifications=serialize(findFirst(map.specifications));
+    sections.features=serialize(findFirst(map.features));
+    if(!sections.features){ for(const h of document.querySelectorAll('h2,h3,h4')){ const t=h.innerText.toLowerCase(); if(t.includes('feature')){ let e=h.nextElementSibling; while(e&&!/^ul|ol$/i.test(e.tagName)) e=e.nextElementSibling; if(e){ sections.features=e.innerText.trim(); break;} } } }
+    sections.included=serialize(findFirst(map.included));
+    // definition lists
+    const dls=[...document.querySelectorAll('dl')].map(dl=>dl.innerText.trim()); if(dls.length) sections.dl= dls.join('\n---\n');
+    // tabs/panels
+    const panels=[...document.querySelectorAll('[role="tabpanel"],.tab-content,.tab-panel,.accordion-content')];
+    sections.tabs={}; panels.forEach(p=>{ const key=p.getAttribute('aria-labelledby')||p.previousElementSibling?.innerText||'tab'; sections.tabs[key.trim().slice(0,30)]=p.innerText.trim(); });
     return sections;
   });
 }
 
-/**
- * Collect links on the page: anchors, images, PDFs, and JSON resources.
- *
- * @param {import('playwright').Page} page
- */
-async function collectLinks(page) {
-  return page.evaluate(() => {
-    const anchors = [...document.querySelectorAll('a[href]')].map((a) => a.href);
-    const imgs = [...document.images].map((i) => i.src);
-    // Only keep anchors that link to PDFs. Drop all other anchors to avoid noise.
-    const pdfAnchors = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
-    // Filter images: retain those in the product catalog and exclude logos, loaders, banners, and footer images.
-    let candidateImages = imgs.filter((src) => {
-      try {
-        const url = new URL(src);
-        const path = url.pathname.toLowerCase();
-        return (
-          /\/media\/catalog\/product\//.test(path) &&
-          !/logo|loader|banner|theme|footer|payment|icon|spinner/.test(path)
-        );
-      } catch {
-        return false;
-      }
+async function collectMicrodata(page){
+  return page.evaluate(()=>{
+    const items={}; [...document.querySelectorAll('[itemscope]')].forEach(el=>{
+      const t=el.getAttribute('itemtype')||el.getAttribute('vocab'); const ps={}; [...el.querySelectorAll('[itemprop]')].forEach(p=>ps[p.getAttribute('itemprop')]=p.textContent.trim()); items[t]=ps;
     });
-    // Group by base filename to identify duplicate images across caches.
-    const nameCounts = {};
-    const baseNames = candidateImages.map((src) => {
-      try {
-        const url = new URL(src);
-        return url.pathname.split('/').pop().toLowerCase();
-      } catch {
-        return '';
-      }
+    [...document.querySelectorAll('[typeof]')].forEach(el=>{
+      const t=el.getAttribute('typeof'); const ps={}; [...el.querySelectorAll('[property]')].forEach(p=>ps[p.getAttribute('property')]=p.textContent.trim()); items[`rdfa:${t}`]=ps;
     });
-    baseNames.forEach((name) => {
-      if (name) nameCounts[name] = (nameCounts[name] || 0) + 1;
-    });
-
-    // Filter images again: keep if the base filename appears more than once across caches,
-    // or if it does not contain a dash followed by a digit (to exclude accessory images).
-    candidateImages = candidateImages.filter((src) => {
-      try {
-        const url = new URL(src);
-        const name = url.pathname.split('/').pop().toLowerCase();
-        return (nameCounts[name] > 1) || !/-\d/.test(name);
-      } catch {
-        return false;
-      }
-    });
-
-    // Also collect standalone PDF URLs (direct links) in the page
-    const pdfs = anchors.filter((h) => /\.pdf(\?|$)/i.test(h));
-    const jsons = anchors.filter((h) => /\.json(\?|$)/i.test(h));
-
-    // Deduplicate images by base filename: keep only one image (the first encountered) for each filename.
-    const imagesByName = {};
-    for (const src of candidateImages) {
-      try {
-        const name = new URL(src).pathname.split('/').pop().toLowerCase();
-        if (!imagesByName[name]) imagesByName[name] = src;
-      } catch {
-        continue;
-      }
-    }
-
-    // From the deduplicated images, take only the first few (e.g. first two) to
-    // avoid including unrelated accessory photos. We rely on insertion order
-    // preserved by Object.values().
-    const allImages = Object.values(imagesByName);
-    const limitedImages = allImages.slice(0, 2);
-
-    return {
-      anchors: Array.from(new Set(pdfAnchors)),
-      images: limitedImages,
-      pdfs: Array.from(new Set(pdfs)),
-      jsons: Array.from(new Set(jsons)),
-    };
+    return items;
   });
 }
 
-/**
- * Browse a product URL with Playwright. Expands tabs/accordions, scrolls
- * through the page, and extracts a raw browse payload to augment the
- * existing scraper output. The return value always includes an `ok`
- * field; on failure `ok` will be false and `error` will contain the
- * exception message. On success the object will include a `raw_browse`
- * field with the extracted data.
- *
- * @param {string} url Product URL to browse.
- * @param {object} opts Optional browser overrides.
- */
-export async function browseProduct(url, opts = {}) {
-  const {
-    navigationTimeoutMs = 30000,
-    userAgent =
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-    viewport = { width: 1366, height: 900 },
-    headless = true,
-  } = opts;
-  let browser;
-  try {
-    // Attempt to launch the browser. In some server environments the
-    // Playwright browser binaries are missing unless `playwright install` has
-    // been run. If launch fails due to missing binaries, attempt to
-    // download them on the fly.
-    browser = await chromium.launch({ headless });
-  } catch (err) {
-    const msg = String(err || '');
-    // Detect the missing executable error that Playwright throws when no
-    // browser binary is available. The error message includes the path to
-    // the missing headless_shell or chrome executable.
-    if (/Executable\s+doesn\'t\s+exist|failed\s+to\s+launch/.test(msg)) {
-      try {
-        // Run the Playwright install script synchronously. We suppress
-        // output (stdio: 'inherit' could be used for debugging) and
-        // install all dependencies with system packages. The command will
-        // download the Chromium browser into the Playwright cache. When
-        // finished we retry launching the browser.
-        // Install the browser binaries. We omit the --with-deps flag because
-        // it attempts to install system dependencies requiring root privileges.
-        // Installing only the browser avoids permission issues on platforms like Render.
-        execSync('npx playwright install chromium', { stdio: 'ignore' });
-        browser = await chromium.launch({ headless });
-      } catch (installErr) {
-        return { ok: false, error: String(installErr) };
-      }
-    } else {
-      return { ok: false, error: String(err) };
-    }
-  }
-  const context = await browser.newContext({ userAgent, viewport });
-  const page = await context.newPage();
-  const consoleLogs = [];
-  page.on('console', (msg) => {
-    const t = msg.type();
-    if (t === 'error' || t === 'warning') consoleLogs.push({ type: t, text: msg.text() });
+async function collectLinkHints(page){
+  return page.evaluate(()=>{
+    const hints={}; [...document.querySelectorAll('link[rel]')].forEach(l=>{ const r=l.getAttribute('rel'); if(!hints[r]) hints[r]=[]; hints[r].push(l.getAttribute('href')); }); return hints; });
+}
+
+async function collectTemplates(page){
+  return page.evaluate(()=>({
+    templates:[...document.querySelectorAll('template')].map(t=>t.innerHTML.trim()),
+    noscript:[...document.querySelectorAll('noscript')].map(n=>n.innerText.trim()),
+    hiddenInputs:[...document.querySelectorAll('input[type="hidden"]').entries()].map(([_,i])=>i.getAttribute('data-specs')||'')
+  }));
+}
+
+async function collectInlineData(page){
+  return page.evaluate(()=>{
+    const scripts=[...document.querySelectorAll('script')].map(s=>s.textContent), found={};
+    scripts.forEach(txt=>{ if(/window\.__INITIAL_STATE__/.test(txt)) found.initial=txt.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});/)?.[1]; if(/var\s+productData/.test(txt)) found.productData=txt.match(/var\s+productData\s*=\s*(\{[\s\S]*?\});/)?.[1]; }); return found;
   });
-  try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
-    await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
-    // Accept obvious cookie banners
-    const cookieSelectors = ['button:has-text("Accept")', 'button:has-text("I agree")'];
-    for (const sel of cookieSelectors) {
-      const b = await page.$(sel);
-      if (b) {
-        await b.click().catch(() => {});
-        await page.waitForTimeout(300);
-      }
-    }
+}
+
+export async function browseProduct(url, opts={}){
+  const {navigationTimeoutMs=30000,userAgent='Mozilla/5.0...',viewport={width:1366,height:900},headless=true}=opts;
+  let browser;
+  try{ browser=await chromium.launch({headless}); }catch(err){ const msg=String(err); if(/Executable.*doesn't.*exist/.test(msg)){ try{ execSync('npx playwright install chromium',{stdio:'ignore'}); browser=await chromium.launch({headless}); }catch(e){ return {ok:false,error:String(e)}; } }else return {ok:false,error:msg}; }
+  const context=await browser.newContext({userAgent,viewport}); const page=await context.newPage();
+  const consoleLogs=[]; page.on('console',msg=>{ if(['error','warning'].includes(msg.type())) consoleLogs.push({type:msg.type(),text:msg.text()}); });
+  const networkCalls=collectNetworkData(page);
+  try{
+    await page.goto(url,{waitUntil:'domcontentloaded',timeout:navigationTimeoutMs}); await page.waitForLoadState('networkidle',{timeout:navigationTimeoutMs}).catch(()=>{});
+    for(const sel of ['button:has-text("Accept")','button:has-text("I agree")']){ const b=await page.$(sel); if(b){ await b.click().catch(()=>{}); await page.waitForTimeout(300);} }
     await autoExpand(page);
-    // Trigger lazy-load by scrolling
-    for (let i = 0; i < 4; i++) {
-      await page.mouse.wheel(0, 2000);
-      await page.waitForTimeout(350);
-    }
-        // Capture the full HTML. We keep it only for debugging and don't
-        // include it in the returned object to avoid noise.
-        const full_html = await page.content();
-    let visible_text = await collectVisibleText(page);
-    // Filter non-English lines from visible text. We keep a line if it contains
-    // primarily ASCII letters/spaces/punctuation. Lines with too many non-Latin
-    // characters are dropped. This heuristic approximates English detection.
-    function isEnglishLine(line) {
-      const total = line.length;
-      if (total === 0) return false;
-      let ascii = 0;
-      for (let i = 0; i < line.length; i++) {
-        const code = line.charCodeAt(i);
-        // Accept typical ASCII characters and punctuation (0x20-0x7E)
-        if (code >= 0x20 && code <= 0x7e) ascii++;
-      }
-      return ascii / total >= 0.7;
-    }
-    visible_text = visible_text
-      .split('\n')
-      .filter((l) => isEnglishLine(l.trim()))
-      .join('\n');
-    let sections = await collectSections(page);
-    // Clean up sections: only keep English lines and drop entire section if empty.
-    const cleanedSections = {};
-    for (const key of ['description', 'specifications', 'features', 'included']) {
-      const text = String(sections[key] || '').split('\n');
-      const filtered = text.filter((l) => isEnglishLine(l.trim())).join('\n').trim();
-      cleanedSections[key] = filtered;
-    }
-    // Overwrite cleaned sections back
-    sections = cleanedSections;
-    // Some sites include generic headings like "COMPANY INFO" in features; drop
-    // such generic placeholders. We treat any features text equal to
-    // "COMPANY INFO" (case-insensitive) as not meaningful for product features.
-    if (sections.features && sections.features.trim().toLowerCase() === 'company info') {
-      sections.features = '';
-    }
-    const { anchors, images, pdfs, jsons } = await collectLinks(page);
-        return {
-          ok: true,
-          raw_browse: {
-            source_url: url,
-            fetched_at: new Date().toISOString(),
-            // We intentionally omit full_html from the returned object. It is
-            // available in the closure if needed for debugging but not
-            // exposed to downstream consumers.
-            visible_text,
-            sections,
-            links: {
-              anchors,
-              images,
-              pdfs,
-              jsons,
-            },
-            console: consoleLogs,
-          },
-        };
-  } catch (err) {
-    return { ok: false, error: String(err) };
-  } finally {
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
-  }
+    for(let i=0;i<4;i++){ await page.mouse.wheel(0,2000); await page.waitForTimeout(350); }
+    const full_html=await page.content();
+    let visible_text=await collectVisibleText(page);
+    function isEng(l){const tot=l.length;let a=0;for(const c of l){ if(c.charCodeAt(0)>=0x20&&c.charCodeAt(0)<=0x7e) a++; } return tot>0&&a/tot>=0.7; }
+    visible_text=visible_text.split('\n').filter(l=>isEng(l.trim())).join('\n');
+    const sections=await collectSections(page);
+    const microdata=await collectMicrodata(page);
+    const linkHints=await collectLinkHints(page);
+    const templates=await collectTemplates(page);
+    const inlineData=await collectInlineData(page);
+    const {anchors,images,pdfs,jsons}=await collectLinks(page);
+    await context.close(); await browser.close();
+    return { ok:true, raw_browse:{ source_url:url, fetched_at:new Date().toISOString(), visible_text, sections, microdata, link_hints:linkHints, templates, inline_data:inlineData, network_calls:await networkCalls, links:{anchors,images,pdfs,jsons}, console:consoleLogs } };
+  }catch(err){ return {ok:false,error:String(err)}; }
 }
