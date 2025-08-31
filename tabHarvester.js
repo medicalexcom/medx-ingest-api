@@ -284,8 +284,8 @@ function normalizeIncluded(lines = []) {
     } else {
       item = s;
     }
-    // Remove leading bullets or numbers
-    item = item.replace(/^[\s•\-–—\d()]+/, '').replace(/\s{2,}/g, ' ').trim();
+    // Only remove bullet characters or dashes; preserve numeric prefixes (e.g. “24mm”)
+    item = item.replace(/^[\s•\-–—]+/, '').replace(/\s{2,}/g, ' ').trim();
     if (!item) continue;
     counts[item] = (counts[item] || 0) + (isNaN(qty) ? 1 : qty);
   }
