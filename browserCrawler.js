@@ -114,7 +114,7 @@ async function autoExpand(page) {
  */
 async function collectVisibleText(page) {
   // Evaluate in browser context to extract visible text.  If the typical
-  // main-section extraction yields very little content (e.g. on highly dynamic sites),
+  // main‑section extraction yields very little content (e.g. on highly dynamic sites),
   // fall back to the entire body's innerText to capture dynamically rendered content.
   return page.evaluate(() => {
     function isVisible(el) {
@@ -191,13 +191,14 @@ async function collectSections(page) {
         try {
           const el = document.querySelector(s);
           if (el) return el;
-        } catch (e) {
-          // Ignore invalid CSS selectors, and continue checking the next selector.
+        } catch {
+          // ignore invalid CSS selectors and continue
           continue;
         }
       }
       return null;
     }
+
     // Description: prefer explicit description nodes; fallback to meta description if empty
     const descEl = findFirst(map.description);
     sections.description = serialize(descEl);
@@ -205,11 +206,12 @@ async function collectSections(page) {
       const meta = document.querySelector('meta[name="description"]');
       if (meta && meta.content) sections.description = meta.content.trim();
     }
+
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features = serialize(findFirst(map.features));
-    // Fallback: if no features were found by the default selectors, search
-    // headings containing “feature” and take the next <ul>/<ol> list as the
-    // feature list.  This captures “Features & Benefits” lists without a dedicated selector.
+
+    // Fallback: if no features were found by the default selectors, search headings containing “feature”
+    // and take the next UL/OL list as the feature list.  This captures “Features & Benefits” lists without a dedicated selector.
     try {
       if (!sections.features) {
         const headings = Array.from(document.querySelectorAll('h2, h3, h4'));
@@ -222,17 +224,16 @@ async function collectSections(page) {
               el = el.nextElementSibling;
             }
             if (el && el.innerText) {
-              sections.features = el.innerText
-                .replace(/\s+\n/g, '\n')
-                .trim();
+              sections.features = el.innerText.replace(/\s+\n/g, '\n').trim();
               break;
             }
           }
         }
       }
     } catch (_) {
-      /* swallow */
+      // ignore errors in fallback
     }
+
     sections.included = serialize(findFirst(map.included));
 
     // Additional fallback: look for any element containing 'feature' or 'benefit'
