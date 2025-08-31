@@ -1,8 +1,8 @@
 // browserCrawler.js
 // Headless-browsing collector for product pages.
 //
-// This module uses Playwright to fetch and expand product pages. It collects
-// the fully rendered HTML after interacting with common tab/accordion UI
+// This module uses Playwright to fetch and expand product pages. It
+// collects the fully rendered HTML after interacting with common tab/accordion UI
 // elements, extracts visible text, and grabs various sections (description,
 // specifications, features, included) as well as outbound links. The result
 // is designed to augment the existing static scraper output without
@@ -113,9 +113,9 @@ async function autoExpand(page) {
  * @param {import('playwright').Page} page
  */
 async function collectVisibleText(page) {
-  // Evaluate in browser context to extract visible text.  If the typical main‑section
-  // extraction yields very little content (e.g. on highly dynamic sites), fall back
-  // to the entire body's innerText to capture dynamically rendered content.
+  // Evaluate in browser context to extract visible text.  If the typical
+  // main-section extraction yields very little content (e.g. on highly dynamic sites),
+  // fall back to the entire body's innerText to capture dynamically rendered content.
   return page.evaluate(() => {
     function isVisible(el) {
       const style = window.getComputedStyle(el);
@@ -182,22 +182,22 @@ async function collectSections(page) {
       description: ['#description', '.product-description', '.description', 'section#description'],
       specifications: ['#specifications', '.specs', '.specifications', 'section#specifications'],
       features: ['.features', '#features', 'section#features', 'h2:has(+ ul)', 'h3:has(+ ul)'],
-      included: ['text="What’s in the box"', 'text="Included Items"', 'text="Package Includes"'],
+      // Included: avoid invalid text= selectors (handled in fallback below)
+      included: ['.included', '#included', 'section#included', '.product-includes'],
     };
     const serialize = (el) => (el ? el.innerText.replace(/\s+\n/g, '\n').trim() : '');
-        function findFirst(selectors) {
-          for (const s of selectors) {
-            try {
-              const el = document.querySelector(s);
-              if (el) return el;
-            } catch (e) {
-              // Ignore invalid CSS selectors (e.g., Playwright-specific selectors like text="..."),
-              // and continue checking the next selector.
-              continue;
-            }
-          }
-          return null;
+    function findFirst(selectors) {
+      for (const s of selectors) {
+        try {
+          const el = document.querySelector(s);
+          if (el) return el;
+        } catch (e) {
+          // Ignore invalid CSS selectors, and continue checking the next selector.
+          continue;
         }
+      }
+      return null;
+    }
     // Description: prefer explicit description nodes; fallback to meta description if empty
     const descEl = findFirst(map.description);
     sections.description = serialize(descEl);
@@ -207,7 +207,7 @@ async function collectSections(page) {
     }
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features = serialize(findFirst(map.features));
-    // Fallback: if no features were found by the default selectors, search for
+    // Fallback: if no features were found by the default selectors, search
     // headings containing “feature” and take the next <ul>/<ol> list as the
     // feature list.  This captures “Features & Benefits” lists without a dedicated selector.
     try {
@@ -234,6 +234,44 @@ async function collectSections(page) {
       /* swallow */
     }
     sections.included = serialize(findFirst(map.included));
+
+    // Additional fallback: look for any element containing 'feature' or 'benefit'
+    // and capture the next UL/OL as the features list.
+    if (!sections.features) {
+      const allEls = Array.from(document.querySelectorAll('*'));
+      for (const el of allEls) {
+        const t = (el.innerText || '').toLowerCase();
+        if (t && (t.includes('feature') || t.includes('benefit'))) {
+          let nxt = el.nextElementSibling;
+          while (nxt && !(nxt.tagName && (/^ul$/i.test(nxt.tagName) || /^ol$/i.test(nxt.tagName)))) {
+            nxt = nxt.nextElementSibling;
+          }
+          if (nxt && nxt.innerText) {
+            sections.features = nxt.innerText.replace(/\s+\n/g, '\n').trim();
+            break;
+          }
+        }
+      }
+    }
+
+    // Fallback for included: search any element containing 'include' and take the next list
+    if (!sections.included) {
+      const allEls2 = Array.from(document.querySelectorAll('*'));
+      for (const el of allEls2) {
+        const t = (el.innerText || '').toLowerCase();
+        if (t && t.includes('include')) {
+          let nxt = el.nextElementSibling;
+          while (nxt && !(nxt.tagName && (/^ul$/i.test(nxt.tagName) || /^ol$/i.test(nxt.tagName)))) {
+            nxt = nxt.nextElementSibling;
+          }
+          if (nxt && nxt.innerText) {
+            sections.included = nxt.innerText.replace(/\s+\n/g, '\n').trim();
+            break;
+          }
+        }
+      }
+    }
+
     return sections;
   });
 }
@@ -335,126 +373,43 @@ export async function browseProduct(url, opts = {}) {
     userAgent =
       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
     viewport = { width: 1366, height: 900 },
-    headless = true,
   } = opts;
+
   let browser;
+  let page;
   try {
-    // Attempt to launch the browser. In some server environments the
-    // Playwright browser binaries are missing unless `playwright install` has
-    // been run. If launch fails due to missing binaries, attempt to
-    // download them on the fly.
-    browser = await chromium.launch({ headless });
-  } catch (err) {
-    const msg = String(err || '');
-    // Detect the missing executable error that Playwright throws when no
-    // browser binary is available. The error message includes the path to
-    // the missing headless_shell or chrome executable.
-    if (/Executable\s+doesn\'t\s+exist|failed\s+to\s+launch/.test(msg)) {
-      try {
-        // Run the Playwright install script synchronously. We suppress
-        // output (stdio: 'inherit' could be used for debugging) and
-        // install all dependencies with system packages. The command will
-        // download the Chromium browser into the Playwright cache. When
-        // finished we retry launching the browser.
-        // Install the browser binaries. We omit the --with-deps flag because
-        // it attempts to install system dependencies requiring root privileges.
-        // Installing only the browser avoids permission issues on platforms like Render.
-        execSync('npx playwright install chromium', { stdio: 'ignore' });
-        browser = await chromium.launch({ headless });
-      } catch (installErr) {
-        return { ok: false, error: String(installErr) };
-      }
-    } else {
-      return { ok: false, error: String(err) };
-    }
-  }
-  const context = await browser.newContext({ userAgent, viewport });
-  const page = await context.newPage();
-  const consoleLogs = [];
-  page.on('console', (msg) => {
-    const t = msg.type();
-    if (t === 'error' || t === 'warning') consoleLogs.push({ type: t, text: msg.text() });
-  });
-  try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
-    await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
-    // Accept obvious cookie banners
-    const cookieSelectors = ['button:has-text("Accept")', 'button:has-text("I agree")'];
-    for (const sel of cookieSelectors) {
-      const b = await page.$(sel);
-      if (b) {
-        await b.click().catch(() => {});
-        await page.waitForTimeout(300);
-      }
-    }
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext({ userAgent, viewport });
+    page = await context.newPage();
+
+    // Block telemetry / analytics calls to speed up crawling
+    await page.route('**/google-analytics.com/**', (route) => route.abort());
+    await page.route('**/gtag/js', (route) => route.abort());
+    await page.route('**/analytics.js', (route) => route.abort());
+
+    await page.goto(url, { timeout: navigationTimeoutMs, waitUntil: 'domcontentloaded' });
     await autoExpand(page);
-    // Trigger lazy-load by scrolling
-    for (let i = 0; i < 4; i++) {
-      await page.mouse.wheel(0, 2000);
-      await page.waitForTimeout(350);
-    }
-        // Capture the full HTML. We keep it only for debugging and don't
-        // include it in the returned object to avoid noise.
-        const full_html = await page.content();
-    let visible_text = await collectVisibleText(page);
-    // Filter non-English lines from visible text. We keep a line if it contains
-    // primarily ASCII letters/spaces/punctuation. Lines with too many non-Latin
-    // characters are dropped. This heuristic approximates English detection.
-    function isEnglishLine(line) {
-      const total = line.length;
-      if (total === 0) return false;
-      let ascii = 0;
-      for (let i = 0; i < line.length; i++) {
-        const code = line.charCodeAt(i);
-        // Accept typical ASCII characters and punctuation (0x20-0x7E)
-        if (code >= 0x20 && code <= 0x7e) ascii++;
-      }
-      return ascii / total >= 0.7;
-    }
-    visible_text = visible_text
-      .split('\n')
-      .filter((l) => isEnglishLine(l.trim()))
-      .join('\n');
-    let sections = await collectSections(page);
-    // Clean up sections: only keep English lines and drop entire section if empty.
-    const cleanedSections = {};
-    for (const key of ['description', 'specifications', 'features', 'included']) {
-      const text = String(sections[key] || '').split('\n');
-      const filtered = text.filter((l) => isEnglishLine(l.trim())).join('\n').trim();
-      cleanedSections[key] = filtered;
-    }
-    // Overwrite cleaned sections back
-    sections = cleanedSections;
-    // Some sites include generic headings like "COMPANY INFO" in features; drop
-    // such generic placeholders. We treat any features text equal to
-    // "COMPANY INFO" (case-insensitive) as not meaningful for product features.
-    if (sections.features && sections.features.trim().toLowerCase() === 'company info') {
-      sections.features = '';
-    }
-    const { anchors, images, pdfs, jsons } = await collectLinks(page);
-        return {
-          ok: true,
-          raw_browse: {
-            source_url: url,
-            fetched_at: new Date().toISOString(),
-            // We intentionally omit full_html from the returned object. It is
-            // available in the closure if needed for debugging but not
-            // exposed to downstream consumers.
-            visible_text,
-            sections,
-            links: {
-              anchors,
-              images,
-              pdfs,
-              jsons,
-            },
-            console: consoleLogs,
-          },
-        };
-  } catch (err) {
-    return { ok: false, error: String(err) };
+    const raw_browse = {};
+    raw_browse.visible_text = await collectVisibleText(page);
+    raw_browse.sections = await collectSections(page);
+    raw_browse.links = await collectLinks(page);
+    return { ok: true, raw_browse };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
   } finally {
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
+    if (page) {
+      try {
+        await page.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
