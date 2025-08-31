@@ -406,6 +406,7 @@ function setupNetworkCapture(page) {
       const ct = (res.headers()['content-type'] || '').toLowerCase();
       if (ct.includes('application/json') || ct.includes('application/xml') || ct.includes('text/xml')) {
         const url = res.url();
+        if (/replay|sessionreplay|rrweb|openreplay|logrocket|fullstory|datadog|ddog/i.test(url)) return;
         const status = res.status();
         const method = res.request()?.method?.() || '';
         const body = await res.text().catch(() => null);
