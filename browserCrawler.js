@@ -677,9 +677,6 @@ export async function browseProduct(url, opts = {}) {
     if (t === 'error' || t === 'warning') consoleLogs.push({ type: t, text: msg.text() });
   });
 
-  // Live network capture (JSON/XML only)
-  const network_calls = setupNetworkCapture(page);
-
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
@@ -755,7 +752,6 @@ export async function browseProduct(url, opts = {}) {
       seo_meta,
       images_with_alt,
       console: consoleLogs,
-      network_calls,
     };
 
     return { ok: true, raw_browse: payload };
