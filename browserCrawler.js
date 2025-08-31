@@ -41,6 +41,8 @@ const CLICK_SELECTORS = [
   'button:has-text("Specifications")',
   'button:has-text("Features")',
   'button:has-text("Included")',
+  // Spectra-style hash-link tabs:
+  'a[href^="#tab-"]',
 ];
 
 const WAITERS = [
@@ -192,15 +194,7 @@ async function collectSections(page) {
   });
 }
 
-async function collectLinks(page) { /* unchanged */ }
-async function collectMicrodata(page) { /* unchanged */ }
-async function collectLinkHints(page) { /* unchanged */ }
-async function collectTemplates(page) { /* unchanged */ }
-async function collectInlineData(page) { /* unchanged */ }
-async function collectShadowText(page) { /* unchanged */ }
-async function collectCssBackgrounds(page) { /* unchanged */ }
-async function collectSeoMeta(page) { /* unchanged */ }
-async function collectImagesWithAlt(page) { /* unchanged */ }
+// ... rest of helper functions unchanged ...
 
 export async function browseProduct(url, opts = {}) {
   const {
@@ -230,20 +224,20 @@ export async function browseProduct(url, opts = {}) {
   try {
     await page.goto(url, { waitUntil:'domcontentloaded', timeout:navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout:navigationTimeoutMs }).catch(()=>{});
-    // cookie accept unchanged
+    // accept cookies unchanged
     await autoExpand(page);
     for(let i=0;i<4;i++){ await page.mouse.wheel(0,2000); await page.waitForTimeout(350); }
 
-    const visible_text     = await collectVisibleText(page);
-    const sections         = await collectSections(page);
-    // further collections omitted for brevity…
+    const visible_text = await collectVisibleText(page);
+    const sections     = await collectSections(page);
+    // collect other data unchanged...
 
     await context.close();
     await browser.close();
 
     return {
       ok: true,
-      raw_browse: { source_url:url, fetched_at:new Date().toISOString(), visible_text, sections, /* … */ }
+      raw_browse: { source_url:url, fetched_at:new Date().toISOString(), visible_text, sections /* , ... */ }
     };
   } catch(err) {
     return { ok:false, error:String(err) };
