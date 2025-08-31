@@ -406,7 +406,6 @@ function setupNetworkCapture(page) {
       const ct = (res.headers()['content-type'] || '').toLowerCase();
       if (ct.includes('application/json') || ct.includes('application/xml') || ct.includes('text/xml')) {
         const url = res.url();
-        if (/replay|sessionreplay|rrweb|openreplay|logrocket|fullstory|datadog|ddog/i.test(url)) return;
         const status = res.status();
         const method = res.request()?.method?.() || '';
         const body = await res.text().catch(() => null);
@@ -678,8 +677,6 @@ export async function browseProduct(url, opts = {}) {
     if (t === 'error' || t === 'warning') consoleLogs.push({ type: t, text: msg.text() });
   });
 
-  // Live network capture (JSON/XML only)
-  const network_calls = setupNetworkCapture(page);
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
@@ -756,7 +753,6 @@ export async function browseProduct(url, opts = {}) {
       seo_meta,
       images_with_alt,
       console: consoleLogs,
-      network_calls,
     };
 
     return { ok: true, raw_browse: payload };
