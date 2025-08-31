@@ -15,20 +15,33 @@ async function fetchAllProducts(page = 1, products = []) {
 }
 
 async function runSeoBatch() {
-  const allProducts = await fetchAllProducts();
-  const limit = pLimit(3);
-  await Promise.all(allProducts.map(product =>
-    limit(async () => {
-      const seo = await generateSEO(product);
-      const patch = toBcPatch(seo);
-      await bcUpdateProduct(product.id, patch);
-      const imgs = await bcListImages(product.id);
-      await Promise.all((imgs.data || []).map((img, i) =>
-        bcUpdateImageAlt(product.id, img.id, seo.imageAlt[i], product.name)
-      ));
-      console.log('Updated', product.id, patch.custom_url.url);
-    })
-  ));
+  let page = 1;
+  // Process products page by page to avoid loading all products into memory at once.
+  while (true) {
+    const { data: products = [], meta } = await bcGetProducts(page);
+    if (!products.length) {
+      break;
+    }
+    const limit = pLimit(3);
+    // For each product in the current page, generate SEO and update asynchronously with concurrency limit.
+    await Promise.all(products.map(product =>
+      limit(async () => {
+        const seo = await generateSEO(product);
+        const patch = toBcPatch(seo);
+        await bcUpdateProduct(product.id, patch);
+        const imgs = await bcListImages(product.id);
+        await Promise.all((imgs.data || []).map((img, i) =>
+          bcUpdateImageAlt(product.id, img.id, seo.imageAlt[i], product.name)
+        ));
+        console.log('Updated', product.id, patch.custom_url.url);
+      })
+    ));
+    // If there are no more pages, exit loop.
+    if (!meta || !meta.pagination || page >= meta.pagination.total_pages) {
+      break;
+    }
+    page++;
+  }
 }
 
 async function runSeoOne(productId) {
