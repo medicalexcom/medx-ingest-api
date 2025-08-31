@@ -73,13 +73,16 @@ async function collectVisibleText(page) {
           p=p.parentElement;
         }
         if(skip) continue;
-        const txt = n.nodeValue.replace(/\s+/g,' ').trim(); if(txt) out.push(txt);
+        const txt = n.nodeValue.replace(/\s+/g,' ').trim();
+        if (txt) out.push(txt);
       }
       return out.join('\n');
     }
     const main = document.querySelector('main')||document.body;
     let txt = textFrom(main).trim();
-    if(!txt||txt.length<10) txt=document.body.innerText.replace(/\s+\n/g,'\n').trim();
+    if (!txt || txt.length < 10) {
+      txt = document.body.innerText.replace(/\s+\n/g,'\n').trim();
+    }
     return txt;
   });
 }
@@ -89,12 +92,12 @@ async function collectNetworkData(page) {
   page.on('response', async res => {
     try {
       const ct = res.headers()['content-type']||'';
-      if(ct.includes('application/json')||ct.includes('application/xml')){
+      if (ct.includes('application/json') || ct.includes('application/xml')) {
         const url = res.url();
         const body = await res.text().catch(()=>null);
         calls.push({ url, body });
       }
-    } catch {};
+    } catch {}
   });
   return calls;
 }
@@ -111,11 +114,18 @@ async function collectSections(page) {
     const serialize = el => el ? el.innerText.replace(/\s+\n/g,'\n').trim() : '';
     function findFirst(arr) {
       for (const s of arr) {
-        try { const e = document.querySelector(s); if (e) return e; } catch {}
+        try {
+          const e = document.querySelector(s);
+          if (e) return e;
+        } catch {}
       }
       return null;
     }
-    sections.description    = serialize(findFirst(map.description)) || document.querySelector('meta[name="description"]')?.content.trim() || '';
+
+    // 1) Core sections
+    sections.description    = serialize(findFirst(map.description))
+                             || document.querySelector('meta[name="description"]')?.content.trim()
+                             || '';
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features       = serialize(findFirst(map.features));
     if (!sections.features) {
@@ -128,25 +138,47 @@ async function collectSections(page) {
         }
       }
     }
+
+    // 2) Primary included
     sections.included = serialize(findFirst(map.included));
+
+    // 3) Fallback: scan any panel whose selector or ID/class includes “tab”
     if (!sections.included) {
-      const panels = document.querySelectorAll('[role="tabpanel"], .tab-content, .tab-panel, .accordion-content');
-      for (const p of panels) {
+      const panelSelector = [
+        '[role="tabpanel"]',
+        '.tab-content', '.tab-panel', '.accordion-content',
+        '[id^="tab-"]', '[class*="tab-"]', '[class*="Tab"]'
+      ].join(',');
+      for (const p of document.querySelectorAll(panelSelector)) {
         const txt = p.innerText.trim().toLowerCase();
-        if (txt.includes("what’s in the box") || txt.includes('included items') || txt.includes('product includes')) {
+        if (txt.includes("what’s in the box") ||
+            txt.includes("included items") ||
+            txt.includes("product includes")) {
           sections.included = p.innerText.replace(/\s+\n/g,'\n').trim();
           break;
         }
       }
     }
+
+    // 4) Definition-list fallback
     const dls = [...document.querySelectorAll('dl')].map(dl => dl.innerText.trim());
     if (dls.length) sections.dl = dls.join('\n---\n');
-    const panels = [...document.querySelectorAll('[role="tabpanel"], .tab-content, .tab-panel, .accordion-content')];
+
+    // 5) Capture all panels into sections.tabs
+    const allPanels = document.querySelectorAll([
+      '[role="tabpanel"]',
+      '.tab-content', '.tab-panel', '.accordion-content',
+      '[id^="tab-"]', '[class*="tab-"]', '[class*="Tab"]'
+    ].join(','));
     sections.tabs = {};
-    panels.forEach(p => {
-      const key = p.getAttribute('aria-labelledby') || p.previousElementSibling?.innerText || 'tab';
+    allPanels.forEach(p => {
+      const key = p.getAttribute('aria-labelledby')
+                || p.id
+                || p.previousElementSibling?.innerText
+                || 'tab';
       sections.tabs[key.trim().slice(0,30)] = p.innerText.trim();
     });
+
     return sections;
   });
 }
@@ -175,7 +207,8 @@ async function collectLinkHints(page) {
     const hints = {};
     [...document.querySelectorAll('link[rel]')].forEach(l => {
       const r = l.getAttribute('rel');
-      if (!hints[r]) hints[r] = []; hints[r].push(l.getAttribute('href'));
+      if (!hints[r]) hints[r] = [];
+      hints[r].push(l.getAttribute('href'));
     });
     return hints;
   });
@@ -185,7 +218,7 @@ async function collectTemplates(page) {
   return page.evaluate(() => ({
     templates: [...document.querySelectorAll('template')].map(t => t.innerHTML.trim()),
     noscript: [...document.querySelectorAll('noscript')].map(n => n.innerText.trim()),
-    hiddenInputs: [...document.querySelectorAll('input[type="hidden"]').entries()].map(([,i]) => i.getAttribute('data-specs') || '')
+    hiddenInputs: [...document.querySelectorAll('input[type="hidden"]')].entries()].map(([,i]) => i.getAttribute('data-specs') || '')
   }));
 }
 
@@ -194,8 +227,12 @@ async function collectInlineData(page) {
     const scripts = [...document.querySelectorAll('script')].map(s => s.textContent);
     const found = {};
     scripts.forEach(txt => {
-      if (/window\.__INITIAL_STATE__/.test(txt)) found.initial = txt.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});/)?.[1];
-      if (/var\s+productData/.test(txt)) found.productData = txt.match(/var\s+productData\s*=\s*(\{[\s\S]*?\});/)?.[1];
+      if (/window\.__INITIAL_STATE__/.test(txt)) {
+        found.initial = txt.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});/)?.[1];
+      }
+      if (/var\s+productData/.test(txt)) {
+        found.productData = txt.match(/var\s+productData\s*=\s*(\{[\s\S]*?\});/)?.[1];
+      }
     });
     return found;
   });
@@ -221,7 +258,7 @@ async function collectCssBackgrounds(page) {
     document.querySelectorAll('*').forEach(el => {
       const bg = getComputedStyle(el).getPropertyValue('background-image');
       const match = /url\(([^)]+)\)/.exec(bg);
-      if (match) urls.add(match[1].replace(/['"]/g, ''));
+      if (match) urls.add(match[1].replace(/['"]/g,''));
     });
     return Array.from(urls);
   });
@@ -230,8 +267,9 @@ async function collectCssBackgrounds(page) {
 async function collectSeoMeta(page) {
   return page.evaluate(() => {
     const metas = {};
-    document.querySelectorAll('meta[property^="og:"], meta[name^="twitter:"]')
-      .forEach(m => metas[m.getAttribute('property')||m.getAttribute('name')] = m.getAttribute('content'));
+    document.querySelectorAll('meta[property^="og:"], meta[name^="twitter:"]').forEach(m => {
+      metas[m.getAttribute('property')||m.getAttribute('name')] = m.getAttribute('content');
+    });
     return metas;
   });
 }
@@ -243,47 +281,71 @@ async function collectImagesWithAlt(page) {
 }
 
 export async function browseProduct(url, opts = {}) {
-  const { navigationTimeoutMs = 30000, userAgent = 'Mozilla/5.0...', viewport = { width: 1366, height: 900 }, headless = true } = opts;
+  const {
+    navigationTimeoutMs = 30000,
+    userAgent = 'Mozilla/5.0...',
+    viewport = { width: 1366, height: 900 },
+    headless = true
+  } = opts;
+
   let browser;
   try {
     browser = await chromium.launch({ headless });
   } catch (err) {
     const msg = String(err);
     if (/doesn't.*exist/.test(msg)) {
-      try { execSync('npx playwright install chromium', { stdio: 'ignore' }); browser = await chromium.launch({ headless }); }
-      catch (e) { return { ok: false, error: String(e) }; }
-    } else return { ok: false, error: msg };
+      try {
+        execSync('npx playwright install chromium', { stdio: 'ignore' });
+        browser = await chromium.launch({ headless });
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    } else {
+      return { ok: false, error: msg };
+    }
   }
+
   const context = await browser.newContext({ userAgent, viewport });
   const page = await context.newPage();
   const consoleLogs = [];
-  page.on('console', msg => { if (['error','warning'].includes(msg.type())) consoleLogs.push({ type: msg.type(), text: msg.text() }); });
+  page.on('console', msg => {
+    if (['error','warning'].includes(msg.type())) {
+      consoleLogs.push({ type: msg.type(), text: msg.text() });
+    }
+  });
   const networkCalls = collectNetworkData(page);
+
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
     // cookie banner acceptance unchanged
     await autoExpand(page);
-    for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 2000); await page.waitForTimeout(350); }
-    const full_html = await page.content();
-    const visible_text = await collectVisibleText(page);
-    const shadow_text = await collectShadowText(page);
-    const css_backgrounds = await collectCssBackgrounds(page);
-    const seo_meta = await collectSeoMeta(page);
-    const images_with_alt = await collectImagesWithAlt(page);
-    const sections = await collectSections(page);
-    const microdata = await collectMicrodata(page);
-    const linkHints = await collectLinkHints(page);
-    const templates = await collectTemplates(page);
-    const inlineData = await collectInlineData(page);
-    const seo_links = await collectLinks(page);
+    for (let i = 0; i < 4; i++) {
+      await page.mouse.wheel(0, 2000);
+      await page.waitForTimeout(350);
+    }
+
+    const full_html        = await page.content();
+    const visible_text     = await collectVisibleText(page);
+    const shadow_text      = await collectShadowText(page);
+    const css_backgrounds  = await collectCssBackgrounds(page);
+    const seo_meta         = await collectSeoMeta(page);
+    const images_with_alt  = await collectImagesWithAlt(page);
+    const sections         = await collectSections(page);
+    const microdata        = await collectMicrodata(page);
+    const linkHints        = await collectLinkHints(page);
+    const templates        = await collectTemplates(page);
+    const inlineData       = await collectInlineData(page);
+    const seo_links        = await collectLinks(page);
+
     await context.close();
     await browser.close();
+
     return {
       ok: true,
       raw_browse: {
-        source_url: url,
-        fetched_at: new Date().toISOString(),
+        source_url:       url,
+        fetched_at:       new Date().toISOString(),
         visible_text,
         shadow_text,
         css_backgrounds,
@@ -291,12 +353,12 @@ export async function browseProduct(url, opts = {}) {
         images_with_alt,
         sections,
         microdata,
-        link_hints: linkHints,
+        link_hints:       linkHints,
         templates,
-        inline_data: inlineData,
-        network_calls: await networkCalls,
-        links: seo_links,
-        console: consoleLogs
+        inline_data:      inlineData,
+        network_calls:    await networkCalls,
+        links:            seo_links,
+        console:          consoleLogs
       }
     };
   } catch (err) {
