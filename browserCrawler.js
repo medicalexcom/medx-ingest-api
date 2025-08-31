@@ -743,14 +743,7 @@ export async function browseProduct(url, opts = {}) {
       visible_text,
       sections, // includes .dl and .tabs
       links,    // Code B-compatible: {anchors, images, pdfs, jsons}
-      links_extra, // richer link context
-      microdata,   // { json_ld: [...], microdata: [...] }
-      inline_data, // { application_json_scripts: [...], window_vars: {...} }
-      link_hints,  // probable manuals/datasheets/etc.
-      shadow_text,
-      css_backgrounds,
       seo_meta,
-      images_with_alt,
       console: consoleLogs,
     };
 
