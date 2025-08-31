@@ -130,7 +130,7 @@ async function collectSections(page) {
       description: ['#description','.product-description','.description','section#description','.desc','#desc','.product-desc'],
       specifications: ['#specifications','.specs','.specifications','section#specifications','.product-specs','.tech-specs','.spec-list','.specification-list','.spec-table'],
       features: ['.features','#features','section#features','.feature-list','.product-features','#key-features','#feature-highlights','.benefits','.feature-benefits','.highlight-list'],
-      included: ['text="What’s in the box"','text="Included Items"','text="Product Includes"','.included','.includes','.in-the-box','.box-contents','#included-items','#package-contents','.accessories','.accessory-list','.item-included','#tab-id-2-container','[id$="-container"]']
+      included: ['text="What’s in the box"','text="Included Items"','text="Product Includes"','.included','.includes','.in-the-box','.box-contents','#included-items','#package-contents','.accessories','.accessory-list','.item-included','#tab-id-2','[id$="-container"]']
     };
     const serialize = el => el ? el.innerText.replace(/\s+\n/g,'\n').trim() : '';
     function findFirst(arr) {
@@ -145,12 +145,12 @@ async function collectSections(page) {
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features       = serialize(findFirst(map.features));
     if(!sections.features) {
-      for (const h of document.querySelectorAll('h2,h3,h4')) {
-        const t = h.innerText.toLowerCase();
-        if (t.includes('feature')) {
-          let e = h.nextElementSibling;
-          while(e && !/^ul|ol$/i.test(e.tagName)) e = e.nextElementSibling;
-          if(e){ sections.features = e.innerText.trim(); break; }
+      for(const h of document.querySelectorAll('h2,h3,h4')) {
+        const t=h.innerText.toLowerCase();
+        if(t.includes('feature')) {
+          let e=h.nextElementSibling;
+          while(e && !/^ul|ol$/i.test(e.tagName)) e=e.nextElementSibling;
+          if(e){ sections.features=e.innerText.trim(); break; }
         }
       }
     }
@@ -165,9 +165,9 @@ async function collectSections(page) {
         '.tab-content','.tab-panel','.accordion-content',
         '[id^="tab-"]','[class*="tab-"]','[class*="Tab"]','[id$="-container"]'
       ].join(',');
-      for (const p of document.querySelectorAll(sel)) {
+      for(const p of document.querySelectorAll(sel)) {
         const txt = p.innerText.trim().toLowerCase();
-        if (txt.includes("what’s in the box")||txt.includes("included items")||txt.includes("product includes")) {
+        if(txt.includes("what’s in the box")||txt.includes("included items")||txt.includes("product includes")) {
           sections.included = p.innerText.replace(/\s+\n/g,'\n').trim();
           break;
         }
@@ -175,18 +175,18 @@ async function collectSections(page) {
     }
 
     // Definition lists
-    const dls = [...document.querySelectorAll('dl')].map(dl=>dl.innerText.trim());
-    if (dls.length) sections.dl = dls.join('\n---\n');
+    const dls=[...document.querySelectorAll('dl')].map(dl=>dl.innerText.trim());
+    if(dls.length) sections.dl=dls.join('\n---\n');
 
     // Capture all panels
-    const panels = document.querySelectorAll([
+    const panels=document.querySelectorAll([
       '[role="tabpanel"]',
       '.tab-content','.tab-panel','.accordion-content',
       '[id^="tab-"]','[class*="tab-"]','[class*="Tab"]','[id$="-container"]'
     ].join(','));
-    sections.tabs = {};
-    panels.forEach(p => {
-      const key = p.getAttribute('aria-labelledby')||p.id||p.previousElementSibling?.innerText||'tab';
+    sections.tabs={};
+    panels.forEach(p=>{
+      const key=p.getAttribute('aria-labelledby')||p.id||p.previousElementSibling?.innerText||'tab';
       sections.tabs[key.trim().slice(0,30)] = p.innerText.trim();
     });
 
@@ -232,15 +232,16 @@ export async function browseProduct(url, opts = {}) {
   try {
     await page.goto(url, { waitUntil:'domcontentloaded', timeout:navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout:navigationTimeoutMs }).catch(()=>{});
-    // Accept cookies unchanged
     await autoExpand(page);
 
-    // **NEW**: explicitly click all hash-link tabs (including Spectra's tab-2)
+    // Explicitly click all hash-link tabs (including Spectra's tab-2)
     try {
       const tabLinks = await page.$$('[href^="#tab-"]');
       for (const link of tabLinks) {
+        const href = await link.getAttribute('href');
         await link.click().catch(() => {});
-        await page.waitForTimeout(200);
+        if (href) await page.waitForSelector(href, { timeout: 1000 }).catch(() => {});
+        await page.waitForTimeout(300);
       }
     } catch {}
 
@@ -248,7 +249,7 @@ export async function browseProduct(url, opts = {}) {
 
     const visible_text = await collectVisibleText(page);
     const sections     = await collectSections(page);
-    // ... other collections unchanged ...
+    // ... other data collectors unchanged ...
 
     await context.close();
     await browser.close();
