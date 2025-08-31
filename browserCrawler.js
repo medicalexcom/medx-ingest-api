@@ -207,6 +207,32 @@ async function collectSections(page) {
     }
     sections.specifications = serialize(findFirst(map.specifications));
     sections.features = serialize(findFirst(map.features));
+    // Fallback: if no features were found by the default selectors, search for
+    // headings containing “feature” and take the next <ul>/<ol> list as the
+    // feature list.  This captures “Features & Benefits” lists without a dedicated selector.
+    try {
+      if (!sections.features) {
+        const headings = Array.from(document.querySelectorAll('h2, h3, h4'));
+        for (const h of headings) {
+          const txt = (h.innerText || '').trim().toLowerCase();
+          if (!txt) continue;
+          if (txt.includes('feature')) {
+            let el = h.nextElementSibling;
+            while (el && !(el.tagName && (/^ul$/i.test(el.tagName) || /^ol$/i.test(el.tagName)))) {
+              el = el.nextElementSibling;
+            }
+            if (el && el.innerText) {
+              sections.features = el.innerText
+                .replace(/\s+\n/g, '\n')
+                .trim();
+              break;
+            }
+          }
+        }
+      }
+    } catch (_) {
+      /* swallow */
+    }
     sections.included = serialize(findFirst(map.included));
     return sections;
   });
