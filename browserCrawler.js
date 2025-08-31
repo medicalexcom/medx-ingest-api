@@ -701,7 +701,12 @@ export async function browseProduct(url, opts = {}) {
       await page.waitForTimeout(350);
     }
 
-    // Optionally capture full HTML for debugging (not returned by default)
+    // Remove all nav/menu noise
+    await page.evaluate(() => {
+      document.querySelectorAll('.public-sub-menu').forEach(el => el.remove());
+    });
+    
+    // Now grab the cleaned HTML, if requested
     const full_html = includeHtml ? await page.content() : null;
 
     // Collect primary artifacts
