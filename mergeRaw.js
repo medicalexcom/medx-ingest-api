@@ -311,6 +311,101 @@ function removeNoise(record) {
     });
   }
 
+  // Clean up description_raw by stripping obvious navigation menu content and
+  // marketing call‑outs that sometimes leak into the description from the
+  // scraped page.  Some ecommerce sites embed large navigation lists (e.g.
+  // "Inventory Management", "Patient Care and Engagement", etc.) or call
+  // to action banners (e.g. "COVID‑19 vaccines are available", "Flu Season
+  // is coming! PRE‑BOOK") directly into the product description block.
+  // These are not part of the product description and should be removed.
+  // Only perform this cleaning when description_raw is a string.  We make
+  // sure to avoid removing legitimate phrases such as "use & operation",
+  // "use and operation", or "close product options", as requested by
+  // downstream consumers.
+  if (typeof rec.description_raw === 'string' && rec.description_raw.trim()) {
+    let desc = rec.description_raw;
+    // Define a set of keyword phrases that indicate navigation or promotional
+    // content.  The patterns are matched case‑insensitively and will
+    // remove entire lines containing them.
+    const navKeywords = [
+      'inventory management',
+      'vaccine management',
+      'biomedical equipment solutions',
+      'instrument management services',
+      'technology consultants',
+      'distribution',
+      'medical waste management',
+      'drug disposal',
+      'patient home delivery',
+      'medical freight management',
+      'lab management',
+      'lab consulting',
+      'lab information systems',
+      'lab results',
+      'clinical and equipment setup',
+      'training and compliance',
+      'patient care and engagement',
+      'remote patient monitoring',
+      'financial services',
+      'revenue cycle management',
+      'invoice management',
+      'capital medical equipment',
+      'real estate solutions',
+      'analytics & reporting',
+      'analytics and reporting',
+      'ecommerce services',
+      'covid\-19 vaccines',
+      'flu season is coming',
+      'order now',
+      'pre\-book',
+      'view all accessories',
+      'view less accessories',
+      'share this:'
+    ];
+    // Split the description into lines to enable granular filtering.  We
+    // deliberately preserve newlines so that rejoining lines maintains
+    // reasonable formatting.
+    const lines = desc.split(/\r?\n/);
+    const filteredLines = [];
+    outer: for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const lower = trimmed.toLowerCase();
+      // Preserve lines with certain phrases explicitly requested by the user
+      // (e.g. "use & operation", "use and operation", "close product options").
+      if (/use\s*&\s*operation/i.test(trimmed) || /use\s+and\s+operation/i.test(trimmed) || /close\s+product\s+options/i.test(trimmed)) {
+        filteredLines.push(line);
+        continue;
+      }
+      // Count the number of navigation keywords present in this line.  If
+      // two or more keywords are present, treat the line as navigation or
+      // promotional content and skip it entirely.  This approach avoids
+      // removing lines that merely mention a single keyword in passing but
+      // aggressively removes long blocks of category listings.
+      let navMatchCount = 0;
+      for (const kw of navKeywords) {
+        if (lower.includes(kw)) {
+          navMatchCount++;
+        }
+      }
+      if (navMatchCount >= 2) {
+        continue outer;
+      }
+      // As a fallback, remove lines that exactly match a single nav keyword.
+      for (const kw of navKeywords) {
+        const exact = kw.trim().toLowerCase();
+        if (lower === exact) {
+          continue outer;
+        }
+      }
+      filteredLines.push(line);
+    }
+    desc = filteredLines.join('\n');
+    // Collapse multiple blank lines into a single blank line and trim.
+    desc = desc.replace(/\n{3,}/g, '\n\n').trim();
+    rec.description_raw = desc;
+  }
+
   // Populate specs from feature lines when no specs were extracted.  Some sites
   // embed technical specifications within the bullet list rather than in a
   // dedicated table.  When the `specs` object is empty, attempt to parse
