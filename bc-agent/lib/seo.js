@@ -1,6 +1,9 @@
 import fetch from "node-fetch";
 import slugify from "slugify";
 
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
 const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 export async function generateSEO(payload) {
@@ -13,9 +16,9 @@ export async function generateSEO(payload) {
   ).slice(0, 60);
 
   const fs = await import('node:fs');
-  const system = fs.readFileSync("prompts/seo.md", "utf8")
-    .replaceAll("{{STORE_ORIGIN}}", process.env.STORE_ORIGIN || "https://example.com");
-
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const system = fs.readFileSync(join(__dirname, '../prompts/seo.md'), 'utf8')
+    .replaceAll('{{STORE_ORIGIN}}', process.env.STORE_ORIGIN || 'https://xample.com');;
   const user = {
     productName: payload.productName,
     brand: payload.brand,
