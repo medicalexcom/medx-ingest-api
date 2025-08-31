@@ -1,5 +1,3 @@
-// Removed cleanProductRecord import – send full merged object directly to GPT
-
 // mergeRaw.js
 // Utility to combine the existing raw scraper output with the
 // output from the Playwright browser collector. The merge is
@@ -58,7 +56,7 @@ function removeNoise(record) {
       // Remove generic headings commonly found in manuals or product pages that do not describe the product itself.
       // Examples include "parts diagram", "technical resources", "download catalog", "accessories", "specification",
       // "specifications", "product specifications", "dimensions" and "features/benefits".  These headings often accompany
-      // non‑feature content such as links or tables and should not be emitted as features.
+      // non-feature content such as links or tables and should not be emitted as features.
       if (/(parts\s+diagram|technical\s+resources|technical\s+documents|technical\s+downloads|owners?\s+manual|owner's\s+manual|download\s+catalog|accessories\b|hcpcs\s+reimbursement|specification(s)?\b|product\s+specifications?|dimension(s)?\b|features\s*\/\s*benefits|features\s+and\s+benefits)/i.test(lower)) return false;
       // Remove lines that are entirely uppercase and contain more than two words.
       // Such lines are often section headings or navigation prompts rather than product features.
@@ -111,7 +109,7 @@ function removeNoise(record) {
       // description.
 
 
-      // Remove e‑commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
+      // Remove e-commerce or promotional noise: stock status, quantity prompts, eligibility checks, reviews or accessories
       if (/\bin\s*stock\b/.test(lower)) return false;
       // Filter out generic cart/quantity/review prompts, but keep "use & operation" and
       // "use and operation" since they may relate to legitimate product information.
@@ -121,7 +119,7 @@ function removeNoise(record) {
       // Keep descriptive phrases like "vacuum suction up to" as part of the feature set.
       if (/shopping cart|wish list|compare|create an account|sign in|log in|checkout|assembly|eligibility|hsa|simple store|replacement bags|covid|19 update/i.test(lower)) return false;
 
-      // Remove additional storefront navigation, account prompts and other e‑commerce noise.
+      // Remove additional storefront navigation, account prompts and other e-commerce noise.
       // These phrases commonly leak into scraped feature lists from page chrome (menus,
       // account controls, legal footers, etc.). They do not describe the product itself.
       if (/add to favorites|favorites? list|error occurred|product is already in the cart|view product options|sign in to view price|quantity|share this|stock status|item #|upc #|my account|order status|cancellations & returns|terms & conditions|privacy policy|contact us|homecare providers|long term care professionals|healthcare professionals|government professionals|retailers|who we serve|who we are|account|cart|checkout|login|log in|logout|register|create account|locate providers|faqs|press releases|articles & blogs|blog|submit a product idea|patents|support & resources|support & services|knowledge base|bath safety|beds|commodes|mobility|patient room|personal care|respiratory|sleep therapy|therapeutic support surfaces|new arrivals|support and resources|support and services|knowledge base|parts diagram|owners manual|owner's manual|download catalog page|download pdf|pdf|sds|stock photos|view all accessories|view less accessories|view all products|back to products|add up to|frequently viewed|compare products?|view product options|expand product parts|close product parts|view all accessories|view less accessories|sign in to view price|limited shipping options|similar likeproducts|log in to order|sign in to see pricing|log in to order|stock|select quantity/i.test(lower)) return false;
@@ -147,7 +145,7 @@ function removeNoise(record) {
       // a component (e.g., "Commode Pail Only").
       // Do not drop lines simply because all of their tokens match spec keys or values.
       // Some features may duplicate spec terms and should still be kept.
-      // Remove only obvious e‑commerce phrases like "check out faster".  Keep
+      // Remove only obvious e-commerce phrases like "check out faster".  Keep
       // other labels (e.g. "features & benefits", "assembly", "very quiet", etc.)
       if (/check out faster/i.test(lower)) return false;
       // Do not drop lines that start with model identifiers or technical descriptors
@@ -220,7 +218,7 @@ function removeNoise(record) {
     // documents with spaces in their filenames (e.g. "Product Information.pdf").
     rec.pdf_docs = rec.manuals.map(url => {
       if (typeof url !== 'string') return url;
-      // Only replace literal spaces; avoid double‑encoding already encoded strings.
+      // Only replace literal spaces; avoid double-encoding already encoded strings.
       return url.replace(/ /g, '%20');
     });
   }
@@ -236,7 +234,7 @@ function removeNoise(record) {
   // Deduplicate feature lists to prevent duplicate bullets leaking into
   // downstream content. Some sites repeat the same feature text multiple
   // times (e.g. in summary and feature sections). We normalise by
-  // trimming and comparing lower‑cased strings and then filter the
+  // trimming and comparing lower-cased strings and then filter the
   // arrays in place. Do this for both the raw and cleaned feature lists
   // when present on the record.
   if (Array.isArray(rec.features_raw)) {
@@ -312,11 +310,11 @@ function removeNoise(record) {
   }
 
   // Clean up description_raw by stripping obvious navigation menu content and
-  // marketing call‑outs that sometimes leak into the description from the
+  // marketing call-outs that sometimes leak into the description from the
   // scraped page.  Some ecommerce sites embed large navigation lists (e.g.
   // "Inventory Management", "Patient Care and Engagement", etc.) or call
-  // to action banners (e.g. "COVID‑19 vaccines are available", "Flu Season
-  // is coming! PRE‑BOOK") directly into the product description block.
+  // to action banners (e.g. "COVID-19 vaccines are available", "Flu Season
+  // is coming! PRE-BOOK") directly into the product description block.
   // These are not part of the product description and should be removed.
   // Only perform this cleaning when description_raw is a string.  We make
   // sure to avoid removing legitimate phrases such as "use & operation",
@@ -325,7 +323,7 @@ function removeNoise(record) {
   if (typeof rec.description_raw === 'string' && rec.description_raw.trim()) {
     let desc = rec.description_raw;
     // Define a set of keyword phrases that indicate navigation or promotional
-    // content.  The patterns are matched case‑insensitively and will
+    // content.  The patterns are matched case-insensitively and will
     // remove entire lines containing them.
     const navKeywords = [
       'inventory management',
@@ -360,7 +358,17 @@ function removeNoise(record) {
       'pre\-book',
       'view all accessories',
       'view less accessories',
-      'share this:'
+      'share this:',
+      // Added: common cookie/consent/footer clutter that leaks into descriptions
+      'cookie policy',
+      'privacy policy',
+      'terms of use',
+      'terms & conditions',
+      'accessibility statement',
+      'subscribe to our newsletter',
+      'track order',
+      'help center',
+      'customer service'
     ];
     // Split the description into lines to enable granular filtering.  We
     // deliberately preserve newlines so that rejoining lines maintains
@@ -471,15 +479,15 @@ function removeNoise(record) {
   // Sanitize the browser's visible_text property.  Some scraped pages leak
   // navigation menus or category lists into `_browse.visible_text`, which makes
   // it unreadable and irrelevant for GPT.  Detect obviously noisy visible text
-  // and replace it with a human‑readable fallback (typically the product
+  // and replace it with a human-readable fallback (typically the product
   // description) without altering any other fields.  This logic triggers only
-  // when the visible text is very long, contains many newline‑separated lines,
+  // when the visible text is very long, contains many newline-separated lines,
   // and does not appear to mention the product's name.  Otherwise, the
   // original visible_text is preserved.
   if (rec._browse && typeof rec._browse.visible_text === 'string') {
     const vt = rec._browse.visible_text.trim();
-    // Count newline‑separated lines; noisy category lists often have dozens
-    // of single‑word lines.
+    // Count newline-separated lines; noisy category lists often have dozens
+    // of single-word lines.
     const lines = vt.split(/\n+/);
     // Extract salient words from the product name (words longer than 3 chars)
     const nameWords = Array.isArray(rec.name_raw ? rec.name_raw.split(/\s+/) : [])
@@ -526,7 +534,7 @@ function removeNoise(record) {
       // categorise feature sentences, perform fuzzy deduplication across
       // sources, isolate HTML/structured features/specs, and compute a
       // simple quality score.  These enhancements preserve source provenance
-      // while maintaining backwards‑compatible top‑level fields.
+      // while maintaining backwards-compatible top-level fields.
 
       // 1. Extract features and specs from the dynamic browse sections.
       if (rec._browse && rec._browse.sections && typeof rec._browse.sections === 'object') {
@@ -553,7 +561,7 @@ function removeNoise(record) {
           .map(s => String(s).trim())
           .filter(s => s.length > 0);
         // Assign to rec.features_browse after deduplication.  Do not remove
-        // from rec.features_raw; the top‑level list should continue to
+        // from rec.features_raw; the top-level list should continue to
         // aggregate all features for backwards compatibility.
         if (featuresBrowseList.length) {
           const dedupedBrowse = deduplicateSimilarLines(featuresBrowseList);
@@ -665,7 +673,7 @@ function removeNoise(record) {
       }
       rec.features_raw = combined;
 
-      // 5. Filter out non‑English lines using a simple heuristic.  Iterate
+      // 5. Filter out non-English lines using a simple heuristic.  Iterate
       // through features_raw and keep only lines that appear to be English.
       rec.features_raw = rec.features_raw.filter(item => isEnglishLine(String(item)));
       rec.features_pdf = rec.features_pdf.filter(item => isEnglishLine(String(item)));
@@ -692,6 +700,15 @@ function removeNoise(record) {
       const score = computeQualityScore(rec);
       rec.quality_score = score;
       rec.needs_review = score < 0.7;
+
+      // 8. Strip tracking params from URLs (e.g., utm_*, gclid) across known URL fields.
+      stripTrackingParamsFromRecord(rec);
+
+      // 9. Scrub potential data leaks/noise in `_browse` (cookies, tokens, headers, HTML dumps, huge/binary fields).
+      if (rec._browse && typeof rec._browse === 'object') {
+        scrubBrowseLeaks(rec._browse);
+        pruneLargeFields(rec._browse);
+      }
 
       return rec;
 }
@@ -792,7 +809,7 @@ function parseSpecLine(line) {
 // Heuristic to detect whether a line appears to be English.  Counts the
 // proportion of ASCII letters relative to the total number of characters
 // (excluding whitespace) and ensures at least one common English stopword
-// appears.  Lines failing these checks are treated as non‑English and
+// appears.  Lines failing these checks are treated as non-English and
 // filtered out.
 function isEnglishLine(text) {
   const cleaned = String(text || '');
@@ -810,7 +827,7 @@ function isEnglishLine(text) {
   return hasStop;
 }
 
-// Simple rule‑based classifier to categorise a feature sentence as a
+// Simple rule-based classifier to categorise a feature sentence as a
 // 'feature', 'benefit' or 'included' item.  Looks for indicative
 // keywords and falls back to 'feature' when ambiguous.
 function classifySentence(text) {
@@ -829,7 +846,7 @@ function classifySentence(text) {
 // Compute a quality score for a record.  The score ranges from 0 to 1 and
 // reflects the richness of the product description.  Points are awarded
 // for having multiple features, multiple specification entries, and
-// available PDF documents.  Additional points are given when PDF‑
+// available PDF documents.  Additional points are given when PDF-
 // sourced features exist.  The weighting can be tuned empirically.
 function computeQualityScore(rec) {
   let score = 0;
@@ -841,9 +858,199 @@ function computeQualityScore(rec) {
   if (specCount >= 3) score += 0.4; else if (specCount >= 1) score += 0.2;
   // Bonus for PDF documents available
   if (Array.isArray(rec.pdf_docs) && rec.pdf_docs.length > 0) score += 0.1;
-  // Bonus for having at least one PDF‑sourced feature
+  // Bonus for having at least one PDF-sourced feature
   if (Array.isArray(rec.features_pdf) && rec.features_pdf.length > 0) score += 0.1;
   // Clamp score to [0, 1]
   if (score > 1) score = 1;
   return score;
+}
+
+/* --------------------------------------------------------------------------
+ * Additional hardening helpers: leak scrubbing, URL tracking cleanup, pruning
+ * of huge/binary fields inside `_browse`. These are additive and do not
+ * alter existing behavior beyond removing clear noise/leaks.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Remove tracking parameters from likely URL fields across the record.
+ */
+function stripTrackingParamsFromRecord(rec) {
+  const sanitizeArrayOfUrls = (arr = []) =>
+    arr.map(u => (typeof u === 'string' ? stripTrackingParams(u) : u));
+
+  if (Array.isArray(rec.pdf_docs)) rec.pdf_docs = sanitizeArrayOfUrls(rec.pdf_docs);
+  if (Array.isArray(rec.manuals)) rec.manuals = sanitizeArrayOfUrls(rec.manuals);
+
+  if (typeof rec.url === 'string') rec.url = stripTrackingParams(rec.url);
+  if (typeof rec.canonical_url === 'string') rec.canonical_url = stripTrackingParams(rec.canonical_url);
+
+  // Common image/link collections that might be strings or objects with url/src
+  const scrubUrlish = (val) => {
+    if (!val) return val;
+    if (typeof val === 'string') return stripTrackingParams(val);
+    if (Array.isArray(val)) return val.map(scrubUrlish);
+    if (typeof val === 'object') {
+      for (const k of Object.keys(val)) {
+        if (['url', 'src', 'href'].includes(k) && typeof val[k] === 'string') {
+          val[k] = stripTrackingParams(val[k]);
+        }
+      }
+      return val;
+    }
+    return val;
+  };
+
+  if (Array.isArray(rec.images)) rec.images = rec.images.map(scrubUrlish);
+  if (rec._browse && typeof rec._browse === 'object') {
+    const b = rec._browse;
+    if (Array.isArray(b.links)) b.links = b.links.map(scrubUrlish);
+    if (Array.isArray(b.images)) b.images = b.images.map(scrubUrlish);
+    if (typeof b.url === 'string') b.url = stripTrackingParams(b.url);
+    if (typeof b.canonical === 'string') b.canonical = stripTrackingParams(b.canonical);
+  }
+}
+
+/**
+ * Remove common tracking params from a URL string without altering base/fragment.
+ */
+function stripTrackingParams(url) {
+  try {
+    // Fast path for obviously not-a-URL strings
+    if (!url || typeof url !== 'string' || !url.includes('?')) return url;
+    const [baseAndQ, hash = ''] = url.split('#');
+    const [base, query = ''] = baseAndQ.split('?');
+    if (!query) return url;
+
+    const deny = new Set([
+      'gclid','fbclid','igshid','utm_source','utm_medium','utm_campaign','utm_term','utm_content',
+      'mc_cid','mc_eid','_hsenc','_hsmi','ga','gad_source','mkt_tok','oly_anon_id','oly_enc_id',
+      'ref','ref_src','cmp','campaign','aff','affid','aff_source','spm','trk'
+    ]);
+
+    const kept = query
+      .split('&')
+      .filter(Boolean)
+      .filter(pair => {
+        const name = decodeURIComponent(pair.split('=')[0] || '').toLowerCase();
+        return name && !name.startsWith('utm_') && !deny.has(name);
+      });
+
+    const rebuilt = base + (kept.length ? '?' + kept.join('&') : '') + (hash ? '#' + hash : '');
+    return rebuilt;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Scrub leaks/noise from `_browse` by removing obviously sensitive keys and redacting secrets
+ * in string values. Operates in-place and recursively.
+ */
+function scrubBrowseLeaks(browse) {
+  const keyDenyRegex = /^(cookies?|storage|localstorage|sessionstorage|authorization|authorisation|auth|headers?|csrf|token|access[_-]?token|id[_-]?token|refresh[_-]?token|secret|password|network|requests?|responses?|xhr|fetch|performance|metrics?|raw[_-]?html|html_raw|innerhtml|outerhtml|source|scripts?|styles?)$/i;
+
+  const redactPatterns = [
+    // JWTs
+    { re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, repl: '[REDACTED_JWT]' },
+    // Stripe keys
+    { re: /\bsk_(live|test)_[A-Za-z0-9]{10,}\b/g, repl: '[REDACTED_STRIPE_KEY]' },
+    // AWS Access Key
+    { re: /\bAKIA[0-9A-Z]{16}\b/g, repl: '[REDACTED_AWS_KEY]' },
+    // Google API keys
+    { re: /\bAIza[0-9A-Za-z\-_]{20,}\b/g, repl: '[REDACTED_API_KEY]' },
+    // Bearer tokens
+    { re: /\bBearer\s+[A-Za-z0-9._\-]{20,}\b/gi, repl: 'Bearer [REDACTED_TOKEN]' },
+    // Email addresses
+    { re: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, repl: '[redacted-email]' },
+    // Likely session ids / long hex
+    { re: /\b[a-f0-9]{32,}\b/gi, repl: '[REDACTED_HEX]' }
+  ];
+
+  const walk = (obj, path = []) => {
+    if (!obj) return;
+    if (Array.isArray(obj)) {
+      for (let i = 0; i < obj.length; i++) {
+        const v = obj[i];
+        if (typeof v === 'string') {
+          obj[i] = redactString(v, redactPatterns);
+        } else if (v && typeof v === 'object') {
+          walk(v, path.concat(String(i)));
+        }
+      }
+      return;
+    }
+    if (typeof obj !== 'object') return;
+
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      // Remove sensitive/noisy keys entirely
+      if (keyDenyRegex.test(key)) {
+        delete obj[key];
+        continue;
+      }
+      // Recurse or redact strings
+      if (val && typeof val === 'object') {
+        walk(val, path.concat(key));
+      } else if (typeof val === 'string') {
+        obj[key] = redactString(val, redactPatterns);
+      }
+    }
+  };
+
+  walk(browse);
+}
+
+/**
+ * Redact secrets from a string using provided {re, repl} rules.
+ */
+function redactString(str, rules) {
+  let out = String(str);
+  for (const { re, repl } of rules) {
+    out = out.replace(re, repl);
+  }
+  // Normalize excessive whitespace from HTML-y dumps without altering content meaning
+  out = out.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  return out;
+}
+
+/**
+ * Prune extremely large strings and obvious binary objects from an object graph.
+ * Keeps the structure lean for LLMs without affecting product features/specs.
+ */
+function pruneLargeFields(root, { maxStringLen = 200_000 } = {}) {
+  const isBinary = (v) =>
+    (typeof Buffer !== 'undefined' && Buffer.isBuffer(v)) ||
+    v instanceof ArrayBuffer ||
+    ArrayBuffer.isView?.(v);
+
+  const walk = (obj) => {
+    if (!obj) return;
+    if (Array.isArray(obj)) {
+      for (let i = obj.length - 1; i >= 0; i--) {
+        const v = obj[i];
+        if (typeof v === 'string' && v.length > maxStringLen) {
+          obj.splice(i, 1);
+        } else if (isBinary(v)) {
+          obj.splice(i, 1);
+        } else if (v && typeof v === 'object') {
+          walk(v);
+        }
+      }
+      return;
+    }
+    if (typeof obj !== 'object') return;
+
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (typeof v === 'string' && v.length > maxStringLen) {
+        delete obj[k];
+      } else if (isBinary(v)) {
+        delete obj[k];
+      } else if (v && typeof v === 'object') {
+        walk(v);
+      }
+    }
+  };
+
+  walk(root);
 }
