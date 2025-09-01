@@ -179,24 +179,8 @@ function removeNoise(record) {
         delete rec.specs[key];
         continue;
       }
-      // Remove warranty details from specs; keep high-level warranty separately
-      if (/warranty/.test(lowerKey)) {
-        delete rec.specs[key];
-        continue;
-      }
       // Remove store pricing and special promotion keys (e.g. simple_store_replacement_bags, covid updates)
       if (/simple_store|covid/.test(lowerKey)) {
-        delete rec.specs[key];
-        continue;
-      }
-
-      // Remove unnatural spec keys that resemble sentences or have multiple underscores.
-      // Heuristic: remove keys starting with 'the_' (e.g. 'the_most_advanced_hospital'),
-      // or having more than two underscores, or containing generic descriptor words like
-      // 'pump', 'modes', or 'grade'. Such keys are likely descriptive text rather than
-      // actual specification names.
-      const underscoreCount = (key.match(/_/g) || []).length;
-      if (/^the_/i.test(key) || underscoreCount > 2 || /pump|modes|grade/.test(lowerKey)) {
         delete rec.specs[key];
         continue;
       }
