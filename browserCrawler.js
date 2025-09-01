@@ -203,6 +203,13 @@ async function collectVisibleText(page) {
  */
 async function collectSections(page) {
   return page.evaluate(() => {
+    ;[
+      'nav', 'header', 'footer', 'aside',
+      '[role="navigation"]', '.navigation', '.site-nav',
+      '.nav', '.nav-bar', '.breadcrumb', '.breadcrumbs', '.pagination'
+    ].forEach(sel =>
+      document.querySelectorAll(sel).forEach(el => el.remove())
+    );
     const sections = {};
     const map = {
       description: [
