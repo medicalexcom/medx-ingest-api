@@ -307,7 +307,8 @@ function normalizeIncluded(lines = []) {
 function sanitizeTabHtml(html) {
   const $ = loadHTML(html || '');
   // Remove Drive Medical UI alerts and hidden notification containers
-  $('.global-alerts, .favorite-success, .favorite-error, #favoriteSuccessMsg, #favoriteErrorMsg, #favoriteRemoveSuccessMsg, #favoriteRemoveErrorMsg, .fullpage-image, .fullPage-image, .full-image, .product-thumbnail-images').remove();
+  // Also strip out generic navigation menus and marketing panels (e.g. public-sub-menu on McKesson)
+  $('.global-alerts, .favorite-success, .favorite-error, #favoriteSuccessMsg, #favoriteErrorMsg, #favoriteRemoveSuccessMsg, #favoriteRemoveErrorMsg, .fullpage-image, .fullPage-image, .full-image, .product-thumbnail-images, .public-sub-menu, .public-sub-menu-icon, .public-sub-menu-content, .public-sub-menu-child, .highlight-image, .highlight-content').remove();
   // Remove elements that are hidden via CSS or the hidden attribute
   $('[hidden]').remove();
   $('[style*=\'display:none\']').remove();
