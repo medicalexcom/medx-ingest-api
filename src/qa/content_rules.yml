@@ -1,0 +1,10 @@
+required_disclaimer: "This product is not intended to diagnose, treat, cure, or prevent any disease."
+banned_phrases:
+  - "cures cancer"
+  - "guaranteed results"
+  - "FDA-approved"
+seo:
+  title_max: 70
+  description_max: 160
+images:
+  min_count: 1
