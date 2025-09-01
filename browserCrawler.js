@@ -192,10 +192,9 @@ blacklist.has(node.parentElement.tagName)) continue;
 === 'aside') { skip = true; break; }
               const cls = (p.className ? String(p.className).toLowerCase() : 
 '');
-              // Updated regex: also skip cookie/privacy/onetrust classes
-              if 
-(/(^|\b)(nav|header|footer|sidebar|breadcrumb|menu|account|cookie|onetrust|privacy)(\b|$)/.test(cls)) { 
-skip = true; break; }
+              // Skip nav/footer/sidebar/breadcrumb/menu/account classes; also skip cookie/onetrust banners
+              if (/(^|\b)(nav|header|footer|sidebar|breadcrumb|menu|account)(\b|$)/.test(cls) || /(cookie|onetrust)/.test(cls)) { 
+                skip = true; break; }
               p = p.parentElement;
             }
             if (skip) continue;
