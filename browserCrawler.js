@@ -269,30 +269,6 @@ async function collectSections(page) {
       } catch { /* ignore */ }
     }
 
-    // Additional fallback: search for paragraphs/strong elements with "feature"
-    // Some pages label feature lists using <p> or <strong> tags instead of headings.
-    if (!sections.features) {
-      try {
-        const candidates = Array.from(document.querySelectorAll('p, strong, span'));
-        for (const node of candidates) {
-          const txt = (node.innerText || '').toLowerCase();
-          if (txt && txt.includes('feature')) {
-            // Look ahead for the next list element within a few siblings
-            let next = node.nextElementSibling;
-            let hops = 0;
-            while (next && !(next.tagName && (/^ul$/i.test(next.tagName) || /^ol$/i.test(next.tagName))) && hops < 5) {
-              next = next.nextElementSibling;
-              hops++;
-            }
-            if (next && (/^ul$/i.test(next.tagName) || /^ol$/i.test(next.tagName)) && next.innerText) {
-              sections.features = next.innerText.replace(/\s+\n/g, '\n').trim();
-              break;
-            }
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
     // Included
     sections.included = serialize(findFirst(map.included));
 
