@@ -152,7 +152,8 @@ async function acceptCookiesIfPresent(page) {
 
 /**
  * Extract user-visible text from the document (runtime context).
- * Avoids nav/header/footer/aside + common noise classes.
+ * Avoids nav/header/footer/aside + common noise classes, and skips only
+ * cookie/onetrust banners (no broader “privacy” filtering).
  * @param {import('playwright').Page} page
  */
 async function collectVisibleText(page) {
@@ -170,14 +171,20 @@ async function collectVisibleText(page) {
         const node = walker.currentNode;
         if (!node.parentElement || blacklist.has(node.parentElement.tagName)) continue;
 
-        // Skip text inside navigation-like areas to reduce noise
+        // Skip nav/header/footer/aside regions or cookie/onetrust banners
         let skip = false;
         let p = node.parentElement;
         while (p) {
           const tag = (p.tagName || '').toLowerCase();
-          if (tag === 'nav' || tag === 'header' || tag === 'footer' || tag === 'aside') { skip = true; break; }
-          const cls = (p.className ? String(p.className).toLowerCase() : '');
-          if (/(^|\b)(nav|header|footer|sidebar|breadcrumb|menu|account)(\b|$)/.test(cls)) { skip = true; break; }
+          if (['nav','header','footer','aside'].includes(tag)) { skip = true; break; }
+          const cls = (p.className || '').toLowerCase();
+          if (/(^|\b)(nav|header|footer|sidebar|breadcrumb|menu|account)(\b|$)/.test(cls)) {
+            skip = true; break;
+          }
+          // Only skip cookie or onetrust
+          if (/cookie/.test(cls) || /onetrust/.test(cls)) {
+            skip = true; break;
+          }
           p = p.parentElement;
         }
         if (skip) continue;
@@ -185,14 +192,14 @@ async function collectVisibleText(page) {
         const t = node.nodeValue.replace(/\s+/g, ' ').trim();
         if (t) chunks.push(t);
       }
-      return chunks.join('\n');
+      const main = document.querySelector('main') || document.body;
+      const extracted = chunks.join('\n').trim();
+      if (!extracted || extracted.length < 10) {
+        return document.body.innerText.replace(/\s+\n/g, '\n').trim();
+      }
+      return extracted;
     }
-    const main = document.querySelector('main') || document.body;
-    const extracted = textFrom(main).trim();
-    if (!extracted || extracted.length < 10) {
-      return document.body.innerText.replace(/\s+\n/g, '\n').trim();
-    }
-    return extracted;
+    return textFrom(document.body);
   });
 }
 
