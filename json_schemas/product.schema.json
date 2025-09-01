@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Product",
+  "type": "object",
+  "required": ["name", "sku", "brand", "price", "description", "categories"],
+  "properties": {
+    "name": { "type": "string", "minLength": 3, "maxLength": 255 },
+    "sku": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "brand": { "type": "string", "minLength": 1 },
+    "price": { "type": "number", "minimum": 0 },
+    "description": { "type": "string", "minLength": 30 },
+    "short_description": { "type": "string" },
+    "images": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "minItems": 1
+    },
+    "categories": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 2 },
+      "minItems": 1
+    },
+    "specs_html": { "type": "string" },
+    "faq": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["q", "a"],
+        "properties": {
+          "q": { "type": "string" },
+          "a": { "type": "string" }
+        }
+      }
+    },
+    "variants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sku", "option_values", "price"],
+        "properties": {
+          "sku": { "type": "string" },
+          "price": { "type": "number", "minimum": 0 },
+          "option_values": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["option_name", "value"],
+              "properties": {
+                "option_name": { "type": "string" },
+                "value": { "type": "string" }
+              }
+            }
+          },
+          "image_url": { "type": "string", "format": "uri" }
+        }
+      }
+    },
+    "meta_title": { "type": "string", "maxLength": 70 },
+    "meta_description": { "type": "string", "maxLength": 160 },
+    "regulatory_disclaimer": { "type": "string" }
+  },
+  "additionalProperties": false
+}
