@@ -306,6 +306,8 @@ function normalizeIncluded(lines = []) {
  */
 export async function harvestTabsFromHtml(html, baseUrl) {
   const $ = loadHTML(html);
+  $('nav, header, footer, aside, .navigation, .site-nav, .nav, .nav-bar, .breadcrumb, .breadcrumbs, .pagination')
+    .remove();
   // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
   // Fetch remote tab content if any
