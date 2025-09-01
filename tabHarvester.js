@@ -11,7 +11,10 @@
 //     new `normalizeIncluded` helper produces canonical strings of the
 //     form `n × item` and aggregates duplicate items.  Without this,
 //     quantities were ignored and duplicates were not counted.
-//
+//   * **Sanitisation of hidden/alert tab content** — Tab HTML is now
+//     cleaned to remove hidden alert banners and other UI noise (e.g.
+//     “Product is already in the cart”, “Add to Favorites” messages).
+
 import { load as loadHTML } from 'cheerio';
 
 // Normalise whitespace and trim.  Converts any sequence of whitespace
@@ -293,6 +296,26 @@ function normalizeIncluded(lines = []) {
 }
 
 /**
+ * Remove unwanted markup from tab HTML.  This helper strips hidden
+ * notification banners and other non-content elements (e.g. global alert
+ * messages) which can leak into the scraped data.  It uses cheerio to
+ * parse and prune the fragment before returning it.
+ *
+ * @param {string} html Raw HTML fragment of a tab
+ * @returns {string} Sanitised HTML fragment
+ */
+function sanitizeTabHtml(html) {
+  const $ = loadHTML(html || '');
+  // Remove Drive Medical UI alerts and hidden notification containers
+  $('.global-alerts, .favorite-success, .favorite-error, #favoriteSuccessMsg, #favoriteErrorMsg, #favoriteRemoveSuccessMsg, #favoriteRemoveErrorMsg, .fullpage-image, .fullPage-image, .full-image, .product-thumbnail-images').remove();
+  // Remove elements that are hidden via CSS or the hidden attribute
+  $('[hidden]').remove();
+  $('[style*=\'display:none\']').remove();
+  $('[style*=\'display: none\']').remove();
+  return $('body').html() || $.root().html() || '';
+}
+
+/**
  * Harvest tabs and lists from a full HTML document.  This is the main
  * exported function of this module.  It orchestrates the local
  * extraction of tabs and remote fetches, then post‑processes the
@@ -310,7 +333,14 @@ export async function harvestTabsFromHtml(html, baseUrl) {
   const inDoc = extractTabsFromDoc($);
   // Fetch remote tab content if any
   const remote = await maybeFetchRemoteTabs($);
-  const tabs = [...inDoc, ...remote];
+  let tabs = [...inDoc, ...remote];
+  // Sanitize each tab's HTML and recompute its text to strip hidden alerts
+  tabs = tabs.map(t => {
+    const cleanHtml = sanitizeTabHtml(t.html);
+    const _$ = loadHTML(cleanHtml || '');
+    const cleanText = norm(_$.text() || '');
+    return { ...t, html: cleanHtml, text: cleanText };
+  });
   // Parse lists from tabs
   const includedItems = [];
   const productsInclude = [];
