@@ -152,8 +152,7 @@ async function acceptCookiesIfPresent(page) {
 
 /**
  * Extract user-visible text from the document (runtime context).
- * Avoids nav/header/footer/aside + common noise classes, and skips only
- * cookie/onetrust banners (no broader “privacy” filtering).
+ * Avoids nav/header/footer/aside + common noise classes.
  * @param {import('playwright').Page} page
  */
 async function collectVisibleText(page) {
@@ -171,20 +170,14 @@ async function collectVisibleText(page) {
         const node = walker.currentNode;
         if (!node.parentElement || blacklist.has(node.parentElement.tagName)) continue;
 
-        // Skip nav/header/footer/aside regions or cookie/onetrust banners
+        // Skip text inside navigation-like areas to reduce noise
         let skip = false;
         let p = node.parentElement;
         while (p) {
           const tag = (p.tagName || '').toLowerCase();
-          if (['nav','header','footer','aside'].includes(tag)) { skip = true; break; }
-          const cls = (p.className || '').toLowerCase();
-          if (/(^|\b)(nav|header|footer|sidebar|breadcrumb|menu|account)(\b|$)/.test(cls)) {
-            skip = true; break;
-          }
-          // Only skip cookie or onetrust
-          if (/cookie/.test(cls) || /onetrust/.test(cls)) {
-            skip = true; break;
-          }
+          if (tag === 'nav' || tag === 'header' || tag === 'footer' || tag === 'aside') { skip = true; break; }
+          const cls = (p.className ? String(p.className).toLowerCase() : '');
+          if (/(^|\b)(nav|header|footer|sidebar|breadcrumb|menu|account)(\b|$)/.test(cls)) { skip = true; break; }
           p = p.parentElement;
         }
         if (skip) continue;
@@ -192,14 +185,14 @@ async function collectVisibleText(page) {
         const t = node.nodeValue.replace(/\s+/g, ' ').trim();
         if (t) chunks.push(t);
       }
-      const main = document.querySelector('main') || document.body;
-      const extracted = chunks.join('\n').trim();
-      if (!extracted || extracted.length < 10) {
-        return document.body.innerText.replace(/\s+\n/g, '\n').trim();
-      }
-      return extracted;
+      return chunks.join('\n');
     }
-    return textFrom(document.body);
+    const main = document.querySelector('main') || document.body;
+    const extracted = textFrom(main).trim();
+    if (!extracted || extracted.length < 10) {
+      return document.body.innerText.replace(/\s+\n/g, '\n').trim();
+    }
+    return extracted;
   });
 }
 
@@ -210,13 +203,6 @@ async function collectVisibleText(page) {
  */
 async function collectSections(page) {
   return page.evaluate(() => {
-    ;[
-      'nav', 'header', 'footer', 'aside',
-      '[role="navigation"]', '.navigation', '.site-nav',
-      '.nav', '.nav-bar', '.breadcrumb', '.breadcrumbs', '.pagination'
-    ].forEach(sel =>
-      document.querySelectorAll(sel).forEach(el => el.remove())
-    );
     const sections = {};
     const map = {
       description: [
