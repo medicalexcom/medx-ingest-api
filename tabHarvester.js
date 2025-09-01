@@ -14,6 +14,15 @@
 //
 import { load as loadHTML } from 'cheerio';
 
+/**
+ * Strip all HTML tags and normalize whitespace.
+ * @param {string} html
+ */
+function stripTags(html = '') {
+  const $ = loadHTML(html);
+  return $.root().text().replace(/\s+/g, ' ').trim();
+}
+
 // Normalise whitespace and trim.  Converts any sequence of whitespace
 // characters into a single space and trims leading/trailing spaces.
 const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
@@ -28,7 +37,9 @@ const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
  * @returns {{html: string, text: string}}
  */
 function extractHtmlAndText($, el) {
-  const html = norm($(el).html() || '');
+  // grab raw HTML, then sanitize it to plain text
+  const raw = $(el).html() || '';
+  const html = stripTags(raw);
   const text = norm($(el).text() || '');
   return { html, text };
 }
