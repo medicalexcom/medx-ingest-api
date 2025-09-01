@@ -360,7 +360,10 @@ export async function harvestTabsFromHtml(html, baseUrl) {
   // "included" lists in these containers.  Target only top‑level
   // navigation bars and clearly navigational classes to prevent
   // accidental removal of content.
-  $('body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination').remove();
+  // Remove obvious navigation/header/footer elements only at the top level.  Do not remove
+  // generic .nav containers deeper in the DOM since some sites use these for
+  // product specifications or included-items lists.
+  $('body > nav, body > header, body > footer, body > [role="navigation"], body > .navigation, body > .site-nav, body > .nav-bar, body > .navbar, body > .breadcrumb, body > .breadcrumbs, body > .pagination').remove();
   // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
   // Fetch remote tab content if any
