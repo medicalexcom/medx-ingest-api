@@ -14,23 +14,36 @@
 //
 import { load as loadHTML } from 'cheerio';
 
+// Strip all HTML tags and normalise whitespace.  When sanitising markup
+// we still want to preserve the text content but drop all tags.  This is
+// used to create a cleaned version of tab bodies that no longer leak
+// arbitrary markup.  We keep the original HTML separately for cases
+// (like list parsing) that rely on structural tags such as <li>.
+function stripTags(html = '') {
+  const $ = loadHTML(html || '');
+  return $.root().text().replace(/\s+/g, ' ').trim();
+}
+
 // Normalise whitespace and trim.  Converts any sequence of whitespace
 // characters into a single space and trims leading/trailing spaces.
 const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
 
 /**
- * Extract both inner HTML and text for a cheerio element.  Returns an
- * object with `html` and `text` properties.  If either is absent,
- * returns an empty string for that field.  Whitespace is normalised.
+ * Extract the raw inner HTML, a sanitised version of that HTML (tags stripped),
+ * and the plain text for a cheerio element.  The raw HTML is preserved for
+ * downstream consumers that need structural markup (e.g. list extraction),
+ * while the sanitised HTML removes all tags to prevent leaking arbitrary
+ * markup.  The text property normalises whitespace.
  *
  * @param {CheerioAPI} $ The cheerio instance
  * @param {Cheerio} el The element to extract from
- * @returns {{html: string, text: string}}
+ * @returns {{rawHtml: string, html: string, text: string}}
  */
 function extractHtmlAndText($, el) {
-  const html = norm($(el).html() || '');
+  const rawHtml = $(el).html() || '';
+  const html = stripTags(rawHtml);
   const text = norm($(el).text() || '');
-  return { html, text };
+  return { rawHtml, html, text };
 }
 
 /**
@@ -95,11 +108,35 @@ function findTabCandidates($) {
  * @returns {string[]}
  */
 function listItemsFromHtml(html) {
-  const _$ = loadHTML(html || '');
+  // If no HTML provided, return empty array early
+  if (!html) return [];
+  const _$ = loadHTML(html);
   const items = [];
+  // First attempt: extract canonical list items from <ul> or <ol> tags
   _$('ul li, ol li').each((_, li) => {
     const txt = norm(_$(li).text());
     if (txt) items.push(txt);
+  });
+  // If we found list items via structural tags, return them
+  if (items.length > 0) return items;
+  // Fallback: attempt to parse bullet-like characters in plain text when
+  // there are no <li> elements.  Strip tags and split on common bullet
+  // characters or newline separators.  This helps capture lists that
+  // are styled via CSS rather than semantic <li> elements.
+  const plain = stripTags(html);
+  // Define a regex to split on bullet characters.  We avoid splitting on
+  // simple hyphens to prevent breaking words like “3-inch” or “24mm”.
+  const bulletSplit = /[\u2022\u2023\u25E6\u2043\u2219\u2027]/; // • ‣ ◦ ⁃ ∙ ‧
+  let segments = [];
+  if (bulletSplit.test(plain)) {
+    segments = plain.split(bulletSplit);
+  } else {
+    // As a final fallback, split on newline or carriage return if present
+    segments = plain.split(/\r?\n/);
+  }
+  segments.forEach(seg => {
+    const trimmed = norm(seg);
+    if (trimmed) items.push(trimmed);
   });
   return items;
 }
@@ -116,7 +153,7 @@ function listItemsFromHtml(html) {
  *     or “Products Include” even if not part of an explicit tab widget
  *
  * @param {CheerioAPI} $ The cheerio instance for the document
- * @returns {{title: string, html: string, text: string, source: string}[]}
+ * @returns {{title: string, html: string, rawHtml: string, text: string, source: string}[]}
  */
 function extractTabsFromDoc($) {
   const results = [];
@@ -133,8 +170,8 @@ function extractTabsFromDoc($) {
     $cont.find('.woocommerce-Tabs-panel').each((_, p) => {
       const id = $(p).attr('id');
       const title = titles[id] || norm($(p).attr('aria-label') || $(p).find('h2,h3,h4').first().text());
-      const { html, text } = extractHtmlAndText($, p);
-      if (html || text) results.push({ title, html, text, source: 'woocommerce' });
+      const { rawHtml, html, text } = extractHtmlAndText($, p);
+      if (html || text) results.push({ title, html, rawHtml, text, source: 'woocommerce' });
     });
   });
   // 2) Bootstrap/ARIA tabs
@@ -148,8 +185,8 @@ function extractTabsFromDoc($) {
   $('.tab-content .tab-pane').each((_, pane) => {
     const id = $(pane).attr('id');
     const title = navTitles[id] || norm($(pane).attr('aria-label') || $(pane).find('h2,h3,h4').first().text());
-    const { html, text } = extractHtmlAndText($, pane);
-    if (html || text) results.push({ title, html, text, source: 'bootstrap' });
+    const { rawHtml, html, text } = extractHtmlAndText($, pane);
+    if (html || text) results.push({ title, html, rawHtml, text, source: 'bootstrap' });
   });
   // 3) Generic tab/accordion fallback: heading followed by content until next heading
   const genericContainers = findTabCandidates($);
@@ -163,8 +200,8 @@ function extractTabsFromDoc($) {
         frag.append(sib.clone());
         sib = sib.next();
       }
-      const { html, text } = extractHtmlAndText($, frag);
-      if ((html || text) && title) results.push({ title, html, text, source: 'generic' });
+      const { rawHtml, html, text } = extractHtmlAndText($, frag);
+      if ((html || text) && title) results.push({ title, html, rawHtml, text, source: 'generic' });
     });
   });
   // 4) Heuristic sections based on labels (even outside explicit tabs)
@@ -178,8 +215,8 @@ function extractTabsFromDoc($) {
   $('section, div, article').each((_, sec) => {
     const heading = norm($(sec).find('h2,h3,h4').first().text());
     if (heading && wanted.some(rx => rx.test(heading))) {
-      const { html, text } = extractHtmlAndText($, sec);
-      if (html || text) results.push({ title: heading, html, text, source: 'heuristic' });
+      const { rawHtml, html, text } = extractHtmlAndText($, sec);
+      if (html || text) results.push({ title: heading, html, rawHtml, text, source: 'heuristic' });
     }
   });
   // Deduplicate based on title + first 256 chars of HTML
@@ -224,9 +261,17 @@ async function maybeFetchRemoteTabs($) {
       const html = await res.text();
       const _$ = loadHTML(html);
       const body = _$('#main, article, .entry-content, body').first();
-      const h = norm(body.html() || '');
+      const raw = body.html() || '';
+      const sanitized = stripTags(raw);
       const t = norm(body.text() || '');
-      if (h || t) out.push({ title: title || norm(_$('h1,h2').first().text()), html: h, text: t, source: 'remote' });
+      // For remote content we preserve the raw HTML of the primary body
+      // fragment and also provide a sanitised version.  The raw HTML is
+      // useful for extracting lists, while the sanitised version can be
+      // used downstream to avoid HTML leaks.
+      if (sanitized || t) {
+        const remoteTitle = title || norm(_$('h1,h2').first().text());
+        out.push({ title: remoteTitle, html: sanitized, rawHtml: raw, text: t, source: 'remote' });
+      }
     } catch {
       // Ignore fetch or parse errors silently
     }
@@ -302,10 +347,20 @@ function normalizeIncluded(lines = []) {
  *
  * @param {string} html The full HTML document to parse
  * @param {string} baseUrl The base URL of the document (unused but kept for API parity)
- * @returns {Promise<{tabs: {title: string, html: string, text: string, source: string}[], includedItems: string[], productsInclude: string[]}>}
+ * @returns {Promise<{tabs: {title: string, html: string, rawHtml: string, text: string, source: string}[], includedItems: string[], productsInclude: string[]}>}
  */
 export async function harvestTabsFromHtml(html, baseUrl) {
   const $ = loadHTML(html);
+  // Remove navigation and other common noise elements before extracting tabs.
+  // This prevents cookie banners, navigation bars, and sidebars from being
+  // misinterpreted as tabs or content sections.
+  // Remove only obvious navigation/header/footer elements before extracting
+  // tabs.  We deliberately avoid removing generic `.nav` classes or
+  // `<aside>` elements because some sites wrap product specifications or
+  // "included" lists in these containers.  Target only top‑level
+  // navigation bars and clearly navigational classes to prevent
+  // accidental removal of content.
+  $('body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination').remove();
   // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
   // Fetch remote tab content if any
@@ -315,11 +370,17 @@ export async function harvestTabsFromHtml(html, baseUrl) {
   const includedItems = [];
   const productsInclude = [];
   for (const t of tabs) {
+    // Determine the best source of HTML when extracting list items.  Use
+    // the rawHtml property when available because the sanitised html
+    // lacks <li> structure required by listItemsFromHtml().  Fall back
+    // to the html property if rawHtml is not provided (e.g. for legacy
+    // objects).
+    const htmlSrc = t.rawHtml || t.html;
     if (/what'?s?\s+in\s+the\s+box/i.test(t.title)) {
-      includedItems.push(...listItemsFromHtml(t.html));
+      includedItems.push(...listItemsFromHtml(htmlSrc));
     }
     if (/products?\s+include/i.test(t.title)) {
-      productsInclude.push(...listItemsFromHtml(t.html));
+      productsInclude.push(...listItemsFromHtml(htmlSrc));
     }
   }
   // Deduplicate and normalise
