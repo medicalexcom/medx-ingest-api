@@ -128,7 +128,7 @@ function dedupeCandidates(candidates, $) {
  * This function looks for a wide variety of patterns that indicate
  * content hidden in tabs or accordions.  It aggregates selectors from
  * WooCommerce product tabs, Bootstrap/ARIA tab controls, generic tab
-* widgets, and accordion structures.  The returned array may contain
+ * widgets, and accordion structures.  The returned array may contain
  * duplicates which should be filtered via `dedupeCandidates`.
  *
  * @param {CheerioAPI} $ The cheerio instance
@@ -197,6 +197,9 @@ function listItemsFromHtml(html) {
  * This helper scans containers with role="tablist" for tab labels and
  * matches them with corresponding panels marked with role="tabpanel".
  * It returns an array of objects with title, html, rawHtml, text and source.
+ * For Lightning panels we discard the original raw markup and reuse the
+ * sanitised html as `rawHtml` so that the returned payload does not
+ * include verbose <slot>/<lightning-accordion> markup.
  *
  * @param {CheerioAPI} $ The cheerio instance
  * @returns {{title: string, html: string, rawHtml: string, text: string, source: string}[]}
@@ -230,15 +233,22 @@ function extractSalesforceTabs($) {
     const panelRoot = $container.length ? $container : $(tablist).parent();
     panelRoot.find('[role="tabpanel"]').each((__, pane) => {
       const id = $(pane).attr('id');
-      const title =
-        titles[id] ||
-        norm(
-          $(pane).attr('aria-label') ||
-          $(pane).find('h2,h3,h4').first().text()
-        );
-      const { rawHtml, html, text } = extractHtmlAndText($, pane);
+      // Look up the tab title from the navigation; fallback to headings within the pane
+      let title = titles[id] || norm(
+        $(pane).attr('aria-label') ||
+        $(pane).find('h2,h3,h4').first().text()
+      );
+      // If title is still blank, synthesise a name from the order
+      if (!title) {
+        const index = out.length + 1;
+        title = `Tab ${index}`;
+      }
+      const { html, text } = extractHtmlAndText($, pane);
+      // For Salesforce tabs, treat the sanitised html as rawHtml to avoid
+      // returning verbose Lightning markup
+      const rawHtml = html;
       if (html || text) {
-      out.push({ title, html, rawHtml, text, source: 'salesforce' });
+        out.push({ title, html, rawHtml, text, source: 'salesforce' });
       }
     });
   });
@@ -460,14 +470,6 @@ function normalizeIncluded(lines = []) {
 export async function harvestTabsFromHtml(html, baseUrl) {
   const $ = loadHtmlSafe(html);
   // Remove navigation and other common noise elements before extracting tabs.
-  // This prevents cookie banners, navigation bars, and sidebars from being
-  // misinterpreted as tabs or content sections.
-  // Remove only obvious navigation/header/footer elements before extracting
-  // tabs.  We deliberately avoid removing generic `.nav` classes or
-  // `<aside>` elements because some sites wrap product specifications or
-  // "included" lists in these containers.  Target only top‑level
-  // navigation bars and clearly navigational classes to prevent
-  // accidental removal of content.
   $('body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination').remove();
   // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
@@ -478,11 +480,6 @@ export async function harvestTabsFromHtml(html, baseUrl) {
   const includedItems = [];
   const productsInclude = [];
   for (const t of tabs) {
-    // Determine the best source of HTML when extracting list items.  Use
-    // the rawHtml property when available because the sanitised html
-    // lacks <li> structure required by listItemsFromHtml().  Fall back
-    // to the html property if rawHtml is not provided (e.g. for legacy
-    // objects).
     const htmlSrc = t.rawHtml || t.html;
     if (/what'?s?\s+in\s+the\s+box/i.test(t.title)) {
       includedItems.push(...listItemsFromHtml(htmlSrc));
