@@ -2,7 +2,7 @@ import { norm, extractHtmlAndText } from './common.js';
 
 /**
  * Extract tabs from Salesforce/Lightning tabsets or forceCommunity pages.
- * Uses both [role="tabpanel"] and Lightning-specific data-target-selection-name attributes.
+ * Handles both standard ARIA panels and Lightning-specific tab containers.
  *
  * @param {CheerioAPI} $ cheerio instance
  * @returns {{id: string, title: string, html: string, rawHtml: string, text: string, source: string}[]}
@@ -13,7 +13,7 @@ export function extractSalesforceTabs($) {
   $('[role="tablist"]').each((_, tablist) => {
     const titles = {};
 
-    // Map each tab to its ID (href, aria-controls, or data-target-selection-name)
+    // Map each tab control to its panel ID
     $(tablist).find('[role="tab"], a').each((__, el) => {
       const $el = $(el);
       let id = ($el.attr('href') || '').replace(/^#/, '');
@@ -30,11 +30,11 @@ export function extractSalesforceTabs($) {
       if (title) titles[id] = title;
     });
 
-    // Find the container around the panel bodies
+    // Find the container around the panels
     const $container = $(tablist).closest('[class*=tabset], .js-tabset').first();
     const panelRoot = $container.length ? $container : $(tablist).parent();
 
-    // Collect *all* panels: Lightning renders some with data-target-selection-name instead of role="tabpanel"
+    // Collect panels: look for both ARIA panels and Lightning-specific containers
     panelRoot
       .find('[role="tabpanel"], div[data-target-selection-name]')
       .each((__, pane) => {
@@ -53,7 +53,7 @@ export function extractSalesforceTabs($) {
           title = `Tab ${index}`;
         }
 
-        // Use extractHtmlAndText to get raw and sanitised content
+        // Extract raw and cleaned HTML + text
         const { rawHtml, html, text } = extractHtmlAndText($, pane);
 
         if (html || text) {
