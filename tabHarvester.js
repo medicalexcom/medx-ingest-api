@@ -12,7 +12,58 @@
 //     form `n × item` and aggregates duplicate items.  Without this,
 //     quantities were ignored and duplicates were not counted.
 //
-import { load as loadHTML } from 'cheerio';
+import { load as cheerioLoad } from 'cheerio';
+
+// -----------------------------------------------------------------------------
+// Selector normalisation helpers
+//
+// Cheerio uses the css-select parser, which does not support jQuery-only
+// pseudo-classes like :eq(n) or bare numeric pseudo-classes like :0. When
+// such selectors are encountered, it throws errors like “Unknown pseudo-class
+// :0”.  To preserve existing behaviour while avoiding these errors, we
+// normalise any jQuery-style index pseudo-classes into the standard CSS
+// :nth-child() syntax.  These helpers are additive and do not remove or
+// otherwise alter existing logic.
+
+/**
+ * Normalise selectors to avoid unsupported pseudo-classes in css-select.
+ * Converts :eq(n) and bare :<number> into :nth-child(n+1). For example,
+ * `:eq(0)` becomes `:nth-child(1)` and `:3` becomes `:nth-child(4)`.
+ *
+ * @param {string} selector The original selector
+ * @returns {string} A selector compatible with css-select
+ */
+function normalizeSelector(selector) {
+  return String(selector || '')
+    .replace(/:eq\(\s*(\d+)\s*\)/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')')
+    .replace(/:(\d+)\b/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')');
+}
+
+/**
+ * Load HTML into Cheerio and patch its find() method to normalise selectors.
+ * All calls to $.find() will first normalise the selector via normalizeSelector.
+ * This prevents errors like “Unknown pseudo-class :0” while preserving
+ * existing behaviour.  The rest of the Cheerio API remains unchanged.
+ *
+ * @param {string} html The HTML string to load
+ * @returns {CheerioAPI} A Cheerio instance with safe selector handling
+ */
+function loadHtmlSafe(html) {
+  const $ = cheerioLoad(html || '');
+  const origFind = $.prototype.find;
+  $.prototype.find = function(selector) {
+    const safeSelector = typeof selector === 'string' ? normalizeSelector(selector) : selector;
+    try {
+      return origFind.call(this, safeSelector);
+    } catch {
+      return origFind.call(this, selector);
+    }
+  };
+  return $;
+}
+
+// -----------------------------------------------------------------------------
+// Existing helpers
 
 // Strip all HTML tags and normalise whitespace.  When sanitising markup
 // we still want to preserve the text content but drop all tags.  This is
@@ -20,7 +71,7 @@ import { load as loadHTML } from 'cheerio';
 // arbitrary markup.  We keep the original HTML separately for cases
 // (like list parsing) that rely on structural tags such as <li>.
 function stripTags(html = '') {
-  const $ = loadHTML(html || '');
+  const $ = loadHtmlSafe(html || '');
   return $.root().text().replace(/\s+/g, ' ').trim();
 }
 
@@ -110,7 +161,7 @@ function findTabCandidates($) {
 function listItemsFromHtml(html) {
   // If no HTML provided, return empty array early
   if (!html) return [];
-  const _$ = loadHTML(html);
+  const _$ = loadHtmlSafe(html);
   const items = [];
   // First attempt: extract canonical list items from <ul> or <ol> tags
   _$('ul li, ol li').each((_, li) => {
@@ -259,7 +310,7 @@ async function maybeFetchRemoteTabs($) {
       clearTimeout(timer);
       if (!res.ok) continue;
       const html = await res.text();
-      const _$ = loadHTML(html);
+      const _$ = loadHtmlSafe(html);
       const body = _$('#main, article, .entry-content, body').first();
       const raw = body.html() || '';
       const sanitized = stripTags(raw);
@@ -350,7 +401,7 @@ function normalizeIncluded(lines = []) {
  * @returns {Promise<{tabs: {title: string, html: string, rawHtml: string, text: string, source: string}[], includedItems: string[], productsInclude: string[]}>}
  */
 export async function harvestTabsFromHtml(html, baseUrl) {
-  const $ = loadHTML(html);
+  const $ = loadHtmlSafe(html);
   // Remove navigation and other common noise elements before extracting tabs.
   // This prevents cookie banners, navigation bars, and sidebars from being
   // misinterpreted as tabs or content sections.
