@@ -5,7 +5,7 @@ import { norm, extractHtmlAndText } from './common.js';
  * Uses [role=tablist] and [role=tabpanel] structure.
  *
  * @param {CheerioAPI} $ cheerio instance
- * @returns {{title: string, html: string, rawHtml: string, text: string, source: string}[]}
+ * @returns {{id: string, title: string, html: string, rawHtml: string, text: string, source: string}[]}
  */
 export function extractSalesforceTabs($) {
   const out = [];
@@ -47,7 +47,7 @@ export function extractSalesforceTabs($) {
       const rawHtml = html;
 
       if (html || text) {
-        out.push({ title, html, rawHtml, text, source: 'salesforce' });
+        out.push({ id, title, html, rawHtml, text, source: 'salesforce' });
       }
     });
   });
