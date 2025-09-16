@@ -128,7 +128,7 @@ function dedupeCandidates(candidates, $) {
  * This function looks for a wide variety of patterns that indicate
  * content hidden in tabs or accordions.  It aggregates selectors from
  * WooCommerce product tabs, Bootstrap/ARIA tab controls, generic tab
- * widgets, and accordion structures.  The returned array may contain
+* widgets, and accordion structures.  The returned array may contain
  * duplicates which should be filtered via `dedupeCandidates`.
  *
  * @param {CheerioAPI} $ The cheerio instance
@@ -238,7 +238,7 @@ function extractSalesforceTabs($) {
         );
       const { rawHtml, html, text } = extractHtmlAndText($, pane);
       if (html || text) {
-        out.push({ title, html, rawHtml, text, source: 'salesforce' });
+      out.push({ title, html, rawHtml, text, source: 'salesforce' });
       }
     });
   });
