@@ -12,7 +12,50 @@ import { harvestTabsFromHtml } from './tabHarvester.js';
 import { removeNoise } from './mergeRaw.js';
 // Removed GPT-ready helper: no longer needed
 
+// Insert the following lines near the top of server.js, immediately after
+// `import * as cheerio from "cheerio";` and before any other code. Do not
+// remove or modify existing lines — this snippet is purely additive. It
+// normalizes unsupported pseudo‑classes (e.g., `:eq(n)` and bare `:0`) to
+// standard CSS (`:nth-child(n+1)`) and monkey‑patches `cheerio.load` so
+// that all subsequent selector queries and `.find()` calls are sanitized.
 
+/* --- Selector normalization patch (ADD-ONLY) ---
+ * Cheerio's css-select parser does not support jQuery-only pseudo-classes
+ * like :eq(n) or bare :<number>, which can appear in scraped HTML or
+ * dynamic selectors and cause "Unknown pseudo-class :0" errors.  The
+ * following helper normalizes such pseudo-classes to the standard
+ * :nth-child(n+1) syntax and overrides cheerio.load so that every
+ * cheerio root instance and its .find() method apply this
+ * normalization automatically.
+ */
+function normalizeSelector(selector) {
+  return String(selector || '')
+    .replace(/:eq\(\s*(\d+)\s*\)/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')')
+    .replace(/:(\d+)\b/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')');
+}
+// Preserve the original cheerio.load implementation
+const __cheerioLoad = cheerio.load;
+cheerio.load = function(html, options) {
+  const $orig = __cheerioLoad(html, options);
+  function $(selector, context) {
+    const safe = typeof selector === 'string' ? normalizeSelector(selector) : selector;
+    return $orig.call(null, safe, context);
+  }
+  // Copy enumerable properties and prototype from the original root function
+  Object.keys($orig).forEach(key => { $[key] = $orig[key]; });
+  Object.setPrototypeOf($, Object.getPrototypeOf($orig));
+  // Patch .find() to normalize selectors passed to it
+  const origFind = $orig.prototype.find;
+  $.prototype.find = function(sel) {
+    const safeSel = typeof sel === 'string' ? normalizeSelector(sel) : sel;
+    try {
+      return origFind.call(this, safeSel);
+    } catch {
+      return origFind.call(this, sel);
+    }
+  };
+  return $;
+};
 
 /* ================== Config via env ================== */
 const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
