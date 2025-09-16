@@ -228,10 +228,18 @@ async function collectSections(page) {
 
     const serialize = (el) => (el ? el.innerText.replace(/\s+\n/g, '\n').trim() : '');
 
+    // Normalize CSS selectors to avoid invalid pseudo-classes like :0 or :eq(n)
+    function normalizeSelectorLocal(sel) {
+      return String(sel || '')
+        .replace(/:eq\(\s*(\d+)\s*\)/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')')
+        .replace(/:(\d+)\b/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')');
+    }
+
     function findFirst(selectors) {
       for (const s of selectors) {
+        const safe = normalizeSelectorLocal(s);
         try {
-          const el = document.querySelector(s);
+          const el = document.querySelector(safe);
           if (el) return el;
         } catch {
           // Ignore invalid selectors (e.g. Playwright's text="...") in DOM API
