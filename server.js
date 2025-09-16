@@ -12,50 +12,48 @@ import { harvestTabsFromHtml } from './tabHarvester.js';
 import { removeNoise } from './mergeRaw.js';
 // Removed GPT-ready helper: no longer needed
 
-// Insert the following lines near the top of server.js, immediately after
-// `import * as cheerio from "cheerio";` and before any other code. Do not
-// remove or modify existing lines — this snippet is purely additive. It
-// normalizes unsupported pseudo‑classes (e.g., `:eq(n)` and bare `:0`) to
-// standard CSS (`:nth-child(n+1)`) and monkey‑patches `cheerio.load` so
-// that all subsequent selector queries and `.find()` calls are sanitized.
-
-/* --- Selector normalization patch (ADD-ONLY) ---
- * Cheerio's css-select parser does not support jQuery-only pseudo-classes
- * like :eq(n) or bare :<number>, which can appear in scraped HTML or
- * dynamic selectors and cause "Unknown pseudo-class :0" errors.  The
- * following helper normalizes such pseudo-classes to the standard
- * :nth-child(n+1) syntax and overrides cheerio.load so that every
- * cheerio root instance and its .find() method apply this
- * normalization automatically.
- */
+// Normalise CSS selectors to avoid unsupported pseudo-classes like :0 and :eq(n)
 function normalizeSelector(selector) {
   return String(selector || '')
-    .replace(/:eq\(\s*(\d+)\s*\)/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')')
-    .replace(/:(\d+)\b/g, (_, n) => ':nth-child(' + (Number(n) + 1) + ')');
+    .replace(/:eq\(\s*(\d+)\s*\)/g, (_, n) => `:nth-child(${Number(n) + 1})`)
+    .replace(/:(\d+)\b/g, (_, n) => `:nth-child(${Number(n) + 1})`);
 }
-// Preserve the original cheerio.load implementation
-const __cheerioLoad = cheerio.load;
-cheerio.load = function(html, options) {
-  const $orig = __cheerioLoad(html, options);
-  function $(selector, context) {
-    const safe = typeof selector === 'string' ? normalizeSelector(selector) : selector;
-    return $orig.call(null, safe, context);
+
+/**
+ * Load HTML with cheerio and normalise selectors for every query.
+ *
+ * This function wraps cheerio.load so that any selector you pass to the root
+ * function or to .find() gets normalised before it reaches css‑select,
+ * preventing “Unknown pseudo‑class” errors.
+ */
+function loadHtmlSafe(html, options) {
+  const $orig = cheerio.load(html || '', options);
+
+  // Root selector wrapper: normalise incoming selector before querying
+  function wrapper(selector, context) {
+    const safeSel =
+      typeof selector === 'string' ? normalizeSelector(selector) : selector;
+    return $orig(safeSel, context);
   }
-  // Copy enumerable properties and prototype from the original root function
-  Object.keys($orig).forEach(key => { $[key] = $orig[key]; });
-  Object.setPrototypeOf($, Object.getPrototypeOf($orig));
-  // Patch .find() to normalize selectors passed to it
+
+  // Copy properties and prototype so wrapper behaves like a cheerio root function
+  Object.assign(wrapper, $orig);
+  Object.setPrototypeOf(wrapper, Object.getPrototypeOf($orig));
+
+  // Patch .find() on this instance to normalise nested selectors
   const origFind = $orig.prototype.find;
-  $.prototype.find = function(sel) {
-    const safeSel = typeof sel === 'string' ? normalizeSelector(sel) : sel;
+  wrapper.prototype.find = function (sel) {
+    const safeSel =
+      typeof sel === 'string' ? normalizeSelector(sel) : sel;
     try {
       return origFind.call(this, safeSel);
     } catch {
       return origFind.call(this, sel);
     }
   };
-  return $;
-};
+
+  return wrapper;
+}
 
 /* ================== Config via env ================== */
 const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
@@ -661,7 +659,7 @@ app.get("/ingest", async (req, res) => {
 
     // === Compass-only additive harvest (keeps your existing data intact) ===
     if (isCompass(targetUrl)) {
-      const $ = cheerio.load(html);
+      const $ = loadHtmlSafe(html);
 
       // (1) Overview: full paragraphs + bullets (merged once)
       try {
@@ -780,7 +778,7 @@ app.get("/ingest", async (req, res) => {
         norm.brand &&
         String(norm.name_raw).toLowerCase() === String(norm.brand).toLowerCase()
       ) {
-        const $check = cheerio.load(html);
+        const $check = loadHtmlSafe(html);
         const ogTitle = $check('meta[property="og:title"]').attr('content') || '';
         let candidate = ogTitle.trim();
         if (!candidate) {
@@ -820,7 +818,7 @@ app.get("/ingest", async (req, res) => {
     }
 
     if (wantMd) {
-      const $ = cheerio.load(html);
+      const $ = loadHtmlSafe(html);
       try { norm.description_md = extractDescriptionMarkdown($) || textToMarkdown(norm.description_raw || ""); }
       catch(e){ diag.warnings.push(`desc-md: ${e.message||e}`); }
 
@@ -1113,7 +1111,7 @@ app.get('/ocr', async (req, res) => {
 /* ================== Normalization ================== */
 function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
-  const $ = cheerio.load(html);
+  const $ = loadHtmlSafe(html);
 
   // Structured data
   let jsonld = {};
@@ -3103,7 +3101,7 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
       try {
         const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=full`;
         const { html } = await fetchWithRetry(url, { headers });
-        const $p = cheerio.load(html);
+        const $p = loadHtmlSafe(html);
         tt.html = $p.root().html() || '';
         tt.text = $p.root().text().replace(/\s+/g,' ').trim();
       } catch {}
@@ -3300,7 +3298,7 @@ async function hydrateRemotePanes(cands, renderApiUrl, headers = {}) {
         const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=full`;
         const { html } = await fetchWithRetry(url, { headers });
         copy.html = html || '';
-        copy.text = cleanup(cheerio.load(html).root().text() || '');
+        copy.text = cleanup(loadHtmlSafe(html).root().text() || '');
       } catch {}
     } 
     out.push(copy);
@@ -3332,7 +3330,7 @@ function extractFromBuckets($, buckets, baseUrl){
 
   const collectImgs = (html) => {
     if (!html) return;
-    const _$ = cheerio.load(html);
+    const _$ = loadHtmlSafe(html);
     _$('.accordion-content, .tab-pane, [role="tabpanel"], section, div, article')
       .find('img, source').each((_, n)=>{
         const src = _$(n).attr('src') || _$(n).attr('data-src') || pickLargestFromSrcset(_$(n).attr('srcset')) || '';
@@ -3973,7 +3971,7 @@ function prunePartsLikeSpecs(specs = {}){
 
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
-  const $ = cheerio.load(html);
+  const $ = loadHtmlSafe(html);
 
   // === START: static tab harvest via tabHarvester.js ===
   try {
@@ -4069,7 +4067,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
 
     // === Custom tab detection for GemPages/GoodFoundation (gf_tabs/gf_tab-panel) ===
     try {
-      const $$ = cheerio.load(html);
+      const $$ = loadHtmlSafe(html);
       $$('.gf_tabs').each((_, ul) => {
         const titles = {};
         // map tab index to title
