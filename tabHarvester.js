@@ -145,7 +145,7 @@ function findTabCandidates($) {
   }
   // Generic tabs/accordions used by various WP builders
   candidates.push(...$('.tabs, .tabset, .tabbed, .et_pb_tabs').toArray());
-  candidates.push(...$('.accordion, .et_pb_accordion, .wp-block-coblocks-accordion').toArray());
+  candidates.push(...($('.accordion, .et_pb_accordion, .wp-block-coblocks-accordion').toArray()));
   return dedupeCandidates(candidates, $);
 }
 
@@ -159,30 +159,20 @@ function findTabCandidates($) {
  * @returns {string[]}
  */
 function listItemsFromHtml(html) {
-  // If no HTML provided, return empty array early
   if (!html) return [];
   const _$ = loadHtmlSafe(html);
   const items = [];
-  // First attempt: extract canonical list items from <ul> or <ol> tags
   _$('ul li, ol li').each((_, li) => {
     const txt = norm(_$(li).text());
     if (txt) items.push(txt);
   });
-  // If we found list items via structural tags, return them
   if (items.length > 0) return items;
-  // Fallback: attempt to parse bullet-like characters in plain text when
-  // there are no <li> elements.  Strip tags and split on common bullet
-  // characters or newline separators.  This helps capture lists that
-  // are styled via CSS rather than semantic <li> elements.
   const plain = stripTags(html);
-  // Define a regex to split on bullet characters.  We avoid splitting on
-  // simple hyphens to prevent breaking words like “3-inch” or “24mm”.
-  const bulletSplit = /[\u2022\u2023\u25E6\u2043\u2219\u2027]/; // • ‣ ◦ ⁃ ∙ ‧
+  const bulletSplit = /[\u2022\u2023\u25E6\u2043\u2219\u2027]/;
   let segments = [];
   if (bulletSplit.test(plain)) {
     segments = plain.split(bulletSplit);
   } else {
-    // As a final fallback, split on newline or carriage return if present
     segments = plain.split(/\r?\n/);
   }
   segments.forEach(seg => {
@@ -209,39 +199,41 @@ function extractSalesforceTabs($) {
   // Iterate over each tablist element
   $('[role="tablist"]').each((_, tablist) => {
     const titles = {};
+    const orderedTitles = [];
     // Find all tab controls within the tablist; they may be anchors or custom elements
     $(tablist).find('[role="tab"], a').each((__, el) => {
       const $el = $(el);
-      // Determine the content ID: href (#id) or aria-controls or data-target-selection-name
       let id = ($el.attr('href') || '').replace(/^#/, '');
       if (!id) {
         id = $el.attr('aria-controls') || $el.attr('data-target-selection-name') || '';
       }
-      if (!id) return;
-      // Derive a title: prefer a title attribute, then nested .title span, then text
       const title = norm(
         $el.attr('title') ||
         $el.find('.title').text() ||
         $el.text()
       );
+      // Record title keyed by ID (if present) and push into ordered list
       if (title) {
-        titles[id] = title;
+        if (id) titles[id] = title;
+        orderedTitles.push(title);
       }
     });
     // Locate the nearest tabset container; fall back to document if none found
     const $container = $(tablist).closest('[class*=tabset], .js-tabset').first();
     const panelRoot = $container.length ? $container : $(tablist).parent();
-    panelRoot.find('[role="tabpanel"]').each((__, pane) => {
+    panelRoot.find('[role="tabpanel"]').each((index, pane) => {
       const id = $(pane).attr('id');
-      // Look up the tab title from the navigation; fallback to headings within the pane
-      let title = titles[id] || norm(
-        $(pane).attr('aria-label') ||
-        $(pane).find('h2,h3,h4').first().text()
-      );
-      // If title is still blank, synthesise a name from the order
+      // Prefer matched title via ID, otherwise fallback to ordered list
+      let title =
+        (id && titles[id]) ||
+        orderedTitles[index] ||
+        norm(
+          $(pane).attr('aria-label') ||
+          $(pane).find('h2,h3,h4').first().text()
+        );
+      // Synthesize a title if everything fails
       if (!title) {
-        const index = out.length + 1;
-        title = `Tab ${index}`;
+      title = `Tab ${index + 1}`;
       }
       const { html, text } = extractHtmlAndText($, pane);
       // For Salesforce tabs, treat the sanitised html as rawHtml to avoid
@@ -304,7 +296,6 @@ function extractTabsFromDoc($) {
     if (html || text) results.push({ title, html, rawHtml, text, source: 'bootstrap' });
   });
   // 2a) Salesforce/forceCommunity tabsets (added)
-  // Append any tabs extracted from Lightning-based tab components.
   results.push(...extractSalesforceTabs($));
   // 3) Generic tab/accordion fallback: heading followed by content until next heading
   const genericContainers = findTabCandidates($);
@@ -371,7 +362,6 @@ async function maybeFetchRemoteTabs($) {
   for (const { title, url } of links) {
     try {
       const controller = new AbortController();
-      // Abort after 10 seconds to avoid hanging
       const timer = setTimeout(() => controller.abort(), 10000);
       const res = await fetch(url, { signal: controller.signal });
       clearTimeout(timer);
@@ -382,10 +372,6 @@ async function maybeFetchRemoteTabs($) {
       const raw = body.html() || '';
       const sanitized = stripTags(raw);
       const t = norm(body.text() || '');
-      // For remote content we preserve the raw HTML of the primary body
-      // fragment and also provide a sanitised version.  The raw HTML is
-      // useful for extracting lists, while the sanitised version can be
-      // used downstream to avoid HTML leaks.
       if (sanitized || t) {
         const remoteTitle = title || norm(_$('h1,h2').first().text());
         out.push({ title: remoteTitle, html: sanitized, rawHtml: raw, text: t, source: 'remote' });
@@ -409,19 +395,14 @@ async function maybeFetchRemoteTabs($) {
  */
 function normalizeIncluded(lines = []) {
   const counts = {};
-  const NUMWORDS = {
-    one: 1, two: 2, three: 3, four: 4, five: 5,
-    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
-  };
+  const NUMWORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
   for (const rawLine of lines) {
     if (!rawLine) continue;
     let s = norm(rawLine);
-    // Normalise multiplication sign to 'x'
     s = s.replace(/[×]/g, 'x');
     let qty = 1;
     let item = '';
     let m;
-    // Patterns: number x item
     if ((m = s.match(/^(\d+)\s*x\s*(.+)$/i))) {
       qty = parseInt(m[1], 10);
       item = norm(m[2]);
@@ -429,25 +410,20 @@ function normalizeIncluded(lines = []) {
       qty = NUMWORDS[m[1].toLowerCase()];
       item = norm(m[2]);
     } else if ((m = s.match(/^(\d+)\s+(.+)/i))) {
-      // e.g. '2 diaphragms'
       qty = parseInt(m[1], 10);
       item = norm(m[2]);
     } else if ((m = s.match(/^([a-z]+)\s+(.+)/i)) && NUMWORDS[m[1].toLowerCase()]) {
-      // e.g. 'two diaphragms'
       qty = NUMWORDS[m[1].toLowerCase()];
       item = norm(m[2]);
     } else if ((m = s.match(/^(.+)\s+x\s*(\d+)$/i))) {
-      // e.g. 'tube x 2'
       qty = parseInt(m[2], 10);
       item = norm(m[1]);
     } else if ((m = s.match(/^(.+)\s+\((\d+)\)$/i))) {
-      // e.g. 'cushion (2)'
       qty = parseInt(m[2], 10);
       item = norm(m[1]);
     } else {
       item = s;
     }
-    // Only remove bullet characters or dashes; preserve numeric prefixes (e.g. “24mm”)
     item = item.replace(/^[\s•\-–—]+/, '').replace(/\s{2,}/g, ' ').trim();
     if (!item) continue;
     counts[item] = (counts[item] || 0) + (isNaN(qty) ? 1 : qty);
@@ -469,14 +445,10 @@ function normalizeIncluded(lines = []) {
  */
 export async function harvestTabsFromHtml(html, baseUrl) {
   const $ = loadHtmlSafe(html);
-  // Remove navigation and other common noise elements before extracting tabs.
   $('body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination').remove();
-  // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
-  // Fetch remote tab content if any
   const remote = await maybeFetchRemoteTabs($);
   const tabs = [...inDoc, ...remote];
-  // Parse lists from tabs
   const includedItems = [];
   const productsInclude = [];
   for (const t of tabs) {
@@ -488,7 +460,6 @@ export async function harvestTabsFromHtml(html, baseUrl) {
       productsInclude.push(...listItemsFromHtml(htmlSrc));
     }
   }
-  // Deduplicate and normalise
   const uniq = a => Array.from(new Set((a || []).filter(Boolean)));
   const normIncluded = normalizeIncluded(uniq(includedItems));
   const normProducts = normalizeIncluded(uniq(productsInclude));
