@@ -11,7 +11,7 @@
 //     new `normalizeIncluded` helper produces canonical strings of the
 //     form `n × item` and aggregates duplicate items.  Without this,
 //     quantities were ignored and duplicates were not counted.
-//
+
 import { load as cheerioLoad } from 'cheerio';
 
 // -----------------------------------------------------------------------------
@@ -193,12 +193,66 @@ function listItemsFromHtml(html) {
 }
 
 /**
+ * Extract tabs and their content from Salesforce/forceCommunity tabsets.
+ * This helper scans containers with role="tablist" for tab labels and
+ * matches them with corresponding panels marked with role="tabpanel".
+ * It returns an array of objects with title, html, rawHtml, text and source.
+ *
+ * @param {CheerioAPI} $ The cheerio instance
+ * @returns {{title: string, html: string, rawHtml: string, text: string, source: string}[]}
+ */
+function extractSalesforceTabs($) {
+  const out = [];
+  // Iterate over each tablist element
+  $('[role="tablist"]').each((_, tablist) => {
+    const titles = {};
+    // Find all tab controls within the tablist; they may be anchors or custom elements
+    $(tablist).find('[role="tab"], a').each((__, el) => {
+      const $el = $(el);
+      // Determine the content ID: href (#id) or aria-controls or data-target-selection-name
+      let id = ($el.attr('href') || '').replace(/^#/, '');
+      if (!id) {
+        id = $el.attr('aria-controls') || $el.attr('data-target-selection-name') || '';
+      }
+      if (!id) return;
+      // Derive a title: prefer a title attribute, then nested .title span, then text
+      const title = norm(
+        $el.attr('title') ||
+        $el.find('.title').text() ||
+        $el.text()
+      );
+      if (title) {
+        titles[id] = title;
+      }
+    });
+    // Locate the nearest tabset container; fall back to document if none found
+    const $container = $(tablist).closest('[class*=tabset], .js-tabset').first();
+    const panelRoot = $container.length ? $container : $(tablist).parent();
+    panelRoot.find('[role="tabpanel"]').each((__, pane) => {
+      const id = $(pane).attr('id');
+      const title =
+        titles[id] ||
+        norm(
+          $(pane).attr('aria-label') ||
+          $(pane).find('h2,h3,h4').first().text()
+        );
+      const { rawHtml, html, text } = extractHtmlAndText($, pane);
+      if (html || text) {
+        out.push({ title, html, rawHtml, text, source: 'salesforce' });
+      }
+    });
+  });
+  return out;
+}
+
+/**
  * Extract tab or accordion content from a static HTML document using
  * multiple strategies.  Each extracted entry has a title, the raw
  * HTML of the content pane, the plain text, and a `source` tag
  * indicating which heuristic matched.  Sources include:
  *   - `woocommerce`: for WooCommerce product tabs
  *   - `bootstrap`: for Bootstrap/ARIA tab controls
+ *   - `salesforce`: for Salesforce/Lightning tabsets (added)
  *   - `generic`: for generic tab or accordion structures
  *   - `heuristic`: for sections matching labels like “What’s in the Box”
  *     or “Products Include” even if not part of an explicit tab widget
@@ -239,6 +293,9 @@ function extractTabsFromDoc($) {
     const { rawHtml, html, text } = extractHtmlAndText($, pane);
     if (html || text) results.push({ title, html, rawHtml, text, source: 'bootstrap' });
   });
+  // 2a) Salesforce/forceCommunity tabsets (added)
+  // Append any tabs extracted from Lightning-based tab components.
+  results.push(...extractSalesforceTabs($));
   // 3) Generic tab/accordion fallback: heading followed by content until next heading
   const genericContainers = findTabCandidates($);
   genericContainers.forEach(cont => {
