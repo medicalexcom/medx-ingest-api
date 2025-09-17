@@ -1,4 +1,4 @@
-// browserCrawler.js
+// Updated browserCrawler.js
 // Headless-browsing collector for product pages.
 //
 // This module uses Playwright to fetch and expand product pages. It collects
@@ -55,6 +55,13 @@ const CLICK_SELECTORS = [
 
   // Spectra-style / hash-link tabs
   'a[href^="#tab-"]',
+
+  // Salesforce Lightning tab selectors
+  // These additional selectors help the crawler click through Lightning tabs
+  // such as those used by Salesforce B2B Commerce and forceCommunity sites.
+  'li.slds-tabs_default__item',
+  'a.slds-tabs_default__link',
+  'lightning-tab',
 ];
 
 const WAITERS = [
@@ -68,6 +75,9 @@ const WAITERS = [
   '.tabs',
   'main',
   'article',
+
+  // Wait for Lightning panels to load
+  'div[data-target-selection-name]',
 ];
 
 // Cookie banners we try to accept/dismiss quickly
