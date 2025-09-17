@@ -164,3 +164,134 @@ export function extractSalesforceTabsEnhanced(html) {
 export function extractSalesforceTabs(html) {
   return extractSalesforceTabsEnhanced(html);
 }
+
+// -----------------------------------------------------------------------------
+// Supplementary helpers to parse specifications and features from tab content.
+// These helpers mirror logic found in mergeRaw.js to identify key/value pairs
+// and classify free‑form sentences as product features.  They are included
+// here so that Salesforce pages can contribute structured specs and a list of
+// features directly from their tabbed content.
+
+/**
+ * Parse a specification line into a [key, value] pair.
+ * Recognises patterns like "Key: Value", "Key – Value" (en dash) or
+ * measurements such as "Total weight capacity 700 lbs".  Returns [null, null]
+ * if no plausible spec is found.  Adapted from mergeRaw.js.
+ *
+ * @param {string} line A candidate specification line
+ * @returns {[string|null, string|null]} Parsed key and value
+ */
+function parseSpecLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return [null, null];
+  // Colon or en dash separated key/value
+  let m = text.match(/^([^:–]+):\s*(.+)$/);
+  if (m) {
+    const keyRaw = m[1].trim();
+    const value = m[2].trim();
+    const valLower = value.toLowerCase();
+    if (keyRaw && value && (/[0-9]/.test(value) || /(lb|lbs|kg|g|oz|ft|in|cm|mm|inch|inches|year|warranty|pcs|pieces)/i.test(valLower))) {
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      return [key, value];
+    }
+  }
+  // Hyphen separated key/value (with spaces around the hyphen)
+  m = text.match(/^(.+?)\s+-\s+(.+)$/);
+  if (m) {
+    const keyRaw = m[1].trim();
+    const value = m[2].trim();
+    const valLower = value.toLowerCase();
+    if (keyRaw && value && (/[0-9]/.test(value) || /(lb|lbs|kg|g|oz|ft|in|cm|mm|inch|inches|year|warranty|pcs|pieces)/i.test(valLower))) {
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      return [key, value];
+    }
+  }
+  // Measurement pattern without colon/hyphen (e.g. "Total weight capacity 700 lbs")
+  const m2 = text.match(/^(.*?)\s+(\d+\s*(?:lb|lbs|kg|g|oz|ft|in|cm|mm|"|inch|inches)\b.*)$/i);
+  if (m2) {
+    const keyRaw = m2[1].trim();
+    const value = m2[2].trim();
+    if (keyRaw && value) {
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      return [key, value];
+    }
+  }
+  return [null, null];
+}
+
+/**
+ * Simple rule‑based classifier to determine if a sentence is a feature, benefit
+ * or included item.  Looks for indicative keywords and falls back to
+ * 'feature' when ambiguous.  Adapted from mergeRaw.js.
+ *
+ * @param {string} text A sentence from the tab content
+ * @returns {string} One of 'feature', 'benefit' or 'included'
+ */
+function classifySentence(text) {
+  const s = String(text || '').toLowerCase();
+  const includedKeywords = ['includes', 'comes with', 'in the box', 'kit includes', 'package includes', 'included'];
+  for (const kw of includedKeywords) {
+    if (s.includes(kw)) return 'included';
+  }
+  const benefitKeywords = ['ideal for', 'helps', 'benefit', 'provides', 'for use', 'designed to', 'allows you', 'great for', 'beneficial'];
+  for (const kw of benefitKeywords) {
+    if (s.includes(kw)) return 'benefit';
+  }
+  return 'feature';
+}
+
+/**
+ * Extract Salesforce tab content along with derived features and specs.
+ *
+ * This helper runs the enhanced tab extractor and then applies simple
+ * heuristics to derive a list of product features and a specification map
+ * from the concatenated tab text.  The resulting features array can be
+ * attached to `rec.features` by the calling code so that mergeRaw will
+ * treat them as structured features.  Specifications extracted here are
+ * merged non‑destructively into the existing `rec.specs`.
+ *
+ * @param {string} html A full HTML document (static) from a Salesforce page
+ * @returns {{tabs: Array, features: string[], specs: object}}
+ */
+export function extractSalesforceData(html) {
+  // First, extract all tab sections using the enhanced logic.
+  const tabs = extractSalesforceTabsEnhanced(html);
+  const features = [];
+  const specs = {};
+  // For each tab's text, break into candidate lines.  We split on newline,
+  // bullet separators and periods/hyphens, then trim whitespace.
+  for (const t of tabs) {
+    const text = String(t.text || '');
+    // Replace non-breaking spaces and double spaces
+    const cleaned = text.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+    // Split on punctuation or capitalised "To " phrases to isolate sentences.
+    const parts = cleaned
+      .split(/(?<!\d)[.\n\u2022]+|\bTo\b/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const part of parts) {
+      // Attempt to parse as a spec; if successful, merge into specs
+      const [key, value] = parseSpecLine(part);
+      if (key && value) {
+        // Preserve first occurrence
+        if (!(key in specs)) specs[key] = value;
+        continue;
+      }
+      // Otherwise treat as a feature if it contains at least three words.
+      if (part.split(/\s+/).length >= 3) {
+        features.push(part);
+      }
+    }
+  }
+  // Deduplicate features
+  const seen = new Set();
+  const deduped = [];
+  for (const f of features) {
+    const normText = f.toLowerCase();
+    if (!seen.has(normText)) {
+      seen.add(normText);
+      deduped.push(f);
+    }
+  }
+  return { tabs, features: deduped, specs };
+}
