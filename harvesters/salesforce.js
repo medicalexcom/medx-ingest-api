@@ -358,8 +358,18 @@ function parseSalesforceFeaturesAndSpecs(texts) {
     for (const part of parts) {
       const [key, value] = parseSpecLine(part);
       if (key && value) {
-        if (!(key in specs)) specs[key] = value;
-        continue;
+        // Skip spec entries where the key is excessively long or the value contains
+        // indicators of a concatenated item list (e.g. product codes like "D4-1234" or
+        // multiple part numbers separated by spaces).  These lines are better
+        // treated as feature sentences rather than structured specifications.
+        const tooLongKey = key.length > 50;
+        // Detect accessory/product code patterns in the value (e.g. D4-3001 or similar).
+        const looksLikeCodeList = /\b[A-Z]{1,2}\d{1,4}-/i.test(value);
+        if (!tooLongKey && !looksLikeCodeList) {
+          if (!(key in specs)) specs[key] = value;
+          continue;
+        }
+        // Otherwise, fall through and treat this as a feature line below.
       }
       if (part.split(/\s+/).length >= 3) {
         features.push(part);
