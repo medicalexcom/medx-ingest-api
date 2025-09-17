@@ -2,26 +2,28 @@ import { load as cheerioLoad } from 'cheerio';
 import { norm, extractHtmlAndText } from './common.js';
 
 /**
- * Enhanced Salesforce tab harvester.  The default Salesforce harvester only
- * extracts panels defined via Lightning/ARIA tabsets.  This implementation
- * adds additional heuristics inspired by the main tabHarvester module to
- * capture more content sections on Salesforce pages.  It attempts to
- * populate multiple distinct sources of data: native Salesforce tabs,
- * generic Bootstrap/ARIA tab panes, and heuristic sections such as
- * "Specifications" or "What's in the box".  Each returned entry has
- * an id (where available), title, raw and sanitised HTML, plain text and
- * a source tag indicating which heuristic matched.
+ * Enhanced Salesforce tab harvester.
+ *
+ * The default Salesforce harvester only extracts panels defined via
+ * Lightning/ARIA tabsets. This implementation adds additional heuristics
+ * inspired by the main tabHarvester module to capture more content
+ * sections on Salesforce pages. It attempts to populate multiple
+ * distinct sources of data: native Salesforce tabs, generic
+ * Bootstrap/ARIA tab panes, and heuristic sections such as
+ * "Specifications" or "What's in the box". Each returned entry has
+ * an id (where available), title, raw and sanitised HTML, plain text
+ * and a source tag indicating which heuristic matched.
  *
  * @param {string} html A full HTML document (static) from a Salesforce page.
  * @returns {{id: string, title: string, html: string, rawHtml: string, text: string, source: string}[]}
  */
 export function extractSalesforceTabsEnhanced(html) {
-  // Load the HTML into Cheerio.  We bypass selector normalisation here
-  // because Salesforce pages typically do not use jQuery-only pseudo-classes.
+  // Load the HTML into Cheerio. Salesforce pages do not typically use
+  // jQuery-only pseudo-classes, so no normalisation is required here.
   const $ = cheerioLoad(html || '');
   const results = [];
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // 1) Salesforce Lightning/ARIA tabsets (native behaviour)
   $('[role="tablist"]').each((_, tablist) => {
     const titlesArr = [];
@@ -66,10 +68,10 @@ export function extractSalesforceTabsEnhanced(html) {
       });
   });
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // 2) Generic Bootstrap/ARIA tab fallback
-  // Salesforce pages sometimes embed Bootstrap-like tab panes (e.g. within HTML
-  // components).  We scan for nav-tabs structures and extract those panes.
+  // Salesforce pages sometimes embed Bootstrap-like tab panes (e.g. within
+  // HTML components). We scan for nav-tabs structures and extract those panes.
   const navTitles = {};
   $('.nav-tabs, [role="tablist"]').find('a[href]').each((_, a) => {
     const $a = $(a);
@@ -93,10 +95,10 @@ export function extractSalesforceTabsEnhanced(html) {
     }
   });
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // 3) Heuristic sections based on common headings
   // Extract sections that resemble specification tables, feature lists or
-  // package contents.  These often appear outside of explicit tab widgets.
+  // package contents. These often appear outside of explicit tab widgets.
   const wanted = [
     /products?\s+include/i,
     /what'?s?\s+in\s+the\s+box/i,
@@ -104,7 +106,6 @@ export function extractSalesforceTabsEnhanced(html) {
     /\b(specs?|specifications?)\b/i,
     /\bfeatures?\b/i
   ];
-  // Consider sections, articles and divs at the top level of the document.
   $('section, div, article').each((_, sec) => {
     const $sec = $(sec);
     // Look for the first heading within the section.
@@ -119,9 +120,9 @@ export function extractSalesforceTabsEnhanced(html) {
 
   // -------------------------------------------------------------------------
   // 4) Generic fallback: extract any section with a heading even if it does not
-  // match heuristic patterns.  This captures additional content blocks that
-  // may be relevant but are not part of a tabset.  The deduplication logic
-  // will remove any duplicates.
+  // match heuristic patterns. This captures additional content blocks that may
+  // be relevant but are not part of a tabset. The deduplication logic will
+  // remove any duplicates.
   $('section, div, article').each((_, sec) => {
     const $sec = $(sec);
     const heading = norm($sec.find('h2,h3,h4').first().text());
@@ -133,10 +134,10 @@ export function extractSalesforceTabsEnhanced(html) {
     }
   });
 
-  // ---------------------------------------------------------------------------
-  // 4) Deduplicate results.  Use the combination of title and first 256 characters of
-  // sanitised HTML as a key.  This avoids returning multiple entries for the same
-  // section extracted by different heuristics.
+  // -------------------------------------------------------------------------
+  // 5) Deduplicate results. Use the combination of title and the first 256
+  // characters of sanitised HTML as a key. This avoids returning multiple
+  // entries for the same section extracted by different heuristics.
   const seen = new Set();
   const uniqueResults = [];
   for (const t of results) {
@@ -152,10 +153,10 @@ export function extractSalesforceTabsEnhanced(html) {
 /**
  * Backwards‑compatible wrapper for Salesforce tab extraction.
  *
- * Some modules expect an `extractSalesforceTabs` export.  Delegate to the
+ * Some modules expect an `extractSalesforceTabs` export. Delegate to the
  * enhanced implementation so that callers automatically benefit from the
  * additional heuristics (Bootstrap tab fallback, heuristic sections,
- * generic headings).  This wrapper preserves the existing API signature
+ * generic headings). This wrapper preserves the existing API signature
  * while exposing the improved behaviour.
  *
  * @param {string} html A full HTML document (static) from a Salesforce page.
@@ -168,15 +169,15 @@ export function extractSalesforceTabs(html) {
 // -----------------------------------------------------------------------------
 // Supplementary helpers to parse specifications and features from tab content.
 // These helpers mirror logic found in mergeRaw.js to identify key/value pairs
-// and classify free‑form sentences as product features.  They are included
+// and classify free‑form sentences as product features. They are included
 // here so that Salesforce pages can contribute structured specs and a list of
 // features directly from their tabbed content.
 
 /**
  * Parse a specification line into a [key, value] pair.
  * Recognises patterns like "Key: Value", "Key – Value" (en dash) or
- * measurements such as "Total weight capacity 700 lbs".  Returns [null, null]
- * if no plausible spec is found.  Adapted from mergeRaw.js.
+ * measurements such as "Total weight capacity 700 lbs". Returns [null, null]
+ * if no plausible spec is found. Adapted from mergeRaw.js.
  *
  * @param {string} line A candidate specification line
  * @returns {[string|null, string|null]} Parsed key and value
@@ -220,9 +221,9 @@ function parseSpecLine(line) {
 }
 
 /**
- * Simple rule‑based classifier to determine if a sentence is a feature, benefit
- * or included item.  Looks for indicative keywords and falls back to
- * 'feature' when ambiguous.  Adapted from mergeRaw.js.
+ * Simple rule‑based classifier to determine if a sentence is a feature,
+ * benefit or included item. Looks for indicative keywords and falls back
+ * to 'feature' when ambiguous. Adapted from mergeRaw.js.
  *
  * @param {string} text A sentence from the tab content
  * @returns {string} One of 'feature', 'benefit' or 'included'
@@ -245,9 +246,9 @@ function classifySentence(text) {
  *
  * This helper runs the enhanced tab extractor and then applies simple
  * heuristics to derive a list of product features and a specification map
- * from the concatenated tab text.  The resulting features array can be
+ * from the concatenated tab text. The resulting features array can be
  * attached to `rec.features` by the calling code so that mergeRaw will
- * treat them as structured features.  Specifications extracted here are
+ * treat them as structured features. Specifications extracted here are
  * merged non‑destructively into the existing `rec.specs`.
  *
  * @param {string} html A full HTML document (static) from a Salesforce page
@@ -258,7 +259,7 @@ export function extractSalesforceData(html) {
   const tabs = extractSalesforceTabsEnhanced(html);
   const features = [];
   const specs = {};
-  // For each tab's text, break into candidate lines.  We split on newline,
+  // For each tab's text, break into candidate lines. We split on newline,
   // bullet separators and periods/hyphens, then trim whitespace.
   for (const t of tabs) {
     const text = String(t.text || '');
