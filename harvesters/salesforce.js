@@ -311,48 +311,12 @@ export function extractSalesforceData(html) {
  * @param {object} tabsObj An object whose values are strings representing tab text.
  * @returns {{features: string[], specs: object}} Parsed features and specs.
  */
-export function extractFeaturesAndSpecsFromBrowseTabs(tabsObj) {
-  const features = [];
-  const specs = {};
-  if (!tabsObj || typeof tabsObj !== 'object') {
-    return { features, specs };
-  }
-  for (const key of Object.keys(tabsObj)) {
-    const raw = tabsObj[key];
-    if (!raw || typeof raw !== 'string') continue;
-    // Normalise whitespace and collapse multiple spaces
-    const cleaned = String(raw).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!cleaned) continue;
-    // Split on newlines or punctuation to isolate candidate sentences
-    const parts = cleaned
-      .split(/[\n•]+|(?<=\.)\s+|(?<=;)\s+|(?<=:)\s+/)
-      .map(s => s.trim())
-      .filter(Boolean);
-    for (const part of parts) {
-      // Attempt to parse as a spec; if successful, merge into specs
-      const [specKey, specVal] = parseSpecLine(part);
-      if (specKey && specVal) {
-        if (!(specKey in specs)) specs[specKey] = specVal;
-        continue;
-      }
-      // Otherwise classify as a feature if it contains at least three words
-      if (part.split(/\s+/).length >= 3) {
-        features.push(part);
-      }
-    }
-  }
-  // Deduplicate features by case-insensitive comparison
-  const seen = new Set();
-  const dedupedFeatures = [];
-  for (const feature of features) {
-    const normText = feature.toLowerCase();
-    if (!seen.has(normText)) {
-      seen.add(normText);
-      dedupedFeatures.push(feature);
-    }
-  }
-  return { features: dedupedFeatures, specs };
-}
+//
+// NOTE: A helper named `extractFeaturesAndSpecsFromBrowseTabs` is defined
+// near the end of this file.  It uses the internal
+// `parseSalesforceFeaturesAndSpecs` function to derive features and
+// specifications from the dynamic tab content.  Please ensure only one
+// definition exists in this module to avoid duplicate export errors.
 
 /**
  * Internal helper: Given an array of tab text strings, derive a list of
