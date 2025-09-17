@@ -66,9 +66,9 @@ function removeNoise(record) {
       // "specifications", "product specifications", "dimensions" and "features/benefits".  These headings often accompany
       // non‑feature content such as links or tables and should not be emitted as features.
       if (/(parts\s+diagram|technical\s+resources|technical\s+documents|technical\s+downloads|owners?\s+manual|owner's\s+manual|download\s+catalog|accessories\b|hcpcs\s+reimbursement|specification(s)?\b|product\s+specifications?|dimension(s)?\b|features\s*\/\s*benefits|features\s+and\s+benefits)/i.test(lower)) return false;
-      // Remove lines that are entirely uppercase only when they are very long (e.g., eight or more words).
-      // Short uppercase headings such as "SAFETY AND WARNINGS" or "BINOCULAR ZOOM STEREO" should be preserved.
-      if (/^[^a-z]*$/.test(text) && text.trim().split(/\s+/).length > 7) return false;
+      // Remove lines that are entirely uppercase and contain more than two words.
+      // Such lines are often section headings or navigation prompts rather than product features.
+      if (/^[^a-z]*$/.test(text) && text.trim().split(/\s+/).length > 2) return false;
 
       // Remove price or quantity info, or upsell prompts
       if (/\$\s*\d/.test(lower) || /\bprice\b/.test(lower) || /\bqty\b/.test(lower) || /sale|discount|clearance/.test(lower)) return false;
@@ -937,14 +937,8 @@ function classifySentence(text) {
 // sourced features exist.  The weighting can be tuned empirically.
 function computeQualityScore(rec) {
   let score = 0;
-  // Base points for having at least a handful of features.  Consider features across
-  // all sources (raw, browse and PDF) to avoid penalising pages where the
-  // primary feature list has been deduplicated or cleaned.  Use the largest
-  // feature count among these sources.
-  const rawCount = Array.isArray(rec.features_raw) ? rec.features_raw.length : 0;
-  const browseCount = Array.isArray(rec.features_browse) ? rec.features_browse.length : 0;
-  const pdfCount = Array.isArray(rec.features_pdf) ? rec.features_pdf.length : 0;
-  const featureCount = Math.max(rawCount, browseCount, pdfCount);
+  // Base points for having at least a handful of features
+  const featureCount = Array.isArray(rec.features_raw) ? rec.features_raw.length : 0;
   if (featureCount >= 3) score += 0.4; else if (featureCount >= 1) score += 0.2;
   // Base points for having specification entries
   const specCount = rec.specs && typeof rec.specs === 'object' ? Object.keys(rec.specs).length : 0;
