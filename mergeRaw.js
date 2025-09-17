@@ -1,5 +1,10 @@
 // Removed cleanProductRecord import – send full merged object directly to GPT
 
+// Import helper to extract features and specs from Salesforce browse tab panels.
+// This helper reads the `_browse.sections.tabs` object and returns feature sentences
+// and specification key/value pairs.  It is used below to enrich Salesforce records.
+import { extractFeaturesAndSpecsFromBrowseTabs } from './harvesters/salesforce.js';
+
 // mergeRaw.js
 // Utility to combine the existing raw scraper output with the
 // output from the Playwright browser collector. The merge is
@@ -518,7 +523,9 @@ function removeNoise(record) {
         // Gather feature text from the 'features' and 'included' sections.  These
         // sections may be arrays of strings or a single string; split on
         // newlines to normalise.  Store the result in rec.features_browse.
+        // Temporary list for browse feature sentences and a map for specs extracted from dynamic tabs.
         let featuresBrowseList = [];
+        let specsFromTabs = {};
         const featureSources = ['features', 'included'];
         for (const key of featureSources) {
           const raw = sections[key];
@@ -532,6 +539,16 @@ function removeNoise(record) {
           } else if (typeof raw === 'string') {
             featuresBrowseList.push(...raw.split(/\n+/));
           }
+        }
+        // Extract additional features and specs from Salesforce Lightning or other dynamic tabs
+        // via the helper.  Append any found features to featuresBrowseList and save specs.
+        if (sections.tabs) {
+          const { features: tabFeatures = [], specs: tabSpecs = {} } =
+            extractFeaturesAndSpecsFromBrowseTabs(sections.tabs);
+          if (Array.isArray(tabFeatures) && tabFeatures.length) {
+            featuresBrowseList.push(...tabFeatures);
+          }
+          specsFromTabs = tabSpecs;
         }
         featuresBrowseList = featuresBrowseList
           .map(s => String(s).trim())
@@ -584,6 +601,20 @@ function removeNoise(record) {
           // keys.  rec.specs is expected to be an object.
           rec.specs = rec.specs && typeof rec.specs === 'object' ? rec.specs : {};
           for (const [k, v] of Object.entries(specsBrowse)) {
+            if (!(k in rec.specs)) {
+              rec.specs[k] = v;
+            }
+          }
+        }
+
+        // Merge any specifications derived from dynamic tabs into the browse specs and the unified specs.
+        if (specsFromTabs && typeof specsFromTabs === 'object' && Object.keys(specsFromTabs).length) {
+          rec.specs_browse = rec.specs_browse && typeof rec.specs_browse === 'object' ? rec.specs_browse : {};
+          for (const [k, v] of Object.entries(specsFromTabs)) {
+            if (!rec.specs_browse[k]) {
+              rec.specs_browse[k] = v;
+            }
+            rec.specs = rec.specs && typeof rec.specs === 'object' ? rec.specs : {};
             if (!(k in rec.specs)) {
               rec.specs[k] = v;
             }
