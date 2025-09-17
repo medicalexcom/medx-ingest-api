@@ -62,6 +62,10 @@ const CLICK_SELECTORS = [
   'li.slds-tabs_default__item',
   'a.slds-tabs_default__link',
   'lightning-tab',
+
+  // Additional Salesforce Lightning patterns
+  'button.slds-tabs_default__link',
+  'button.slds-tabs_scoped__link',
 ];
 
 const WAITERS = [
@@ -78,6 +82,11 @@ const WAITERS = [
 
   // Wait for Lightning panels to load
   'div[data-target-selection-name]',
+
+  // Additional Lightning panel waiters
+  'div[role="tabpanel"]',
+  'div.slds-tabs_default__content',
+  'div.slds-tabs_scoped__content',
 ];
 
 // Cookie banners we try to accept/dismiss quickly
