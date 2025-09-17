@@ -1,9 +1,10 @@
 // Removed cleanProductRecord import – send full merged object directly to GPT
 
-// Import helper to extract features and specs from Salesforce browse tab panels.
-// This helper reads the `_browse.sections.tabs` object and returns feature sentences
-// and specification key/value pairs.  It is used below to enrich Salesforce records.
-import { extractFeaturesAndSpecsFromBrowseTabs } from './harvesters/salesforce.js';
+// Import all exports from the Salesforce harvester module. We avoid
+// destructuring a specific named export here because the runtime
+// environment may not provide that export. Using a wildcard import
+// prevents module resolution errors if the named helper is absent.
+import * as salesforceHelper from './harvesters/salesforce.js';
 
 // mergeRaw.js
 // Utility to combine the existing raw scraper output with the
@@ -523,8 +524,10 @@ function removeNoise(record) {
         // Gather feature text from the 'features' and 'included' sections.  These
         // sections may be arrays of strings or a single string; split on
         // newlines to normalise.  Store the result in rec.features_browse.
-        // Temporary list for browse feature sentences and a map for specs extracted from dynamic tabs.
         let featuresBrowseList = [];
+        // specsFromTabs will hold specification key/value pairs extracted from dynamic tab panels.
+        // It is defined here so it can be merged into rec.specs and rec.specs_browse after
+        // parsing the specifications section.
         let specsFromTabs = {};
         const featureSources = ['features', 'included'];
         for (const key of featureSources) {
@@ -541,10 +544,11 @@ function removeNoise(record) {
           }
         }
         // Extract additional features and specs from Salesforce Lightning or other dynamic tabs
-        // via the helper.  Append any found features to featuresBrowseList and save specs.
+        // via the helper. Append any found features to featuresBrowseList and save specs.
         if (sections.tabs) {
+          const helperFn = salesforceHelper.extractFeaturesAndSpecsFromBrowseTabs;
           const { features: tabFeatures = [], specs: tabSpecs = {} } =
-            extractFeaturesAndSpecsFromBrowseTabs(sections.tabs);
+            typeof helperFn === 'function' ? helperFn(sections.tabs) : { features: [], specs: {} };
           if (Array.isArray(tabFeatures) && tabFeatures.length) {
             featuresBrowseList.push(...tabFeatures);
           }
