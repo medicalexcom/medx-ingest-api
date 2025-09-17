@@ -148,3 +148,19 @@ export function extractSalesforceTabsEnhanced(html) {
   }
   return uniqueResults;
 }
+
+/**
+ * Backwards‑compatible wrapper for Salesforce tab extraction.
+ *
+ * Some modules expect an `extractSalesforceTabs` export.  Delegate to the
+ * enhanced implementation so that callers automatically benefit from the
+ * additional heuristics (Bootstrap tab fallback, heuristic sections,
+ * generic headings).  This wrapper preserves the existing API signature
+ * while exposing the improved behaviour.
+ *
+ * @param {string} html A full HTML document (static) from a Salesforce page.
+ * @returns {{id: string, title: string, html: string, rawHtml: string, text: string, source: string}[]}
+ */
+export function extractSalesforceTabs(html) {
+  return extractSalesforceTabsEnhanced(html);
+}
