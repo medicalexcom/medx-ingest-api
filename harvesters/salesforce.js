@@ -361,7 +361,9 @@ function parseSalesforceFeaturesAndSpecs(texts) {
         if (!(key in specs)) specs[key] = value;
         continue;
       }
-      if (part.split(/\s+/).length >= 3) {
+      // Treat sentences with two or more words as features (previously three or more).
+      // This change ensures short phrases like "Wound debridement" are not discarded.
+      if (part.split(/\s+/).length >= 2) {
         features.push(part);
       }
     }
