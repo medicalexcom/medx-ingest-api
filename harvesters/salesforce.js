@@ -334,10 +334,23 @@ function parseSalesforceFeaturesAndSpecs(texts) {
   const features = [];
   const specs = {};
   for (const text of texts) {
-    const cleaned = String(text || '')
+    let cleaned = String(text || '')
       .replace(/\u00A0/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+    // Insert a space after a closing parenthesis followed by a digit to aid parsing
+    cleaned = cleaned.replace(/\)(?=\d)/g, ') ');
+    // Extract spec pairs of the form "Key (unit) value", e.g. "Case Length (in) 11.5".
+    const pairRegex = /([A-Za-z][^()]+?)\s*\(([^)]+)\)\s*(\d+(?:\.\d+)?)/g;
+    let match;
+    while ((match = pairRegex.exec(cleaned)) !== null) {
+      const keyRaw = `${match[1]} ${match[2]}`.trim();
+      const value = match[3].trim();
+      const key = keyRaw.replace(/\s+/g, '_').toLowerCase();
+      if (key && value && !(key in specs)) {
+        specs[key] = value;
+      }
+    }
     const parts = cleaned
       .split(/(?<!\d)[.\n\u2022]+|\bTo\b/)
       .map(s => s.trim())
