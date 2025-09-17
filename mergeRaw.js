@@ -1,9 +1,9 @@
 // Removed cleanProductRecord import – send full merged object directly to GPT
 
-// Import Salesforce helpers so we can extract dynamic tab content when available.
-// The helper `extractFeaturesAndSpecsFromBrowseTabs` returns features and specs
-// from the Playwright `_browse.sections.tabs` object.  We import all exports
-// under the namespace `salesforceHelper` so that mergeRaw can call it if present.
+// Import all exports from the Salesforce harvester module. We avoid
+// destructuring a specific named export here because the runtime
+// environment may not provide that export. Using a wildcard import
+// prevents module resolution errors if the named helper is absent.
 import * as salesforceHelper from './harvesters/salesforce.js';
 
 // mergeRaw.js
@@ -525,6 +525,10 @@ function removeNoise(record) {
         // sections may be arrays of strings or a single string; split on
         // newlines to normalise.  Store the result in rec.features_browse.
         let featuresBrowseList = [];
+        // specsFromTabs will hold specification key/value pairs extracted from dynamic tab panels.
+        // It is defined here so it can be merged into rec.specs and rec.specs_browse after
+        // parsing the specifications section.
+        let specsFromTabs = {};
         const featureSources = ['features', 'included'];
         for (const key of featureSources) {
           const raw = sections[key];
@@ -539,27 +543,20 @@ function removeNoise(record) {
             featuresBrowseList.push(...raw.split(/\n+/));
           }
         }
+        // Extract additional features and specs from Salesforce Lightning or other dynamic tabs
+        // via the helper. Append any found features to featuresBrowseList and save specs.
+        if (sections.tabs) {
+          const helperFn = salesforceHelper.extractFeaturesAndSpecsFromBrowseTabs;
+          const { features: tabFeatures = [], specs: tabSpecs = {} } =
+            typeof helperFn === 'function' ? helperFn(sections.tabs) : { features: [], specs: {} };
+          if (Array.isArray(tabFeatures) && tabFeatures.length) {
+            featuresBrowseList.push(...tabFeatures);
+          }
+          specsFromTabs = tabSpecs;
+        }
         featuresBrowseList = featuresBrowseList
           .map(s => String(s).trim())
           .filter(s => s.length > 0);
-
-        // Extract features and specifications from dynamic tab panels (e.g., Salesforce Lightning tabs).
-        // If the `_browse.sections.tabs` object exists and the Salesforce helper is available,
-        // parse the tab content into features and specs.  This allows dynamic tabs to
-        // contribute to features_browse and specs_browse.
-        let specsFromTabs = {};
-        if (sections.tabs && salesforceHelper && typeof salesforceHelper.extractFeaturesAndSpecsFromBrowseTabs === 'function') {
-          try {
-            const { features: tabFeatures = [], specs: tabSpecs = {} } =
-              salesforceHelper.extractFeaturesAndSpecsFromBrowseTabs(sections.tabs);
-            if (Array.isArray(tabFeatures) && tabFeatures.length > 0) {
-              featuresBrowseList.push(...tabFeatures);
-            }
-            specsFromTabs = tabSpecs || {};
-          } catch (_err) {
-            // Silently ignore errors from tab parsing
-          }
-        }
         // Assign to rec.features_browse after deduplication.  Do not remove
         // from rec.features_raw; the top‑level list should continue to
         // aggregate all features for backwards compatibility.
@@ -614,10 +611,8 @@ function removeNoise(record) {
           }
         }
 
-        // Merge any specifications derived from dynamic tab panels into
-        // rec.specs_browse and rec.specs.  Do not overwrite existing keys.
+        // Merge any specifications derived from dynamic tabs into the browse specs and the unified specs.
         if (specsFromTabs && typeof specsFromTabs === 'object' && Object.keys(specsFromTabs).length) {
-          // Ensure specs_browse exists
           rec.specs_browse = rec.specs_browse && typeof rec.specs_browse === 'object' ? rec.specs_browse : {};
           for (const [k, v] of Object.entries(specsFromTabs)) {
             if (!rec.specs_browse[k]) {
@@ -942,16 +937,14 @@ function classifySentence(text) {
 // sourced features exist.  The weighting can be tuned empirically.
 function computeQualityScore(rec) {
   let score = 0;
-  // Base points for having at least a handful of features.  When the
-  // primary features list is sparse (e.g. after deduplication), fall back
-  // to counting PDF-sourced features to avoid penalising pages where
-  // feature text lives in PDFs.  This preserves high scores for
-  // WooCommerce and similar sites while keeping deduplication logic intact.
+  // Base points for having at least a handful of features.  Consider features across
+  // all sources (raw, browse and PDF) to avoid penalising pages where the
+  // primary feature list has been deduplicated or cleaned.  Use the largest
+  // feature count among these sources.
   const rawCount = Array.isArray(rec.features_raw) ? rec.features_raw.length : 0;
-  const pdfCount = Array.isArray(rec.features_pdf) ? rec.features_pdf.length : 0;
   const browseCount = Array.isArray(rec.features_browse) ? rec.features_browse.length : 0;
-  // Determine the effective feature count across all sources (raw, browse, pdf).
-  const featureCount = Math.max(rawCount, pdfCount, browseCount);
+  const pdfCount = Array.isArray(rec.features_pdf) ? rec.features_pdf.length : 0;
+  const featureCount = Math.max(rawCount, browseCount, pdfCount);
   if (featureCount >= 3) score += 0.4; else if (featureCount >= 1) score += 0.2;
   // Base points for having specification entries
   const specCount = rec.specs && typeof rec.specs === 'object' ? Object.keys(rec.specs).length : 0;
