@@ -356,20 +356,22 @@ function parseSalesforceFeaturesAndSpecs(texts) {
       .map(s => s.trim())
       .filter(Boolean);
     for (const part of parts) {
+      // Skip accessory lists and long equipment enumerations.  These strings
+      // often contain many product codes (e.g. "D4-3001", "D4-2003") and
+      // auxiliary items that are not useful as standalone features or specs.
+      // If the part contains multiple product codes or references to
+      // "Eyepiece", "Auxiliary", "Boom Stand", etc. and is lengthy, drop it.
+      const tokens = part.split(/\s+/);
+      const hasCodes = /\b[A-Z]{1,2}\d{2,4}-/.test(part);
+      const hasAccessoryTerms = /(eyepiece|auxiliary|lens|stand|boom)/i.test(part);
+      if (tokens.length > 20 && (hasCodes || hasAccessoryTerms)) {
+        continue;
+      }
+
       const [key, value] = parseSpecLine(part);
       if (key && value) {
-        // Skip spec entries where the key is excessively long or the value contains
-        // indicators of a concatenated item list (e.g. product codes like "D4-1234" or
-        // multiple part numbers separated by spaces).  These lines are better
-        // treated as feature sentences rather than structured specifications.
-        const tooLongKey = key.length > 50;
-        // Detect accessory/product code patterns in the value (e.g. D4-3001 or similar).
-        const looksLikeCodeList = /\b[A-Z]{1,2}\d{1,4}-/i.test(value);
-        if (!tooLongKey && !looksLikeCodeList) {
-          if (!(key in specs)) specs[key] = value;
-          continue;
-        }
-        // Otherwise, fall through and treat this as a feature line below.
+        if (!(key in specs)) specs[key] = value;
+        continue;
       }
       if (part.split(/\s+/).length >= 3) {
         features.push(part);
