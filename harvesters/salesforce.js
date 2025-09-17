@@ -296,3 +296,135 @@ export function extractSalesforceData(html) {
   }
   return { tabs, features: deduped, specs };
 }
+
+/**
+ * Extract features and specifications from a Salesforce `_browse.sections.tabs` object.
+ *
+ * The ingest pipeline provides dynamic tab panels in `_browse.sections.tabs`
+ * where each key corresponds to a tab id or title and each value contains the
+ * concatenated text of that tab. This helper parses each panel's text,
+ * attempts to recognise specification key/value pairs, and classifies the
+ * remaining sentences as features.  It returns a deduplicated list of features
+ * and a map of specification key/value pairs.  Keys are normalised to
+ * lowercase with underscores, mirroring the behaviour of mergeRaw.js.
+ *
+ * @param {object} tabsObj An object whose values are strings representing tab text.
+ * @returns {{features: string[], specs: object}} Parsed features and specs.
+ */
+export function extractFeaturesAndSpecsFromBrowseTabs(tabsObj) {
+  const features = [];
+  const specs = {};
+  if (!tabsObj || typeof tabsObj !== 'object') {
+    return { features, specs };
+  }
+  for (const key of Object.keys(tabsObj)) {
+    const raw = tabsObj[key];
+    if (!raw || typeof raw !== 'string') continue;
+    // Normalise whitespace and collapse multiple spaces
+    const cleaned = String(raw).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!cleaned) continue;
+    // Split on newlines or punctuation to isolate candidate sentences
+    const parts = cleaned
+      .split(/[\n•]+|(?<=\.)\s+|(?<=;)\s+|(?<=:)\s+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const part of parts) {
+      // Attempt to parse as a spec; if successful, merge into specs
+      const [specKey, specVal] = parseSpecLine(part);
+      if (specKey && specVal) {
+        if (!(specKey in specs)) specs[specKey] = specVal;
+        continue;
+      }
+      // Otherwise classify as a feature if it contains at least three words
+      if (part.split(/\s+/).length >= 3) {
+        features.push(part);
+      }
+    }
+  }
+  // Deduplicate features by case-insensitive comparison
+  const seen = new Set();
+  const dedupedFeatures = [];
+  for (const feature of features) {
+    const normText = feature.toLowerCase();
+    if (!seen.has(normText)) {
+      seen.add(normText);
+      dedupedFeatures.push(feature);
+    }
+  }
+  return { features: dedupedFeatures, specs };
+}
+
+/**
+ * Internal helper: Given an array of tab text strings, derive a list of
+ * features and a specification map.  This replicates the logic used by
+ * extractSalesforceData but operates on plain text strings rather than
+ * structured tab objects.  It splits each text into sentences and
+ * attempts to parse specification lines before falling back to treating
+ * longer sentences as features.  Duplicate features (case-insensitive)
+ * are removed.
+ *
+ * @param {string[]} texts Array of strings extracted from tab content
+ * @returns {{features: string[], specs: object}}
+ */
+function parseSalesforceFeaturesAndSpecs(texts) {
+  const features = [];
+  const specs = {};
+  for (const text of texts) {
+    const cleaned = String(text || '')
+      .replace(/\u00A0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const parts = cleaned
+      .split(/(?<!\d)[.\n\u2022]+|\bTo\b/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const part of parts) {
+      const [key, value] = parseSpecLine(part);
+      if (key && value) {
+        if (!(key in specs)) specs[key] = value;
+        continue;
+      }
+      if (part.split(/\s+/).length >= 3) {
+        features.push(part);
+      }
+    }
+  }
+  // Deduplicate features case-insensitively
+  const seen = new Set();
+  const dedup = [];
+  for (const f of features) {
+    const normText = f.toLowerCase();
+    if (!seen.has(normText)) {
+      seen.add(normText);
+      dedup.push(f);
+    }
+  }
+  return { features: dedup, specs };
+}
+
+/**
+ * Parse Salesforce dynamic tab content from the Playwright browse collector.
+ *
+ * The browse step stores dynamically rendered tab panels in
+ * `_browse.sections.tabs` as an object of id→text pairs.  This helper
+ * accepts that object, parses each value and derives a list of product
+ * features and a specification map.  Use this function in mergeRaw.js
+ * (or similar) to populate `features_browse` and `specs_browse` for
+ * Salesforce pages.
+ *
+ * @param {object} tabsObj The `_browse.sections.tabs` object returned by Playwright
+ * @returns {{features: string[], specs: object}}
+ */
+export function extractFeaturesAndSpecsFromBrowseTabs(tabsObj) {
+  if (!tabsObj || typeof tabsObj !== 'object') {
+    return { features: [], specs: {} };
+  }
+  const texts = [];
+  for (const key of Object.keys(tabsObj)) {
+    const val = tabsObj[key];
+    if (typeof val === 'string' && val.trim()) {
+      texts.push(val);
+    }
+  }
+  return parseSalesforceFeaturesAndSpecs(texts);
+}
