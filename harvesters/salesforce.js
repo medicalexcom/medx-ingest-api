@@ -60,10 +60,23 @@ export function extractSalesforceTabsEnhanced(html) {
           title = `Tab ${index + 1}`;
         }
         const { rawHtml, html: sanitized, text } = extractHtmlAndText($, pane);
-        // Use sanitised HTML as rawHtml to avoid returning verbose Lightning markup.
-        const raw = sanitized;
-        if (sanitized || text) {
-          results.push({ id, title, html: sanitized, rawHtml: raw, text, source: 'salesforce' });
+        // Normalise spacing in the sanitised HTML and plain text.  Salesforce markup
+        // sometimes omits spaces between labels and values (e.g. "Edge Type3 Facet").
+        // Insert a space at transitions between letters and digits, and between
+        // lowercase letters and uppercase letters.  This improves readability
+        // without affecting downstream spec/feature parsing.
+        const normalizeSpacing = (s) => {
+          return String(s || '')
+            .replace(/([a-z])([A-Z])/g, '$1 $2')
+            .replace(/([A-Za-z])([0-9])/g, '$1 $2')
+            .replace(/([0-9])([A-Za-z])/g, '$1 $2');
+        };
+        const sanitizedNorm = normalizeSpacing(sanitized);
+        const textNorm = normalizeSpacing(text);
+        // Use the normalised HTML as rawHtml to avoid returning verbose Lightning markup.
+        const raw = sanitizedNorm;
+        if (sanitizedNorm || textNorm) {
+          results.push({ id, title, html: sanitizedNorm, rawHtml: raw, text: textNorm, source: 'salesforce' });
         }
       });
   });
