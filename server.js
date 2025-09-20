@@ -1181,6 +1181,21 @@ function extractNormalized(baseUrl, html, opts) {
 
   // ==== FIX: define name and brand before using them ====
   const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+
+  // Fallback: if the name is missing or only '#', derive from the URL slug
+  if (!name || name.trim() === '' || name.trim() === '#') {
+    try {
+      const parsedUrl = new URL(baseUrl); // `baseUrl` is passed into extractNormalized()
+      const slug = parsedUrl.pathname.split('/').filter(Boolean).pop() || '';
+      if (slug) {
+        // Replace dashes/underscores with spaces and strip any .html extension
+        name = slug.replace(/[-_]/g, ' ').replace(/\.html?$/i, '').trim();
+      }
+    } catch {
+      // ignore URL parsing errors
+    }
+  }
+
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) brand = inferBrandFromName(name);
   // =====================================================
