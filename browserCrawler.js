@@ -87,8 +87,6 @@ const WAITERS = [
   'div[role="tabpanel"]',
   'div.slds-tabs_default__content',
   'div.slds-tabs_scoped__content',
-  'h1',
-  '#react-app h1',
 ];
 
 // Cookie banners we try to accept/dismiss quickly
@@ -491,26 +489,10 @@ async function collectMicrodata(page) {
     document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
       const raw = (s.textContent || '').trim();
       if (!raw) return;
-    
-      let parsed = null;
       try {
-        // First pass: parse as-is
-        parsed = JSON.parse(raw);
-      } catch {
-        // Second pass: sanitize hash-prefixed keys and values
-        let sanitized = raw
-          .replace(/"?#([^":]+)":/g, (_, key) => `"${key}":`)
-          .replace(/:\s*#([A-Za-z0-9_-]+)/g, ': "$1"');
-        try {
-          parsed = JSON.parse(sanitized);
-        } catch {
-          parsed = null;
-        }
-      }
-    
-      if (parsed) {
+        const parsed = JSON.parse(raw);
         jsonLd.push(parsed);
-      } else {
+      } catch {
         jsonLd.push({ __raw: raw.slice(0, 100000) });
       }
     });
@@ -545,31 +527,16 @@ async function collectInlineData(page) {
       window_vars: {},
     };
 
+    // <script type="application/json"> blobs
     document.querySelectorAll('script[type="application/json"]').forEach(s => {
       const raw = (s.textContent || '').trim();
       if (!raw) return;
-    
-      let parsed = null;
       try {
-        parsed = JSON.parse(raw);
+        out.application_json_scripts.push(JSON.parse(raw));
       } catch {
-        let sanitized = raw
-          .replace(/"?#([^":]+)":/g, (_, key) => `"${key}":`)
-          .replace(/:\s*#([A-Za-z0-9_-]+)/g, ': "$1"');
-        try {
-          parsed = JSON.parse(sanitized);
-        } catch {
-          parsed = null;
-        }
-      }
-    
-      if (parsed) {
-        out.application_json_scripts.push(parsed);
-      } else {
         out.application_json_scripts.push({ __raw: raw.slice(0, 100000) });
       }
     });
-
 
     // Common app frameworks / globals
     const WIN_KEYS = [
@@ -738,38 +705,8 @@ export async function browseProduct(url, opts = {}) {
   });
 
   try {
-    // Navigate to the page and wait for the DOM and network to settle
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
-    await page.waitForTimeout(10000);
-    
-    // OPTIONAL: Wait a bit longer for the <h1> to appear, but don't fail if it doesn't
-    await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
-       
-    // Scroll to hash fragment (e.g. #overview) if present
-    const parsedUrl = new URL(url);
-    if (parsedUrl.hash) {
-      await page.evaluate((hash) => {
-        const el = document.querySelector(hash);
-        if (el) el.scrollIntoView({ behavior: 'smooth' });
-      }, parsedUrl.hash);
-      await page.waitForTimeout(1000);
-    }
-    
-    // Click first tab/button if the page uses a tab UI (BD, Aspen, Salesforce)
-    const tabSelectors = ['[role="tab"]', '.tab-item', '.tabs button'];
-    for (const sel of tabSelectors) {
-      const tabs = await page.$$(sel);
-      if (tabs && tabs.length > 0) {
-        try {
-          await tabs[0].click();
-          await page.waitForTimeout(1500);
-        } catch (e) {
-          console.warn('Tab click error:', e.message);
-        }
-        break;
-      }
-    }
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
+    await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
 
     await acceptCookiesIfPresent(page);
     await autoExpand(page);
