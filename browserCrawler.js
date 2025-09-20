@@ -739,8 +739,9 @@ export async function browseProduct(url, opts = {}) {
 
   try {
     // Navigate to the page and wait for the DOM and network to settle
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
-    await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(10000);
     
     // OPTIONAL: Wait a bit longer for the <h1> to appear, but don't fail if it doesn't
     await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
