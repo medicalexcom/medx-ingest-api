@@ -91,6 +91,11 @@ const WAITERS = [
   '#react-app h1',
 ];
 
+// And right after page.goto():
+await page.goto(url, { waitUntil: 'load', timeout: 45000 });
+// Explicitly wait for the product title to appear, but don’t fail if it doesn’t
+await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
+
 // Cookie banners we try to accept/dismiss quickly
 const COOKIE_SELECTORS = [
   'button:has-text("Accept")',
