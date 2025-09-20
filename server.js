@@ -1180,7 +1180,18 @@ function extractNormalized(baseUrl, html, opts) {
   };
 
   // ==== FIX: define name and brand before using them ====
-  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+  let name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+
+  // Fallback for missing or hash-only names
+  if (!name || name.trim() === '' || name.trim() === '#') {
+    try {
+      const parsedUrl = new URL(baseUrl);
+      const slug = parsedUrl.pathname.split('/').filter(Boolean).pop() || '';
+      if (slug) {
+        name = slug.replace(/[-_]/g, ' ').replace(/\.html?$/i, '').trim();
+      }
+    } catch { /* ignore */ }
+  }
 
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) brand = inferBrandFromName(name);
