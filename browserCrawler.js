@@ -742,15 +742,11 @@ export async function browseProduct(url, opts = {}) {
     // Scroll to hash fragment (e.g. #overview) if present
     const parsedUrl = new URL(url);
     if (parsedUrl.hash) {
-      try {
-        await page.evaluate((hash) => {
-          const el = document.querySelector(hash);
-          if (el) el.scrollIntoView({ behavior: 'smooth' });
-        }, parsedUrl.hash);
-        await page.waitForTimeout(1000);
-      } catch (e) {
-        console.warn('Hash scroll error:', e.message);
-      }
+      await page.evaluate((hash) => {
+        const el = document.querySelector(hash);
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
+      }, parsedUrl.hash);
+      await page.waitForTimeout(1000);
     }
     
     // Click first tab/button if the page uses a tab UI (BD, Aspen, Salesforce)
@@ -761,10 +757,10 @@ export async function browseProduct(url, opts = {}) {
         try {
           await tabs[0].click();
           await page.waitForTimeout(1500);
-          break;
-        } catch (err) {
-          console.warn('Tab click error:', err.message);
+        } catch (e) {
+          console.warn('Tab click error:', e.message);
         }
+        break;
       }
     }
 
