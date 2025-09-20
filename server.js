@@ -1105,17 +1105,19 @@ app.get("/ingest", async (req, res) => {
 
     if (debug) return res.json({ ...norm, _debug: { ...diag, fetched } });
     // Validate that name_raw is present and not empty or just a '#'
-    if (!results.name_raw ||
-        typeof results.name_raw !== 'string' ||
-        results.name_raw.trim() === '' ||
-        results.name_raw.trim() === '#') {
+    if (!norm.name_raw ||
+        typeof norm.name_raw !== 'string' ||
+        norm.name_raw.trim() === '' ||
+        norm.name_raw.trim() === '#') {
       return res.status(422).json({ error: 'Expected valid product name, found empty or hash fragment.' });
     }
     
     // Validate that the payload isn’t empty
-    if (!results || Object.keys(results).length === 0) {
+    if (!norm || Object.keys(norm).length === 0) {
       return res.status(422).json({ error: 'Missing Payload JSON or result extraction failed.' });
     }
+    
+    // Now return the normalized result if checks pass
     return res.json(norm);
 
   } catch (e) {
