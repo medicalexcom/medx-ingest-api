@@ -1935,24 +1935,23 @@ function extractSpecsFromScripts($, container /* optional */) {
     }
   };
 
-  // 1) Strict JSON blobs
+    // 1) Strict JSON blobs
   scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
     if (isRecoBlock($, el)) return;
     const raw = $(el).contents().text();
     if (!raw || !raw.trim()) return;
-    // Use safeJsonParse instead of JSON.parse
     const parsed = safeJsonParse(raw.trim());
     if (parsed) {
       visit(parsed, "$");
     }
   });
 
-   // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
+  // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
   scope.find("script").each((_, el) => {
     if (isRecoBlock($, el)) return;
     const txt = String($(el).contents().text() || "");
     if (!txt || txt.length < 40) return;
-    if (!/\\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\\b/i.test(txt)) return;
+    if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
   
     const blocks = pluckJsonObjectsFromJs(txt, 5);
     for (const block of blocks) {
