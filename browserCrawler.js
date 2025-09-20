@@ -91,11 +91,6 @@ const WAITERS = [
   '#react-app h1',
 ];
 
-// And right after page.goto():
-await page.goto(url, { waitUntil: 'load', timeout: 45000 });
-// Explicitly wait for the product title to appear, but don’t fail if it doesn’t
-await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
-
 // Cookie banners we try to accept/dismiss quickly
 const COOKIE_SELECTORS = [
   'button:has-text("Accept")',
@@ -743,9 +738,13 @@ export async function browseProduct(url, opts = {}) {
   });
 
   try {
+    // Navigate to the page and wait for the DOM and network to settle
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
     
+    // OPTIONAL: Wait a bit longer for the <h1> to appear, but don't fail if it doesn't
+    await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
+       
     // Scroll to hash fragment (e.g. #overview) if present
     const parsedUrl = new URL(url);
     if (parsedUrl.hash) {
