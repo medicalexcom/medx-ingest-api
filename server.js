@@ -1435,19 +1435,18 @@ function schemaPropsToSpecs(props){
 function extractJsonLd($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const raw = $(el).contents().text();
-      if (!raw || !raw.trim()) return;
-      const parsed = JSON.parse(raw.trim());
-      const arr = Array.isArray(parsed) ? parsed : [parsed];
-      arr.forEach(obj => {
-        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) {
-          obj['@graph'].forEach(g => nodes.push(g));
-        } else {
-          nodes.push(obj);
-        }
-      });
-    } catch {}
+    const raw = $(el).contents().text();
+    if (!raw || !raw.trim()) return;
+    const parsed = safeJsonParse(raw.trim());
+    if (!parsed) return;
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    arr.forEach(obj => {
+      if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) {
+        obj['@graph'].forEach(g => nodes.push(g));
+      } else {
+        nodes.push(obj);
+      }
+    });
   });
 
   const prodCandidates = nodes.filter(n => {
@@ -1975,15 +1974,15 @@ function extractSpecsFromScripts($, container /* optional */) {
 function extractJsonLdAllProductSpecs($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const raw = $(el).contents().text();
-      if (!raw || !raw.trim()) return;
-      const parsed = JSON.parse(raw.trim());
-      (Array.isArray(parsed) ? parsed : [parsed]).forEach(obj => {
-        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
-        else nodes.push(obj);
-      });
-    } catch {}
+    const raw = $(el).contents().text();
+    if (!raw || !raw.trim()) return;
+    const parsed = safeJsonParse(raw.trim());
+    if (!parsed) return;
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    arr.forEach(obj => {
+      if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
+      else nodes.push(obj);
+    });
   });
 
   // ADD: detect page canonical URL to constrain merges
