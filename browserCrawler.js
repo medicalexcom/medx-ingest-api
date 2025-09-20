@@ -87,6 +87,8 @@ const WAITERS = [
   'div[role="tabpanel"]',
   'div.slds-tabs_default__content',
   'div.slds-tabs_scoped__content',
+  'h1',
+  '#react-app h1',
 ];
 
 // Cookie banners we try to accept/dismiss quickly
