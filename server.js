@@ -106,6 +106,35 @@ function decodeHtml(s){
     : s;
 }
 
+/**
+ * Attempt to parse JSON; if parsing fails (e.g. keys or values begin with '#'),
+ * perform basic sanitization.  Keys starting with '#' will have the hash removed,
+ * and bare values beginning with '#' will be quoted.  Returns the parsed object
+ * on success, or null on failure.
+ * @param {string} str
+ * @returns {object|null}
+ */
+function safeJsonParse(str) {
+  if (!str || typeof str !== "string") return null;
+  try {
+    return JSON.parse(str);
+  } catch {
+    let s = String(str);
+
+    // Sanitize keys that start with '#', e.g. {"#30-0002": ...} -> {"30-0002": ...}
+    s = s.replace(/"?#([^":]+)":/g, (_, key) => `"${key}":`);
+
+    // Quote bare hash-prefixed values, e.g. {"name": #1234} -> {"name": "1234"}
+    s = s.replace(/:\s*#([A-Za-z0-9_-]+)/g, ': "$1"');
+
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  }
+}
+
 function isHttpUrl(u){
   try {
     const x = new URL(u);
@@ -1911,19 +1940,26 @@ function extractSpecsFromScripts($, container /* optional */) {
     if (isRecoBlock($, el)) return;
     const raw = $(el).contents().text();
     if (!raw || !raw.trim()) return;
-    try { visit(JSON.parse(raw.trim()), "$"); } catch {}
+    // Use safeJsonParse instead of JSON.parse
+    const parsed = safeJsonParse(raw.trim());
+    if (parsed) {
+      visit(parsed, "$");
+    }
   });
 
-  // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
+   // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
   scope.find("script").each((_, el) => {
     if (isRecoBlock($, el)) return;
     const txt = String($(el).contents().text() || "");
     if (!txt || txt.length < 40) return;
-    if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
-
+    if (!/\\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\\b/i.test(txt)) return;
+  
     const blocks = pluckJsonObjectsFromJs(txt, 5);
     for (const block of blocks) {
-      try { visit(JSON.parse(block), "$"); } catch {}
+      const parsedBlock = safeJsonParse(block);
+      if (parsedBlock) {
+        visit(parsedBlock, "$");
+      }
     }
   });
 
