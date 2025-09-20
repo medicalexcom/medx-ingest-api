@@ -1180,7 +1180,7 @@ function extractNormalized(baseUrl, html, opts) {
   };
 
   // ==== FIX: define name and brand before using them ====
-  let name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
 
   // Fallback: if the name is missing or only '#', derive from the URL slug
   if (!name || name.trim() === '' || name.trim() === '#') {
