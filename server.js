@@ -1180,7 +1180,7 @@ function extractNormalized(baseUrl, html, opts) {
   };
 
   // ==== FIX: define name and brand before using them ====
-  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+  let name = cleanup(mergedSD.name || og.title || $("h1").first().text());
 
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) brand = inferBrandFromName(name);
