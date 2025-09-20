@@ -6,7 +6,11 @@ import crypto from "node:crypto";
 import { URL } from "node:url";
 import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
+import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
+import { harvestTabsFromHtml } from './tabHarvester.js';
+import { removeNoise } from './mergeRaw.js';
+// Removed GPT-ready helper: no longer needed
 
 
 
@@ -410,7 +414,8 @@ function toTitleCase(s = "") {
 
 function splitIntoSentences(t = "") {
   return String(t)
-    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
+    // Split sentences not only on punctuation but also on newlines and bullet/dash markers.
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])|\n+|(?:^|\s)[\u2022\-]\s+/)
     .map(s => s.trim())
     .filter(Boolean);
 }
@@ -447,7 +452,10 @@ app.get("/ingest", async (req, res) => {
     const selector = req.query.selector ? `&selector=${encodeURIComponent(String(req.query.selector))}` : "";
     const wait     = req.query.wait     != null ? `&wait=${encodeURIComponent(String(req.query.wait))}` : "";
     const timeout  = req.query.timeout  != null ? `&timeout=${encodeURIComponent(String(req.query.timeout))}` : "";
-    const mode     = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=fast";
+    // Prefer fully rendered pages by default so that dynamic content (e.g. hooks
+    // injected after initial load) is available to downstream parsers.  If a
+    // client explicitly passes a mode, honour it; otherwise default to full.
+    const mode     = req.query.mode ? `&mode=${encodeURIComponent(String(req.query.mode))}` : "&mode=full";
 
     const minImgPx   = Number.isFinite(parseInt(String(req.query.minpx),10)) ? parseInt(String(req.query.minpx),10) : MIN_IMG_PX_ENV;
     const excludePng = typeof req.query.excludepng !== "undefined"
@@ -455,12 +463,18 @@ app.get("/ingest", async (req, res) => {
       : EXCLUDE_PNG_ENV;
 
     const aggressive = String(req.query.aggressive || "false").toLowerCase() === "true";
-    const doSanitize = String(req.query.sanitize  || "false").toLowerCase() === "true";
+    // Default sanitization to true. If the client explicitly sets sanitize to
+    // "false", disable sanitization; otherwise always sanitize the payload.
+    const doSanitize = String(req.query.sanitize || "true").toLowerCase() === "true";
     const doHarvest  = req.query.harvest != null
       ? String(req.query.harvest).toLowerCase() === "true"
       : true;
     const wantMd     = String(req.query.markdown  || "false").toLowerCase() === "true";
     const mainOnly   = String(req.query.mainonly  || "false").toLowerCase() === "true"; // ADD-ONLY
+    // Always attempt to enrich from PDF manuals unless the client explicitly passes
+    // pdf=false. Using "true" as the default ensures manual data is extracted by
+    // default.
+    const wantPdf    = String(req.query.pdf || "true").toLowerCase();
 
     const endpoint = `${RENDER_API_URL.replace(/\/+$/,"")}/render?url=${encodeURIComponent(targetUrl)}${selector}${wait}${timeout}${mode}`;
 
@@ -513,6 +527,95 @@ app.get("/ingest", async (req, res) => {
       diag.timings.harvestMs = now() - t2;
     }
 
+    // === MEDX ADD: optionally enrich from PDF manuals ===
+    if (wantPdf === "true" || wantPdf === "1" || wantPdf === "yes") {
+      // Preserve the existing site-derived specs before enriching from PDFs. We do this
+      // so that specifications extracted from manuals are not merged back into
+      // the main specs object; instead they will remain under `pdf_kv` in the
+      // returned object. This ensures that tab-harvested specs stay separate.
+      const siteSpecsSnapshot = { ...(norm.specs || {}) };
+      try {
+        norm = await enrichFromManuals(norm, { maxManuals: 3, maxCharsText: 20000 });
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        diag.warnings.push(`pdf-enrich: ${msg}`);
+      }
+      // Restore original site specs to avoid merging PDF key-values into specs.
+      norm.specs = siteSpecsSnapshot;
+      // Filter the manual text and key-values to English only. Define a local
+      // heuristic here since the main isEnglishLineFn is declared later in the
+      // handler and cannot be referenced before initialization. A line is
+      // considered English if at least 70% of its characters are ASCII.
+      const isEng = (line) => {
+        const total = line.length;
+        if (total === 0) return false;
+        // Reject lines with accented characters (Spanish/French etc.)
+        if (/[áéíóúñàèùâêîôûäëïöüçœ’]/i.test(line)) return false;
+        let ascii = 0;
+        for (let i = 0; i < line.length; i++) {
+          const c = line.charCodeAt(i);
+          if (c >= 0x20 && c <= 0x7e) ascii++;
+        }
+        return ascii / total >= 0.7;
+      };
+      if (typeof norm.pdf_text === 'string') {
+        const pdfLines = norm.pdf_text.split('\n');
+        const filteredPdfLines = pdfLines
+          .map((l) => l.trim())
+          .filter((l) => isEng(l));
+        norm.pdf_text = filteredPdfLines.join('\n');
+      }
+      if (Array.isArray(norm.pdf_kv)) {
+        const filteredKv = [];
+        for (const kv of norm.pdf_kv) {
+          const newKv = {};
+          for (const [k, v] of Object.entries(kv)) {
+            const keyOk = typeof k === 'string' ? isEng(k) : true;
+            const valOk = typeof v === 'string' ? isEng(v) : true;
+            if (keyOk && valOk) newKv[k] = v;
+          }
+          if (Object.keys(newKv).length) filteredKv.push(newKv);
+        }
+        norm.pdf_kv = filteredKv;
+      }
+      // Extract English bullet features from the PDF text. We look for a FEATURES
+      // section and capture lines until a SPECIFICATIONS section or the end of
+      // the features list. Only keep English lines using the isEng heuristic.
+      if (typeof norm.pdf_text === 'string') {
+        const lines = norm.pdf_text.split('\n');
+        let inFeatures = false;
+        const pdfFeatures = [];
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (/^features$/i.test(line)) {
+            inFeatures = true;
+            continue;
+          }
+          if (/^specifications$/i.test(line)) {
+            if (inFeatures) break;
+          }
+          if (inFeatures) {
+            // Remove leading bullets or hyphens
+            let cleaned = line.replace(/^[-•\s]+/, '').trim();
+            if (!cleaned) continue;
+            if (isEng(cleaned)) {
+              pdfFeatures.push(cleaned);
+            }
+          }
+        }
+        if (pdfFeatures.length) {
+          const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+          for (const f of pdfFeatures) {
+            const key = f.toLowerCase();
+            if (!seen.has(key)) {
+              (norm.features_raw ||= []).push(f);
+              seen.add(key);
+            }
+          }
+        }
+      }
+    }
+
     // === Compass-only additive harvest (keeps your existing data intact) ===
     if (isCompass(targetUrl)) {
       const $ = cheerio.load(html);
@@ -553,6 +656,126 @@ app.get("/ingest", async (req, res) => {
     /* ==== MEDX ADD-ONLY: final spec enrichment before sanitize v1 ==== */
     try { norm.specs = enrichSpecsWithDerived(norm.specs || {}); } catch {}
 
+    // === Filter non-English content from the scraped result ===
+    // Define a heuristic: consider a string English if at least 70% of its characters
+    // are ASCII (0x20–0x7E). This removes non-Latin lines from descriptions,
+    // features, specs, and sections. Non-string spec values (e.g., numbers) are kept.
+    const isEnglishLineFn = (line) => {
+      const total = line.length;
+      if (total === 0) return false;
+      // Immediately reject lines that contain accented characters commonly found in
+      // Spanish, French or other non‑English European languages.  If any of
+      // these characters appear, assume the line is not English.
+      if (/[áéíóúñàèùâêîôûäëïöüçœ’]/i.test(line)) return false;
+      let asciiCount = 0;
+      for (let i = 0; i < line.length; i++) {
+        const code = line.charCodeAt(i);
+        if (code >= 0x20 && code <= 0x7e) asciiCount++;
+      }
+      return asciiCount / total >= 0.7;
+    };
+    // Filter description_raw lines
+    if (typeof norm.description_raw === 'string') {
+      const descLines = norm.description_raw.split('\n');
+      const filtered = descLines
+        .map((l) => l.trim())
+        .filter((l) => isEnglishLineFn(l));
+      norm.description_raw = filtered.join('\n');
+    }
+    // Filter features_raw array: keep only English lines and drop multilingual or
+    // slash-separated labels. Remove entries containing explicit language
+    // indicators or slash‑separated parts (e.g. "Silla inodoro tres en uno/", "EnglishEspañolFrançais").
+    if (Array.isArray(norm.features_raw)) {
+      norm.features_raw = norm.features_raw
+        .filter((l) => isEnglishLineFn(String(l).trim()))
+        .filter((l) => !/[\\/]/.test(String(l)))
+        .filter((l) => !/\b(español|français)\b/i.test(String(l)))
+        .filter((l) => String(l).trim().toLowerCase() !== 'englishespañolfrançais')
+        // Remove generic site navigation categories that appear as features.  These
+        // strings often come from scraped menu or navigation labels (e.g., “Mobility”,
+        // “Beds”, “Commodes”) and do not describe the product itself.  Filtering
+        // them here prevents contamination of the final features list.
+        .filter((l) => {
+          const val = String(l).trim();
+          const lower = val.toLowerCase();
+          const excluded = [
+            'products', 'bath safety', 'beds', 'commodes', 'inspired', 'mobility',
+            'patient room', 'personal care', 'respiratory', 'sleep therapy',
+            'therapeutic support surfaces', 'new arrivals', 'support & resources',
+            'who we are', 'who we serve', 'account', 'get in touch',
+            'press releases', 'articles & blogs', 'leadership', 'work with us',
+            'faqs', 'knowledge base'
+          ];
+          return !excluded.includes(lower);
+        });
+    }
+    // Filter specs values
+    if (norm.specs && typeof norm.specs === 'object') {
+      const filteredSpecs = {};
+      for (const [k, v] of Object.entries(norm.specs)) {
+        if (typeof v === 'string') {
+          if (isEnglishLineFn(v.trim())) filteredSpecs[k] = v;
+        } else {
+          filteredSpecs[k] = v;
+        }
+      }
+      norm.specs = filteredSpecs;
+    }
+
+    // Limit images to a small set of representative product photos.  Keep at
+    // most the first three images as they are usually the most relevant.
+    if (Array.isArray(norm.images) && norm.images.length > 3) {
+      norm.images = norm.images.slice();
+    }
+
+    // If the extracted name is identical to the brand, attempt to set the
+    // product name from the OpenGraph title or the URL slug.  This helps
+    // correct cases where name_raw is populated with the vendor name.
+    try {
+      if (
+        norm.name_raw &&
+        norm.brand &&
+        String(norm.name_raw).toLowerCase() === String(norm.brand).toLowerCase()
+      ) {
+        const $check = cheerio.load(html);
+        const ogTitle = $check('meta[property="og:title"]').attr('content') || '';
+        let candidate = ogTitle.trim();
+        if (!candidate) {
+          // Fallback: derive name from the final segment of the URL path
+          const parts = targetUrl.split('/').filter(Boolean);
+          const slug = parts[parts.length - 1] || '';
+          candidate = slug.replace(/[-_]/g, ' ').replace(/\.html?$/i, '').trim();
+          candidate = candidate.replace(/\b(bs\d+[a-z]?)\b/i, '').trim();
+        }
+        if (candidate) norm.name_raw = candidate;
+      }
+    } catch {
+      /* ignore name heuristic errors */
+    }
+
+    // ==== MEDX ADD-ONLY: optional browsing step to fetch dynamic content ====
+    // If the `browse` query parameter is set to true, we run our Playwright-based
+    // crawler to fetch a fully rendered version of the product page. This
+    // complements the existing static scrape with content pulled from tabs,
+    // accordions, and lazy-loaded elements.  Results are merged into `norm`
+    // using the mergeRaw helper.  Dynamic import is used here to avoid
+    // incurring Playwright overhead unless needed.
+    const doBrowse = String(req.query.browse || '').toLowerCase() === 'true';
+    if (doBrowse) {
+      try {
+        const { browseProduct } = await import('./browserCrawler.js');
+        const { mergeRaw }     = await import('./mergeRaw.js');
+        const b = await browseProduct(targetUrl, { headless: true });
+        if (b && b.ok) {
+          norm = mergeRaw({ raw_existing: norm, raw_browse: b.raw_browse });
+        } else {
+          diag.warnings.push(`browse-error: ${b && b.error ? b.error : 'unknown'}`);
+        }
+      } catch (e) {
+        diag.warnings.push(`browse-exception: ${e && e.message ? e.message : String(e)}`);
+      }
+    }
+
     if (wantMd) {
       const $ = cheerio.load(html);
       try { norm.description_md = extractDescriptionMarkdown($) || textToMarkdown(norm.description_raw || ""); }
@@ -570,6 +793,240 @@ app.get("/ingest", async (req, res) => {
         if (!norm.description_md) norm.description_md = textToMarkdown(norm.description_raw || "");
       }
     }
+
+    // Always remove noise from the normalized payload
+    try {
+      norm = removeNoise(norm);
+    } catch (e) {
+      diag.warnings.push(`noise-clean-error: ${e && e.message ? e.message : String(e)}`);
+    }
+
+    /* ==== Build structured sections for output ====
+     * Provide a consistent structure with headings (description, specifications, features, included).
+     * The helpers defined below assemble each section from the available fields on `norm`.
+     */
+    // Compile a description/overview: prefer Markdown description; fall back to raw description
+    // or tab-harvested description. Normalize whitespace and join multiple sources if needed.
+    function compileDescription(rec) {
+      const candidates = [];
+      if (rec.description_md && String(rec.description_md).trim()) {
+        candidates.push(String(rec.description_md).trim());
+      }
+      if (rec.description_raw && String(rec.description_raw).trim()) {
+        candidates.push(String(rec.description_raw).trim());
+      }
+      if (rec._browse && rec._browse.sections && rec._browse.sections.description && String(rec._browse.sections.description).trim()) {
+        candidates.push(String(rec._browse.sections.description).trim());
+      }
+      if (candidates.length) {
+        // Combine and deduplicate lines to avoid repeated paragraphs
+        const combined = candidates.join('\n\n');
+        const lines = combined.split(/\n+/).map((l) => l.trim()).filter((l) => l);
+        const seen = new Set();
+        const uniq = [];
+        for (const l of lines) {
+          const key = l.toLowerCase();
+          if (!seen.has(key)) {
+            uniq.push(l);
+            seen.add(key);
+          }
+        }
+        let desc = uniq.join('\n\n');
+        // If description is short or missing key details, supplement with select feature lines
+        const descLower = desc.toLowerCase();
+        const extras = [];
+        if (Array.isArray(rec.features_raw)) {
+        const patterns = [
+            /hospital[-\s]?strength|hospital strength/i,
+            /efficiency,\s*power,\s*and\s*performance|benefit\s+from/i,
+            /maximum\s+suction|270mmhg|up\s+to\s+270|vacuum\s+suction/i,
+            /suction\s+is\s+adjustable|adjustable\s+suction/i,
+            /quiet\s+pump.*timer.*night\s+light|quiet\s+pump\s+also\s+includes\s+a\s+timer\s+and\s+night\s+light/i,
+            /natural\s+nursing/i,
+            // Capture notes about closed systems or built-in batteries for pumps like the Spectra S1 Plus
+            /closed\s+system/i,
+            /built[-\s]?in\s+battery/i,
+            /features\s+of\s+the\s+s2\s+plus|premier\s+rechargeable\s+double\s+electric\s+breast\s+pump/i,
+          ];
+          rec.features_raw.forEach((feat) => {
+            const line = String(feat).trim();
+            if (!line || line.split(/\s+/).length < 4) return;
+            for (const pat of patterns) {
+              if (pat.test(line)) {
+                const lowerLine = line.toLowerCase();
+                if (!descLower.includes(lowerLine) && !extras.some((e) => e.toLowerCase() === lowerLine)) {
+                  extras.push(line);
+                }
+                break;
+              }
+            }
+          });
+        }
+        if (extras.length) {
+          // Join supplementary lines with spaces to avoid overly long blocks; deduplicate keywords
+          desc += '\n\n' + extras.join(' ');
+        }
+        return desc;
+      }
+      return '';
+    }
+
+    // Compile specifications: return a shallow copy of the specs object to avoid mutations.
+    function compileSpecifications(rec) {
+      const specs = rec.specs && typeof rec.specs === 'object' ? rec.specs : {};
+      return { ...specs };
+    }
+
+    // Compile features: use the filtered features_raw array; trim each entry.
+    function compileFeatures(rec) {
+      if (Array.isArray(rec.features_raw)) {
+        // Normalize lines: trim and drop empties
+        const rawLines = rec.features_raw
+          .map((v) => String(v || '').trim())
+          .filter((v) => v);
+        const merged = [];
+        let buffer = '';
+        const finalize = () => {
+          if (buffer) {
+            merged.push(buffer.trim());
+            buffer = '';
+          }
+        };
+        for (let i = 0; i < rawLines.length; i++) {
+          const line = rawLines[i];
+          // Remove leading bullets or dashes when considering continuation
+          const trimmed = line.replace(/^[-–—]+\s*/, '').trim();
+          if (!buffer) {
+            buffer = trimmed;
+            continue;
+          }
+          // If the current line begins with a dash (bullet), append to current feature
+          if (/^[-–—]/.test(line.trim())) {
+            buffer += ' ' + trimmed;
+            continue;
+          }
+          // If the buffer ends with a comma, semicolon, colon or ends with 'and' or 'or', join lines
+          const bufTrim = buffer.trim();
+          const lastChar = bufTrim.slice(-1);
+          const lastWord = bufTrim.split(/\s+/).pop().toLowerCase();
+          if ([',', ';', ':'].includes(lastChar) || lastWord === 'and' || lastWord === 'or') {
+            buffer += ' ' + trimmed;
+          } else {
+            finalize();
+            buffer = trimmed;
+          }
+        }
+        finalize();
+        return merged;
+      }
+      return [];
+    }
+
+    // Guess included items: parse visible text or features for "Includes", "Comes with", etc.
+    function guessIncluded(rec) {
+      const included = [];
+      // 1) Look inside _browse.visible_text for lines after a cue phrase indicating contents
+      try {
+        const vis = rec._browse && rec._browse.visible_text ? String(rec._browse.visible_text) : '';
+        const lines = vis.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+        let capture = false;
+        for (const line of lines) {
+          const lower = line.toLowerCase();
+          // Trigger capturing after a cue phrase about included items
+          if (/includes everything|includes.*needed/.test(lower)) {
+            capture = true;
+            continue;
+          }
+          if (capture) {
+            // Stop capturing when we encounter unrelated sections, testimonials, headings, or pricing
+            if (!line || /recommended|review|reviews|customer|based on|write a review|\bi am\b|\bgynecologic\b|\bgynecologist\b|\boncologist\b|\bsurgeon\b|hospital|parts & accessories|use & operation|assembling|sanitizing|how to use|stand|case|kit|sold out|add to cart|\$|switch|trolley|power supply|hard case|cable|set/.test(lower)) {
+              break;
+            }
+            // Only include lines that look like actual items (contain item keywords or numbers)
+            if (/\b(breast|shield|bottle|tube|adapter|manual|pump|diaphragm|cap|diaphragms|flange|flanges|air tube|stand|case|kit|tubing|body|bodies|bottles|cable|cables)\b/i.test(lower) || /\d/.test(lower)) {
+              // Remove leading hyphens, bullets and whitespace but preserve quantity numbers.  Previously the regex
+              // removed any leading digits as well, which stripped quantity like "2 diaphragms".  Now only hyphens,
+              // bullet characters and whitespace are removed.
+              const cleaned = line.replace(/^[-•\s]+/, '').trim();
+              if (cleaned) included.push(cleaned);
+            }
+            // If the line does not match item keywords or numbers, skip it but continue capturing
+          }
+        }
+
+        // Capture commode parts items from parts list in visible_text.  Some commode products list
+        // replacement parts rather than contents.  Add these to the included array if they are
+        // present in the visible text.
+        for (const line of lines) {
+          const lower = line.toLowerCase();
+          if (/commode bucket/.test(lower) && !included.some((v) => /bucket/i.test(v))) {
+            included.push(line.trim());
+          }
+          if (/commode seat/.test(lower) && !included.some((v) => /seat/i.test(v))) {
+            included.push(line.trim());
+          }
+          if (/replacement\s*leg\s*set|replacement-leg-set/.test(lower) && !included.some((v) => /leg set/i.test(v))) {
+            included.push(line.trim());
+          }
+          if (/leg tip/.test(lower) && !included.some((v) => /leg tip/i.test(v))) {
+            included.push(line.trim());
+          }
+          // Capture AC power adapters or chargers from visible text for pumps (e.g. Spectra, Unimom)
+          if (/\b(ac\s*power\s*adapter|power\s*adapter|adapter\/charger|charger)\b/.test(lower) && !included.some((v) => /adapter|charger/i.test(v))) {
+            included.push(line.trim());
+          }
+        }
+      } catch {}
+      // 2) Look in features_raw for lines starting with includes/comes with
+      if (Array.isArray(rec.features_raw)) {
+        for (const raw of rec.features_raw) {
+          const line = String(raw || '').trim();
+          if (/^(includes|comes with|comes complete)/i.test(line)) {
+            let items = line.replace(/^(includes|comes with|comes complete)/i, '').trim();
+            items = items.replace(/\band\b/gi, ',');
+            for (const item of items.split(/,|;/)) {
+              const cleaned = item.replace(/^[\s:\-]+/, '').trim();
+              if (cleaned) included.push(cleaned);
+            }
+          }
+        }
+      }
+      // 3) Look in features_raw for enumerated items (e.g., "Two (2) 24mm ...") and treat them as included.
+      // Only treat a line as an included item if it looks like a quantity of a physical component (not a specification
+      // such as pressure in mmHg or a description like "4 Operating Modes").  We require the line to start with a
+      // spelled‑out number or a numeric quantity and to contain an item keyword (breast, shield, bottle, tube, valve, etc.),
+      // and we skip lines that contain measurement units such as mmHg, lb, oz, ml, cm, mm or hours.
+      if (Array.isArray(rec.features_raw)) {
+        for (const raw of rec.features_raw) {
+          const line = String(raw || '').trim();
+          const isQuantityLine = /^((?:one|two|three|four|five|six|seven|eight|nine|ten)\b|\(?\d+\)?\s+)/i.test(line);
+          const hasItemKeyword = /\b(breast|shield|bottle|tube|tubing|adapter|charger|power|manual|pump|diaphragm|valve|flange|backflow|protector|bag|connector|body|bodies|duckbill|kit|flanges|caps|membrane)\b/i.test(line);
+          // Only treat true measurement units as a reason to skip (mmHg, kg, g, lb, oz, mL) but allow size descriptors like "24mm" in item names
+          const hasMeasurementUnit = /\b(mmhg|kg|g|lb|lbs|oz|ml)\b/i.test(line);
+          if (isQuantityLine && hasItemKeyword && !hasMeasurementUnit) {
+            included.push(line);
+          }
+        }
+      }
+
+      // Filter out any residual noise, such as testimonials, reviews, contact info, pricing, or accessory kits/stands/cases
+      return included.filter((item) => {
+        const lower = String(item).toLowerCase().trim();
+        // Remove testimonials, reviews, contact info, pricing, or accessory references
+        if (/(recommended|review|reviews|customer|based on|gynecologic|gynecologist|oncologist|surgeon|hospital|kit|stand|case|trolley|switch|power supply|hard case|cable|set|price|\$|add to cart|sold out|parts & accessories)/.test(lower)) return false;
+        // Remove lines that start with 'with' or 'and' and are very short (likely incomplete) unless they contain a quantity
+        if (/^(with|and)\b/.test(lower) && lower.split(/\s+/).length <= 4 && !/\d/.test(lower)) return false;
+        return true;
+      });
+    }
+
+    // Attach structured sections to the normalized record
+    norm.sections = {
+      description: compileDescription(norm),
+      specifications: compileSpecifications(norm),
+      features: compileFeatures(norm),
+      included: guessIncluded(norm),
+    };
 
     const totalMs = now() - started;
     if (totalMs > MAX_TOTAL_TIMEOUT_MS){
@@ -861,7 +1318,16 @@ function extractNormalized(baseUrl, html, opts) {
   // ==== ADD: prune parts/accessories noise from specs (add-only) ====
   try { specs = prunePartsLikeSpecs(specs); } catch {}
 
-  let features = (mergedSD.features && mergedSD.features.length) ? mergedSD.features : extractFeaturesSmart($);
+  // Collect features both from structured data tabs and from paragraphs/lists to ensure
+  // bullet lists in Product Description or similar sections are captured.  Always combine
+  // features extracted from the page with any structured-data features, then deduplicate.
+  const featSmart = extractFeaturesSmart($);
+  const featPara  = deriveFeaturesFromParagraphs($);
+  // Limit the number of features to a higher count to avoid truncating bullet lists.
+  let features = dedupeList([...(featSmart || []), ...(featPara || [])]).slice();
+  if (mergedSD.features && mergedSD.features.length) {
+    features = dedupeList([...(mergedSD.features || []), ...features]).slice();
+  }
 
   const imgs = images.length ? images : fallbackImagesFromMain($, baseUrl, og, opts);
   const mans = manuals.length ? manuals : fallbackManualsFromPaths($, baseUrl, name, html);
@@ -932,6 +1398,32 @@ function extractJsonLd($){
     return [];
   })();
 
+  // Heuristic: filter structured-data images to avoid unrelated product pictures.
+  // Some pages embed multiple images in JSON-LD, including other products from the same brand.
+  // We assume the true product images share a common filename prefix (letters/digits) with
+  // the first image.  If more than 3 images are present, derive a prefix from the first
+  // filename and keep only those images whose basename starts with that prefix.  Finally
+  // limit to the first 3 images after filtering.
+  let filteredImages = images;
+  try {
+    if (images.length > 3) {
+      const firstName = String(images[0] || '').split('/').pop().split('?')[0] || '';
+      // Extract initial alphanumeric prefix (e.g., BSBCWB from BSBCWB_Prod2.jpg)
+      const prefixMatch = firstName.match(/^([A-Za-z0-9]+)/);
+      const prefix = prefixMatch ? prefixMatch[1] : firstName.split('_')[0];
+      if (prefix && prefix.length >= 3) {
+        filteredImages = images.filter(u => {
+          const fname = String(u || '').split('/').pop().split('?')[0] || '';
+          return fname.startsWith(prefix);
+        });
+      }
+      // In case the filter removes all images, fall back to original list
+      if (!filteredImages.length) filteredImages = images;
+      // Limit to the first 3 images to reduce noise
+      filteredImages = filteredImages.slice();
+    }
+  } catch {}
+
   const specs = schemaPropsToSpecs(
     p.additionalProperty || p.additionalProperties || (p.additionalType === "PropertyValue" ? [p] : [])
   );
@@ -942,20 +1434,20 @@ function extractJsonLd($){
   ["sku","mpn","gtin13","gtin14","gtin12","gtin8","productID","color","size","material","model","category"]
     .forEach(k => { if (p[k]) addKV[k] = String(p[k]); });
 
+  // Only include availability information from offers.  Prices and currencies are intentionally
+  // omitted since pricing information is not needed for product integration.
   const offer = Array.isArray(p.offers) ? p.offers[0] : (p.offers || {});
-  if (offer && (offer.price || offer.priceCurrency)) {
-    if (offer.priceCurrency) addKV["price_currency"] = String(offer.priceCurrency);
-    if (offer.price)         addKV["price"] = String(offer.price);
-    if (offer.availability)  addKV["availability"] = String(offer.availability).split('/').pop();
+  if (offer && offer.availability) {
+    addKV["availability"] = String(offer.availability).split('/').pop();
   }
 
-  return {
+    return {
     name: p.name || '',
     description: p.description || '',
     brand: (p.brand && (p.brand.name || p.brand)) || '',
     specs: { ...specs, ...addKV },
     features,
-    images
+    images: filteredImages
   };
 }
 
@@ -988,11 +1480,8 @@ function extractMicrodataProduct($){
 
   const offers = $prod.find('[itemprop="offers"]').first();
   if (offers.length){
-    const price = offers.find('[itemprop="price"]').attr("content") || offers.find('[itemprop="price"]').text();
-    const cur   = offers.find('[itemprop="priceCurrency"]').attr("content") || offers.find('[itemprop="priceCurrency"]').text();
-    if (price) out.specs["price"] = cleanup(price);
-    if (cur)   out.specs["price_currency"] = cleanup(cur);
-    const avail= offers.find('[itemprop="availability"]').attr("href") || offers.find('[itemprop="availability"]').text();
+    // Extract only availability; omit price and currency data for this integration
+    const avail = offers.find('[itemprop="availability"]').attr("href") || offers.find('[itemprop="availability"]').text();
     if (avail) out.specs["availability"] = cleanup(String(avail).split('/').pop());
   }
 
@@ -1027,10 +1516,11 @@ function extractRdfaProduct($){
     if (v) out.specs[k] = v;
   });
 
-  const price = getProp("price");
-  const cur   = getProp("priceCurrency");
-  if (price) out.specs["price"] = price;
-  if (cur)   out.specs["price_currency"] = cur;
+  // Omit price and currency properties for this integration
+  // const price = getProp("price");
+  // const cur   = getProp("priceCurrency");
+  // if (price) out.specs["price"] = price;
+  // if (cur)   out.specs["price_currency"] = cur;
 
   $prod.find('[property="image"]').each((_, el)=>{
     const $el = $(el);
@@ -1043,10 +1533,12 @@ function extractRdfaProduct($){
 
 function extractOgProductMeta($){
   const out = {};
-  $('meta[property^="product:"]').each((_, el)=>{
+  $('meta[property^="product:"]').each((_, el) => {
     const p = String($(el).attr("property") || "");
     const v = String($(el).attr("content")  || "");
     if (!p || !v) return;
+    // Skip price-related OpenGraph product fields (e.g., product:price:amount, product:price:currency)
+    if (/^product:price/i.test(p)) return;
     const key = p.replace(/^product:/,'').replace(/:/g,'_');
     out[key] = v;
   });
@@ -1059,6 +1551,27 @@ function mergeProductSD(a={}, b={}, c={}){
   const description = pick(a.description, pick(b.description, c.description));
   const brand       = pick(a.brand,       pick(b.brand,       c.brand));
   const images = [...new Set([...(a.images||[]), ...(b.images||[]), ...(c.images||[])])];
+  // Apply a prefix-based heuristic to filter out images belonging to other products.
+  // Many e-commerce sites include images of related or variant items in microdata/RDFa. We derive
+  // a prefix from the filename of the first image and retain only images that start with that
+  // prefix. If more than 3 images are present, limit the list to three. If filtering removes all
+  // images, fall back to the original list.
+  let filteredImages = images;
+  try {
+    if (images.length > 3) {
+      const firstName = String(images[0] || '').split('/').pop().split('?')[0] || '';
+      const prefixMatch = firstName.match(/^([A-Za-z0-9]+)/);
+      const prefix = prefixMatch ? prefixMatch[1] : firstName.split('_')[0];
+      if (prefix && prefix.length >= 3) {
+        filteredImages = images.filter(u => {
+          const fname = String(u || '').split('/').pop().split('?')[0] || '';
+          return fname.startsWith(prefix);
+        });
+      }
+      if (!filteredImages.length) filteredImages = images;
+      filteredImages = filteredImages.slice();
+    }
+  } catch {}
   const specs  = { ...(c.specs || {}), ...(b.specs || {}), ...(a.specs || {}) };
 
   const feats  = [];
@@ -1068,7 +1581,7 @@ function mergeProductSD(a={}, b={}, c={}){
     if (k && !seen.has(k)){ seen.add(k); feats.push(t); }
   });
 
-  return { name, description, brand, images, specs, features: feats };
+  return { name, description, brand, images: filteredImages, specs, features: feats };
 }
 
 /* === Images === */
@@ -1685,14 +2198,26 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   }
 
   // Score + dedupe by basename
-  const scored = Array.from(set).map(u => {
+  // Prioritize images that are within the main product scope and not part of recommendation blocks.
+  // Filter out any images that appear in recommendation/related sections.  If there are no such
+  // images, fall back to all candidates but still prefer inMain over others.
+  const allCandidates = Array.from(set);
+  const primary = allCandidates.filter(u => {
+    const ctx = imgContext.get(u) || {};
+    return ctx.inMain && !ctx.inReco;
+  });
+  const secondary = allCandidates.filter(u => {
+    const ctx = imgContext.get(u) || {};
+    return !primary.includes(u) && !ctx.inReco;
+  });
+  const candidates = primary.length ? primary : secondary.length ? secondary : allCandidates;
+  const scored = candidates.map(u => {
     let score = imgWeights.get(u) || 0;
     const ctx = imgContext.get(u) || {};
     if (ctx.inReco) score -= 5;
     if (ctx.inMain) score += 3;
     return { url: decodeHtml(u), score };
   }).sort((a,b) => b.score - a.score);
-
   const seen = new Set();
   const out  = [];
   for (const s of scored) {
@@ -1892,13 +2417,16 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
   const push = u => { if (u) set.add(abs(baseUrl, u)); };
 
   $('main, #main, .main, article, .product, .product-detail, .product-details').first().find('img').each((_, el)=>{
+    // Skip images that are within footer/nav or recommendation/upsell sections to reduce noise
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     push($(el).attr('src'));
     push($(el).attr('data-src'));
     push(pickLargestFromSrcset($(el).attr('srcset')));
   });
 
-  // noscript fallbacks in main area
+  // noscript fallbacks in main area. Skip noscript blocks in footer/nav or recommendation areas.
   $('main, #main, .main, article').first().find('noscript').each((_, n)=>{
+    if (isFooterOrNav($, n) || isRecoBlock($, n)) return;
     const inner = $(n).html() || "";
     const _$ = cheerio.load(inner);
     _$("img").each((__, el)=>{
@@ -2013,7 +2541,17 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     const L = u.toLowerCase();
     const ctx = scoreByContext($, node, { mainOnly });
     if (ctx <= -999) return;
-    if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) return;
+        // If the URL does not look like a PDF or a known proxy (document, view,
+        // download, asset, file) then skip it unless the baseScore is high.
+        // A high baseScore (>= 4) indicates the anchor text strongly suggested
+        // a manual (e.g. "User Manual"), so allow it through for further
+        // processing. This makes it possible to follow manual pages that
+        // ultimately link to PDFs, without polluting results with unrelated
+        // pages. Existing behaviour for direct PDF or known proxy URLs is
+        // preserved.
+        if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) {
+          if (baseScore < 4) return;
+        }
     if (blockRe.test(L)) return;
     const cur = urls.get(u) || 0;
     urls.set(u, Math.max(cur, baseScore + ctx));
@@ -2026,7 +2564,15 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     const $el = $(el);
     const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
     const t = ($el.text() || $el.attr('aria-label') || '').toLowerCase();
-    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) push(el, href, 4);
+    // If the anchor text strongly suggests a manual (matches allowRe), assign a higher
+    // base score (5) so that the link passes the subsequent filtering threshold even
+    // if the URL itself does not look like a PDF or known proxy. Otherwise use the
+    // default score of 4 for direct PDFs or known proxy URLs. This is additive and
+    // preserves existing behaviour for other links.
+    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) {
+      const base = allowRe.test(t) ? 5 : 4;
+      push(el, href, base);
+    }
   });
 
   // 2) onclick handlers that open PDFs
@@ -2241,13 +2787,50 @@ function extractFeaturesSmart($){
     '.frequently-bought','.frequently-bought-together','.also-viewed','.people-also-viewed','.recommendations','.product-recommendations'
   ].join(', ');
 
+  // A helper to decide if a candidate feature text should be kept.  We try to
+  // aggressively filter out marketing/UX boilerplate and unrelated navigation
+  // that commonly appears on ecommerce pages (e.g. site navigation, footer
+  // categories, service offerings, etc.).  See README for more details.
+  const BAD_FEATURE_KEYWORDS = [
+    'inventory management',
+    'vaccine management',
+    'biomedical equipment',
+    'instrument management services',
+    'technology consultants',
+    'medical waste management',
+    'patient home delivery',
+    'medical freight management',
+    'lab management',
+    'lab consulting',
+    'lab information systems',
+    'lab results',
+    'remote patient monitoring',
+    'revenue cycle management',
+    'invoice management',
+    'capital medical equipment',
+    'real estate solutions',
+    'analytics',
+    'ecommerce services',
+    'training and compliance',
+    'patient care and engagement',
+    'financial services'
+  ];
   const pushIfGood = (txt) => {
     const t = cleanup(txt);
     if (!t) return;
+    // Skip very short or very long fragments
     if (t.length < 7 || t.length > 220) return;
+    // Skip texts that appear to be breadcrumbs or navigational arrows
     if (/>|›|»/.test(t)) return;
+    // Skip generic footer/legal copy
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    // Skip anything containing a URL
     if (/(https?:\/\/|www\.)/i.test(t)) return;
+    // Skip marketing or site navigation categories (see BAD_FEATURE_KEYWORDS list)
+    const lower = t.toLowerCase();
+    for (const bad of BAD_FEATURE_KEYWORDS){
+      if (lower.includes(bad)) return;
+    }
     items.push(t);
   };
 
@@ -2258,12 +2841,44 @@ function extractFeaturesSmart($){
     $el.find('h3,h4,h5').each((__, h)=> pushIfGood($(h).text()));
   });
 
-  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights']);
+  // Also search for 'product description' or 'description' tabs, since some sites
+  // embed feature lists under those headings.  This helps capture bullet lists
+  // that live within the Product Description tab (e.g. Spectra S1+ page).
+  const featPane = resolveTabPane($, ['feature','features','features/benefits','benefits','key features','highlights','product description','description']);
   if (featPane){
     const $c = $(featPane);
     $c.find('li').each((_, li)=> pushIfGood($(li).text()));
     $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
   }
+
+  /*
+   * Some merchants hide their feature lists under a heading like
+   * “Features & Benefits” or “Features and Benefits” within the product
+   * description tab.  Those sections often contain a bullet list
+   * immediately following the heading.  To ensure those bullets are
+   * captured, we scan for elements whose text matches a regex and then
+   * grab the first following <ul> or <ol>.  The bullets are pushed
+   * through the same pushIfGood filter as other features.
+   */
+  try {
+    // Scan for headings or paragraphs that introduce a feature or included-items list.
+    // Two separate regexes: one for Features & Benefits, another for Products Include / What's in the Box.
+    const featureLabelRe = /\bfeatures\s*(?:&|and|\/|\+)?\s*benefits\b/i;
+    const includesLabelRe = /\b(products?\s*include|product\s*includes|what'?s\s+in\s+the\s+box|inclusions?|package\s+contents?)\b/i;
+    $('p, h2, h3, h4, h5, strong, span, div').each((_, el) => {
+      const txt = cleanup($(el).text());
+      if (!txt) return;
+      let labelType = null;
+      if (featureLabelRe.test(txt)) labelType = 'feature';
+      else if (includesLabelRe.test(txt)) labelType = 'include';
+      if (!labelType) return;
+      // Find the first <ul> or <ol> after the label or within its parent.
+      let list = $(el).nextAll('ul,ol').first();
+      if (!list.length) list = $(el).parent().find('ul,ol').first();
+      if (!list.length) return;
+      list.find('li').each((__, li) => pushIfGood($(li).text()));
+    });
+  } catch (err) { /* ignore errors */ }
 
   const seen = new Set();
   const out=[];
@@ -2278,33 +2893,60 @@ function extractFeaturesSmart($){
   return out;
 }
 function deriveFeaturesFromParagraphs($){
+  /**
+   * Collect a set of candidate feature strings from both paragraphs and list items in the main
+   * content area.  We intentionally include paragraphs here because some merchants embed
+   * feature‑like statements in prose rather than in an explicit list.  To avoid overwhelming the
+   * feature list with every sentence from the description, we break paragraphs into sentences
+   * with the `splitIntoSentences` helper and then filter them via `pushIfGood`.  Bullet items are
+   * collected whole.  Results are deduplicated case‑insensitively and truncated to a reasonable
+   * count.  Longer lines (up to 400 characters) are allowed because certain features may be
+   * verbose.
+   */
   const out = [];
   const pushIfGood = (txt) => {
     const t = cleanup(txt);
     if (!t) return;
-    if (t.length < 7 || t.length > 220) return;
+    // allow longer feature lines up to 400 characters (was 220)
+    if (t.length < 7 || t.length > 400) return;
+    // skip arrows and navigation markers
     if (/>|›|»/.test(t)) return;
+    // skip common non-feature words
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
+    // skip lines containing URLs
     if (/(https?:\/\/|www\.)/i.test(t)) return;
     out.push(t);
   };
-
-  $('main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content')
-    .find('p').each((_, p)=>{
-      if (isFooterOrNav($, p) || isRecoBlock($, p)) return; // ADD reco guard
-      const raw = cleanup($(p).text());
-      if (!raw) return;
-      splitIntoSentences(raw).forEach(pushIfGood);
-    });
-
-  const seen=new Set();
-  const uniq=[];
-  for (const t of out){
-    const k=t.toLowerCase();
-    if (!seen.has(k)){
+  // Define a selector for the main content area where we search for paragraphs and list items.
+  const contentSelector = 'main, #main, .main, .product, .product-detail, .product-details, .product__info, .content, #content, .tab_inner_content, .tab_content';
+  // First collect candidate sentences from paragraphs.  Splitting paragraphs into sentences
+  // means each sentence is treated as a potential feature.  This provides a fallback when no
+  // bullet list is available.  We still limit the total number of features later.
+  $(contentSelector).find('p').each((_, p) => {
+    if (isFooterOrNav($, p) || isRecoBlock($, p)) return;
+    const raw = cleanup($(p).text());
+    if (!raw) return;
+    const sentences = splitIntoSentences(raw);
+    sentences.forEach((s) => pushIfGood(s));
+  });
+  // Collect bullet list items in the same content area.  These are often true features and
+  // should be kept whole.  They typically override any prose-derived sentences.
+  $(contentSelector).find('li').each((_, li) => {
+    if (isFooterOrNav($, li) || isRecoBlock($, li)) return;
+    const raw = cleanup($(li).text());
+    if (!raw) return;
+    pushIfGood(raw);
+  });
+  // Deduplicate case-insensitively and limit to 30 entries.  Longer lists are unlikely to be
+  // useful and may overwhelm downstream consumers.
+  const seen = new Set();
+  const uniq = [];
+  for (const t of out) {
+    const k = t.toLowerCase();
+    if (!seen.has(k)) {
       seen.add(k);
       uniq.push(t);
-      if (uniq.length>=12) break;
+      if (uniq.length >= 30) break;
     }
   }
   return uniq;
@@ -2416,7 +3058,7 @@ async function hydrateLazyTabs(tabs, renderApiUrl, headers = {}) {
     const tt = { ...t };
     if (!tt.html && tt.href) {
       try {
-        const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=fast`;
+        const url = `${base}/render?url=${encodeURIComponent(tt.href)}&mode=full`;
         const { html } = await fetchWithRetry(url, { headers });
         const $p = cheerio.load(html);
         tt.html = $p.root().html() || '';
@@ -2604,20 +3246,20 @@ function collectTabCandidates($, baseUrl){
 }
 
 /* ================== ADD-ONLY: Hydrate generic remote panes ================== */
-async function hydrateRemotePanes(cands, renderApiUrl, headers = {}){
+async function hydrateRemotePanes(cands, renderApiUrl, headers = {}) {
   if (!cands || !cands.length) return cands;
-  const base = (renderApiUrl || '').replace(/\/+$/,'');
+  const base = (renderApiUrl || '').replace(/\/+$/, '');
   const out = [];
-  for (const c of cands){
+  for (const c of cands) {
     const copy = { ...c };
-    if ((!copy.html || copy.html.length < 40) && copy.href){
-      try{
-        const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=fast`;
+    if ((!copy.html || copy.html.length < 40) && copy.href) {
+      try {
+        const url = `${base}/render?url=${encodeURIComponent(copy.href)}&mode=full`;
         const { html } = await fetchWithRetry(url, { headers });
         copy.html = html || '';
         copy.text = cleanup(cheerio.load(html).root().text() || '');
-      }catch{}
-    }
+      } catch {}
+    } 
     out.push(copy);
   }
   return out;
@@ -2713,7 +3355,7 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
   return {
     desc: add.desc,
     specs: prunePartsLikeSpecs(add.specs || {}),
-    features: dedupeList(add.features || []).slice(0, 20),
+    features: dedupeList(add.features || []).slice(),
     manuals: dedupeManualUrls(Array.from(add.manuals || [])),
     images
   };
@@ -2762,8 +3404,25 @@ function extractSpecsFromContainer($, container){
 
   $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
     const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
-    const b = cleanup($(r).find('.value, .val, .data, td, span, p').last().text());
+    const b = cleanup($(r).find('.value, .val, .data, .detail, td, span, p').last().text());
     if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
+  });
+
+  // As a last resort, parse any remaining div/span/p elements within the container for
+  // colon- or hyphen-separated key/value pairs.  Some websites place technical
+  // specifications in freeform grids or styled rows without using <table>, <dl> or <li>.
+  // This aggressive pass helps capture those by splitting on ':' or '-' when present.
+  $c.find('div, span, p').each((_, el) => {
+    const t = cleanup($(el).text());
+    if (!t || t.length < 3 || t.length > 250) return;
+    // Skip if this element is already inside a table row, dl or li that we've processed
+    if ($(el).closest('table,tr,dl,li').length) return;
+    const m = t.split(/[:\-–]\s+/);
+    if (m.length >= 2) {
+      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const v = m.slice(1).join(': ').trim();
+      if (k && v && !out[k]) out[k] = v;
+    }
   });
 
   return out;
@@ -2798,6 +3457,30 @@ function extractFeaturesFromContainer($, container){
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
+  // Capture bold headings within paragraphs as potential features.
+  // Some pages (e.g. Unimom) structure their “What’s in the Box” or
+  // feature lists as alternating <p><b>Feature</b></p> and <p>– description</p>.
+  // Extract the bold text as a feature name.
+  $c.find('p').each((_, el) => {
+    const $p = $(el);
+    const btxt = cleanup($p.find('b,strong').first().text());
+    if (btxt) pushIfGood(btxt);
+  });
+
+  // Capture simple div-based lists used by some Shopify/GemPages sites.  When
+  // a panel contains a .text-edit element with multiple <div> children, each
+  // child div often represents a single item (e.g. “1 Minuet breast pump”).
+  $c.find('.text-edit').each((_, el) => {
+    const $parent = $(el);
+    const divs = $parent.children('div');
+    if (divs.length > 1) {
+      divs.each((__, d) => {
+        const txt = cleanup($(d).text());
+        if (txt) pushIfGood(txt);
+      });
+    }
+  });
+
   const seen = new Set();
   const out = [];
   for (const t of items){
@@ -2806,7 +3489,8 @@ function extractFeaturesFromContainer($, container){
       seen.add(k);
       out.push(t);
     }
-    if (out.length >= 20) break;
+        // allow up to 50 features to avoid truncating long bullet lists
+        if (out.length >= 50) break;
   }
   return out;
 }
@@ -2818,12 +3502,45 @@ function extractDescriptionFromContainer($, container){
   const push = (t) => {
     t = cleanup(t);
     if (!t) return;
+    // Skip common non‑informational labels (legal, share, etc.)
     if (/^\s*(share|subscribe|privacy|terms|trademark|copyright)\b/i.test(t)) return;
+    // Skip lines that include CSS or style code.  CSS often contains braces or semicolons
+    // (e.g. ".urgent-banner { ... }"), @media rules, keyframes, data‑attributes or escaped
+    // unicode sequences (e.g. "\u003C") which are not relevant to product descriptions.
+    if (/[{};@]/.test(t) || /@keyframes|@media|data-sub-layout|\u003C/i.test(t)) return;
+    // Skip lines that contain price or cart/sharing information.  We only want product
+    // descriptions and specifications, not pricing, quantity, review prompts, or
+    // social/share actions.
+    if (/\$\d/.test(t) || /\b(MSRP|Now:|Was:|Add to Cart|Add to Wish|Quantity|Rating Required|Write a Review|Facebook|Linkedin|Pinterest|Twitter|X|Select Rating)\b/i.test(t)) return;
+    // Skip PayPal/CSS message content and quantity controls (#zoid-paypal, increase/decrease qty)
+    if (/^#/.test(t) || /zoid-paypal|increase\s+quantity|decrease\s+quantity/i.test(t)) return;
+    // Skip shipping, returns, reviews, or section headings not related to product details
+    if (/^\s*(shipping|returns|0\s*reviews?|review|reviews)\b/i.test(t)) return;
+    // Skip site-wide taglines or slogans unrelated to a specific product
+    if (/MedicalEx is an online store/i.test(t)) return;
+    // Skip cookie banners or privacy consent text and other non-product notices
+    if (/cookie(s)? policy|this website uses cookies|we use cookies|accept all cookies|cookie settings|cookie notice|analytics cookies|performance cookies|advertising cookies/i.test(t)) return;
+    if (/newsletter|subscribe|sitemap|contact us|terms of use|privacy policy|\ball rights reserved\b/i.test(t)) return;
     parts.push(t);
   };
 
-  $c.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').each((_, n)=> push($(n).text()));
-  $c.find('p, .copy, .text, .rte, .wysiwyg, .content-block').each((_, p)=> push($(p).text()));
+  // Traverse elements in DOM order and collect text from meaningful tags.  This preserves
+  // the logical flow of titles and their associated content.  Capture headings, bold
+  // labels, paragraphs, list items, and generic spans/divs.  Skip scripts/styles.
+  $c.find('*').each((_, el) => {
+    const $el = $(el);
+    if ($el.is('script,style')) return;
+    // Determine if this element is one we want to capture
+    if ($el.is('li')) {
+      const txt = $el.text();
+      if (!txt) return;
+      push(`• ${txt}`);
+    } else if ($el.is('h1,h2,h3,h4,h5,strong,b,.lead,.intro,p,.copy,.text,.rte,.wysiwyg,.content-block,div,span')) {
+      const txt = $el.text();
+      if (!txt) return;
+      push(txt);
+    }
+  });
 
   const lines = parts
     .map(s => s.replace(/\s*\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
@@ -2843,8 +3560,13 @@ function extractDescriptionFromContainer($, container){
 /* ====== Markdown builders ====== */
 function extractDescriptionMarkdown($){
   const candidates = [
+    // Standard semantic description attribute
     '[itemprop="description"]',
+    // Common classes used for product descriptions in various themes
     '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
+    // BigCommerce/Stencil product view containers often host the hook and bullets
+    '.productView, .productView-info, .productView-description, .productView-details, .product-view, .product-view-info, .product-view-description',
+    // Tab content containers
     '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs'
   ].join(', ');
 
@@ -2859,9 +3581,147 @@ function extractDescriptionMarkdown($){
     if (text && text.length > bestLen) { bestLen = text.length; bestEl = el; }
   });
   if (!bestEl) return "";
+  // Optional fallback: scan larger main/product containers if the initial candidate is too short or
+  // misses key introductory paragraphs.  This helps capture descriptive hooks that sit
+  // outside of the usual .product-description/.tab-content sections.
+  {
+    const otherCandidates = [
+      'main', '#main', '.main', '.product', '.product-detail', '.product-details',
+      '.product__info', '.product__info-wrapper', '.productView', '.productView-info', '.productView-description', '.productView-details',
+      '.product-view', '.product-view-info', '.product-view-description', '.content', '#content'
+    ].join(', ');
+    let backupEl = null, backupLen = 0;
+    $(otherCandidates).each((_, el) => {
+      if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+      const textCheck = cleanup($(el).text());
+      // Skip obviously irrelevant containers (shipping/returns etc.)
+      if (/^\s*(shipping|returns|review|0\s*reviews?)\b/i.test(textCheck)) return;
+      if (textCheck && textCheck.length > backupLen) {
+        backupLen = textCheck.length;
+        backupEl = el;
+      }
+    });
+    if (backupEl && backupLen > bestLen) {
+      bestEl = backupEl;
+      bestLen = backupLen;
+    }
+  }
 
-  const raw = extractDescriptionFromContainer($, bestEl);
-  return containerTextToMarkdown(raw);
+  // Always extract the markdown from the best container.  Additionally, attempt
+  // to capture any introductory copy that may live outside of the usual
+  // description/tab containers.  In BigCommerce themes, the product "hook"
+  // often sits above the tabs (e.g. in a .productView-info or summary
+  // container).  To ensure we don’t miss it, also extract from the
+  // fallback container when it differs from bestEl and merge the results.
+  const rawBest = extractDescriptionFromContainer($, bestEl);
+  let rawExtra = "";
+  if (backupEl && backupEl !== bestEl) {
+    rawExtra = extractDescriptionFromContainer($, backupEl);
+  }
+  // Additionally, attempt to capture the first descriptive paragraph(s) that follow the
+  // product name heading.  On many product pages, a hook paragraph lives
+  // immediately after the <h1> title and before any bullet lists or tabs.
+  function extractHookParagraphs() {
+    const out = [];
+    const firstNameEl = $('h1,h2').first();
+    if (!firstNameEl.length) return '';
+    let el = firstNameEl.next();
+    const stopSelector = 'ul,ol,table,dl,script,style,[role="tablist"],h1,h2,h3,h4,h5';
+    while (el && el.length) {
+      if (el.is(stopSelector)) break;
+      const txt = cleanup(el.text());
+      if (txt && !/\$\d|Add to Cart|Quantity|Write a Review|rating required|shipping|returns|review|cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(txt)) {
+        out.push(txt);
+      }
+      el = el.next();
+    }
+    return out.join('\n');
+  }
+  const hookRaw = extractHookParagraphs();
+
+  // Attempt to find a hook by scanning the entire body for a sentence that
+  // contains the product name and is reasonably long.  This serves as a
+  // last‑resort fallback when the hook paragraphs above fail.  We look for
+  // the first element whose text includes the product name (before any dash
+  // separator) and has at least 10 words.  Only consider visible elements
+  // like p/span/div.
+  function findHookByProductName() {
+    // Determine the product name from the page.  Prefer the og:title meta
+    // content, otherwise fall back to the first <h1> text.
+    const metaTitle = $('meta[property="og:title"]').attr('content') || '';
+    const h1Title = $('h1').first().text() || '';
+    const title = metaTitle || h1Title;
+    if (!title) return '';
+    // Use the portion before an em dash or hyphen as the base name to match.
+    const base = title.split(/[–-]/)[0].trim();
+    if (!base) return '';
+    let found = '';
+    $('p,span,div').each((_, el) => {
+      if (found) return;
+      const txt = cleanup($(el).text());
+      if (!txt) return;
+      if (txt.includes(base)) {
+        // Avoid capturing meta or tagline texts about the store itself
+        if (/MedicalEx is an online store/i.test(txt)) return;
+        // Capture the closest container's full text to get a complete paragraph
+        const full = cleanup($(el).closest('p,div,span').text());
+        const cand = full || txt;
+        // Skip if candidate contains cookie/privacy/newsletter/unrelated text
+        if (/cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(cand)) return;
+        found = cand;
+      }
+    });
+    if (found) return found;
+    // Fallback: scan the whole body text for the base name and extract the sentence it appears in.
+    const bodyTxt = cleanup($('body').text());
+    const idx = bodyTxt.indexOf(base);
+    if (idx !== -1) {
+      const prev = bodyTxt.lastIndexOf('.', idx);
+      const next = bodyTxt.indexOf('.', idx + base.length);
+      let start = prev === -1 ? 0 : prev + 1;
+      let end = next === -1 ? Math.min(bodyTxt.length, idx + base.length + 250) : next + 1;
+      const candidate = cleanup(bodyTxt.slice(start, end));
+      if (candidate && !/MedicalEx is an online store/i.test(candidate) && !/cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(candidate)) {
+        return candidate;
+      }
+    }
+    return '';
+  }
+  const hookByName = findHookByProductName();
+  // Merge the two extractions while preserving order and removing
+  // duplicates.  The fallback text (rawExtra) comes first so the hook
+  // appears before the tab description.  We split on newlines to
+  // deduplicate line by line.
+  const mergeAndDedup = (a, b) => {
+    const outLines = [];
+    const seen = new Set();
+    for (const line of [...String(a||"").split(/\n+/), ...String(b||"").split(/\n+/)]) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        outLines.push(trimmed);
+      }
+    }
+    return outLines.join('\n');
+  };
+  let combinedRaw = mergeAndDedup(hookRaw, mergeAndDedup(rawExtra, rawBest));
+  // If we found a hook by product name that isn't already included, prepend it.
+  if (hookByName) {
+    const lowerCombined = combinedRaw.toLowerCase();
+    if (!lowerCombined.includes(hookByName.toLowerCase())) {
+      combinedRaw = `${hookByName}\n${combinedRaw}`;
+    }
+  }
+  // Remove any site-wide taglines that may have slipped through the earlier filters
+  combinedRaw = combinedRaw
+    .split('\n')
+    .filter(l => !/MedicalEx is an online store/i.test(l))
+    // Remove any remaining cookie/privacy/newsletter lines
+    .filter(l => !/cookie(s)?|cookies|newsletter|subscribe|privacy policy|terms of use|analytics|performance|advertising/i.test(l))
+    .join('\n');
+  return containerTextToMarkdown(combinedRaw);
 }
 
 function containerTextToMarkdown(s){
@@ -3008,6 +3868,13 @@ function isRecoBlock($, el){
     '.similar-products, .more-like-this, [data-related-products], [data-upsell]'
   ).length > 0) return true;
 
+  // Additional recommendation/related section identifiers
+  if ($(el).closest(
+    '.recommended-for-you, .recommendation, .recommended-items, .recommended-products, .related-items, .related-content, ' +
+    '.you-may-also-be-interested, .you-may-be-interested, .customers-viewed, .customers-also-viewed, ' +
+    '.product-suggestions, .suggested-products'
+  ).length > 0) return true;
+
   // ADD: extra coverage for sites using singular `.recommendation`, "co-viewed", and explicit data flags
   if ($(el).closest('.recommendation, .co-viewed, [data-br-request-type="recommendation"]').length > 0) return true;
 
@@ -3042,7 +3909,9 @@ function isPartsOrAccessoryTable($, tbl){
 
 function prunePartsLikeSpecs(specs = {}){
   const out = {};
-  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?)$/i;
+  // Keys that clearly refer to parts lists, pricing, shipping or quantity controls rather than
+  // product specifications.  These are removed from the specs object during pruning.
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?|shipping|msrp|now|increase_quantity.*|decrease_quantity.*|zoid.*|returns|review|reviews)$/i;
 
   for (const [k, v] of Object.entries(specs || {})) {
     const key = String(k || "").trim();
@@ -3052,7 +3921,8 @@ function prunePartsLikeSpecs(specs = {}){
     // drop numeric index keys (1, 2, 3…)
     if (/^\d+$/.test(key)) continue;
     // drop classic parts table headers masquerading as specs
-    if (BAD_KEYS.test(key)) continue;
+    // drop banned keys and any keys starting with a hash (CSS selectors, PayPal iframe IDs, etc.)
+    if (BAD_KEYS.test(key) || key.startsWith('#')) continue;
     out[key] = val;
   }
   return out;
@@ -3061,6 +3931,178 @@ function prunePartsLikeSpecs(specs = {}){
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
+
+  // === START: static tab harvest via tabHarvester.js ===
+  try {
+    const { tabs, includedItems, productsInclude } = await harvestTabsFromHtml(html, baseUrl);
+    if (tabs && tabs.length) {
+      norm.tabs = tabs;
+    }
+    if (includedItems && includedItems.length) {
+      norm.includedItems = includedItems;
+      // also output structured version
+      norm["Included Items JSON"] = includedItems.map(item => ({ item }));
+      // Promote included items into features_raw if not already present.  These
+      // often describe what comes in the box and can be valuable features.
+      const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+      for (const itm of includedItems) {
+        const k = String(itm).toLowerCase();
+        if (!seen.has(k)) {
+          (norm.features_raw ||= []).push(itm);
+          seen.add(k);
+        }
+        if ((norm.features_raw || []).length >= 40) break;
+      }
+    }
+    if (productsInclude && productsInclude.length) {
+      norm.productsInclude = productsInclude;
+      norm["Key Features JSON"] = (norm["Key Features JSON"] || []).concat(
+        productsInclude.map(feature => ({ feature }))
+      );
+      // Promote productsInclude list into features_raw as well.  These are
+      // typically high‑value features and should be included.
+      const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+      for (const itm of productsInclude) {
+        const k = String(itm).toLowerCase();
+        if (!seen.has(k)) {
+          (norm.features_raw ||= []).push(itm);
+          seen.add(k);
+        }
+        if ((norm.features_raw || []).length >= 40) break;
+      }
+    }
+
+    // Harvest all tab content regardless of title.  For each tab, parse features,
+    // specs, descriptions, and manuals.  This ensures that even tabs with
+    // unfamiliar titles contribute data.  We process after promoting
+    // included/product include items so that features from those lists are
+    // already deduplicated.
+    if (tabs && tabs.length) {
+      for (const tab of tabs) {
+        if (!tab || !(tab.html || tab.text)) continue;
+        try {
+          const $p = cheerio.load(tab.html || '');
+          // Extract specs from this tab and merge
+          const extraSpecs = extractSpecsFromContainer($p, $p.root());
+          if (extraSpecs && Object.keys(extraSpecs).length) {
+            norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(extraSpecs) };
+          }
+          // Extract features from this tab and merge
+          const tabFeatures = extractFeaturesFromContainer($p, $p.root());
+          if (tabFeatures && tabFeatures.length) {
+            const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+            for (const f of tabFeatures) {
+              const k = String(f).toLowerCase();
+              if (!seen.has(k)) {
+                (norm.features_raw ||= []).push(f);
+                seen.add(k);
+              }
+              if ((norm.features_raw || []).length >= 40) break;
+            }
+          }
+          // Extract description paragraphs from this tab (longest)
+          const descCandidate = extractDescriptionFromContainer($p, $p.root());
+          if (descCandidate && descCandidate.length) {
+            // Only merge if it adds more unique content
+            norm.description_raw = mergeDescriptions(norm.description_raw || '', descCandidate);
+          }
+          // Extract manuals from this tab
+          const manualSet = new Set();
+          collectManualsFromContainer($p, $p.root(), baseUrl, manualSet);
+          if (manualSet.size) {
+            const have = new Set(norm.manuals || []);
+            for (const u of manualSet) {
+              if (!have.has(u)) {
+                (norm.manuals ||= []).push(u);
+                have.add(u);
+              }
+            }
+          }
+        } catch (err) {
+          // ignore parse errors for individual tab
+        }
+      }
+    }
+
+    // === Custom tab detection for GemPages/GoodFoundation (gf_tabs/gf_tab-panel) ===
+    try {
+      const $$ = cheerio.load(html);
+      $$('.gf_tabs').each((_, ul) => {
+        const titles = {};
+        // map tab index to title
+        $$(ul).find('.gf_tab').each((__, li) => {
+          const idx = String($$(li).attr('data-index') || '').trim();
+          const t = cleanup($$(li).text());
+          if (idx) titles[idx] = t;
+        });
+        // find panels associated with this tab list.  Panels may be siblings or elsewhere on the page.
+        // We'll scan the entire document for elements with the same data-index that are not the tab items.
+        Object.keys(titles).forEach(idx => {
+          const sel = `[data-index="${idx}"]`;
+          let panel = null;
+          $$(sel).each((i, el) => {
+            const $el = $$(el);
+            // skip tab list items
+            if ($el.is('.gf_tab') || $el.closest('.gf_tabs').length) return;
+            // choose the first candidate that looks like content: class item-content or not li
+            if (!$el.is('li') && !$el.find('.gf_tab').length) {
+              panel = $el;
+              return false; // break
+            }
+          });
+          if (!panel || !titles[idx]) return;
+          const title = titles[idx] || '';
+          const ph = norm(panel.html() || '');
+          const pt = norm(panel.text() || '');
+          if (!(ph || pt)) return;
+          try {
+            const $p = cheerio.load(ph || '');
+            // specs
+            const extraSpecs = extractSpecsFromContainer($p, $p.root());
+            if (extraSpecs && Object.keys(extraSpecs).length) {
+              norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(extraSpecs) };
+            }
+            // features
+            const tabFeatures = extractFeaturesFromContainer($p, $p.root());
+            if (tabFeatures && tabFeatures.length) {
+              const seen = new Set((norm.features_raw || []).map(v => String(v).toLowerCase()));
+              for (const f of tabFeatures) {
+                const k = String(f).toLowerCase();
+                if (!seen.has(k)) {
+                  (norm.features_raw ||= []).push(f);
+                  seen.add(k);
+                }
+                if ((norm.features_raw || []).length >= 40) break;
+              }
+            }
+            // description
+            const descCandidate = extractDescriptionFromContainer($p, $p.root());
+            if (descCandidate && descCandidate.length) {
+              norm.description_raw = mergeDescriptions(norm.description_raw || '', descCandidate);
+            }
+            // manuals
+            const manualSet = new Set();
+            collectManualsFromContainer($p, $p.root(), baseUrl, manualSet);
+            if (manualSet.size) {
+              const have = new Set(norm.manuals || []);
+              for (const u of manualSet) {
+                if (!have.has(u)) {
+                  (norm.manuals ||= []).push(u);
+                  have.add(u);
+                }
+              }
+            }
+          } catch {}
+        });
+      });
+    } catch (err) {
+      // ignore gf tab detection errors
+    }
+  } catch (e) {
+    // non-fatal; record error for debugging
+    norm.tabHarvestError = String(e && e.message ? e.message : e);
+  }
+  // === END: static tab harvest ===
 
   // === ADD-ONLY: Unified tab/accordion harvester (runs before Dojo pre-pass) ===
   try {
@@ -3079,7 +4121,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       for (const f of uni.features) {
         const k = String(f).toLowerCase();
         if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-        if (norm.features_raw.length >= 20) break;
+        if (norm.features_raw.length >= 40) break;
       }
     }
     if (uni.manuals && uni.manuals.length) {
@@ -3156,7 +4198,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
         for (const f of addFeatures) {
           const k = String(f).toLowerCase();
           if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-          if (norm.features_raw.length >= 20) break;
+          if (norm.features_raw.length >= 40) break;
         }
       }
 
@@ -3211,7 +4253,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     for (const f of addFeatures) {
       const k = String(f).toLowerCase();
       if (!seen.has(k)) { (norm.features_raw ||= []).push(f); seen.add(k); }
-      if (norm.features_raw.length >= 20) break;
+      if (norm.features_raw.length >= 40) break;
     }
   }
 
@@ -3255,10 +4297,10 @@ function sanitizeIngestPayload(p) {
     const specBullets = Object.entries(out.specs || {})
       .map(([k, v]) => `${toTitleCase(k.replace(/_/g, ' '))}: ${String(v).trim()}`)
       .filter((s) => s.length >= 7 && s.length <= 180)
-      .slice(0, 12);
-    features = dedupeList([...features, ...specBullets]).slice(0, 12);
+      .slice();
+    features = dedupeList([...features, ...specBullets]).slice();
   }
-  out.features_raw = features.slice(0, 20);
+  out.features_raw = features.slice();
 
   const allowManual = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|datasheet|spec(?:sheet)?|guide|brochure)/i;
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
@@ -3287,7 +4329,7 @@ function sanitizeIngestPayload(p) {
   ].join('|'), 'i');
   out.images = (out.images || [])
     .filter((o) => o && o.url && !badImg.test(o.url))
-    .slice(0, 12);
+    .slice();
 
   const badSpecKey = /\b(privacy|terms|copyright|©|™|®)\b/i;
   if (out.specs && typeof out.specs === 'object') {
@@ -3385,33 +4427,58 @@ function harvestCompassOverview($){
   return best;
 }
 
-function harvestCompassSpecs($){
+function harvestCompassSpecs($) {
+  // look for specs in various pane-like containers
   const panels = $('.tab-content, .tabs-content, [role="tabpanel"], .product-details, .product-detail, section');
   const out = {};
-  panels.each((_, panel)=>{
-    const $p = $(panel);
-    const heading = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
-    if (!/technical\s+specifications?/i.test(heading)) return;
 
-    $p.find('tr').each((__, tr)=>{
+  panels.each((_, panel) => {
+    const $p = $(panel);
+    const heading  = cleanup($p.find('h1,h2,h3,h4,h5').first().text());
+    // also inspect the label of the preceding tab/button
+    const tabLabel = cleanup($p.prev('a,button,[role="tab"]').first().text());
+    const combined = `${heading} ${tabLabel}`;
+
+    // only process panels that appear to contain technical specs
+    if (!/\b(technical\s+specifications?|tech\s*specs?|specifications?)\b/i.test(combined)) return;
+
+    // tables (<tr> rows with th/td)
+    $p.find('tr').each((__, tr) => {
       const cells = $(tr).find('th,td');
-      if (cells.length >= 2){
+      if (cells.length >= 2) {
         const k = cleanup($(cells[0]).text()).replace(/:$/, '');
         const v = cleanup($(cells[1]).text());
-        if (k && v) out[k.toLowerCase().replace(/\s+/g,'_')] ||= v;
+        if (k && v) {
+          const key = k.toLowerCase().replace(/\s+/g, '_');
+          if (!out[key]) out[key] = v;
+        }
       }
     });
 
-    $p.find('li').each((__, li)=>{
+    // definition lists (<dl><dt>Key<dd>Value)
+    $p.find('dl').each((__, dl) => {
+      const dts = $(dl).find('dt'), dds = $(dl).find('dd');
+      if (dts.length === dds.length && dts.length) {
+        for (let i = 0; i < dts.length; i++) {
+          const k = cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g, '_').replace(/:$/, '');
+          const v = cleanup($(dds[i]).text());
+          if (k && v && !out[k]) out[k] = v;
+        }
+      }
+    });
+
+    // colon-delimited list items (<li>Key: Value)
+    $p.find('li').each((__, li) => {
       const t = cleanup($(li).text());
       const m = /^([^:]{2,60}):\s*(.{2,300})$/.exec(t);
-      if (m){
-        const k = m[1].toLowerCase().replace(/\s+/g,'_');
-        const v = m[2];
-        if (k && v) out[k] ||= v;
+      if (m) {
+        const key = m[1].toLowerCase().replace(/\s+/g, '_');
+        const val = m[2];
+        if (key && val && !out[key]) out[key] = val;
       }
     });
   });
+
   return out;
 }
 
