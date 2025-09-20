@@ -738,6 +738,35 @@ export async function browseProduct(url, opts = {}) {
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
     await page.waitForLoadState('networkidle', { timeout: navigationTimeoutMs }).catch(() => {});
+    
+    // Scroll to hash fragment (e.g. #overview) if present
+    const parsedUrl = new URL(url);
+    if (parsedUrl.hash) {
+      try {
+        await page.evaluate((hash) => {
+          const el = document.querySelector(hash);
+          if (el) el.scrollIntoView({ behavior: 'smooth' });
+        }, parsedUrl.hash);
+        await page.waitForTimeout(1000);
+      } catch (e) {
+        console.warn('Hash scroll error:', e.message);
+      }
+    }
+    
+    // Click first tab/button if the page uses a tab UI (BD, Aspen, Salesforce)
+    const tabSelectors = ['[role="tab"]', '.tab-item', '.tabs button'];
+    for (const sel of tabSelectors) {
+      const tabs = await page.$$(sel);
+      if (tabs && tabs.length > 0) {
+        try {
+          await tabs[0].click();
+          await page.waitForTimeout(1500);
+          break;
+        } catch (err) {
+          console.warn('Tab click error:', err.message);
+        }
+      }
+    }
 
     await acceptCookiesIfPresent(page);
     await autoExpand(page);
