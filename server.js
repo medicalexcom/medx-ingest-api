@@ -106,35 +106,6 @@ function decodeHtml(s){
     : s;
 }
 
-/**
- * Attempt to parse JSON; if parsing fails (e.g. keys or values begin with '#'),
- * perform basic sanitization.  Keys starting with '#' will have the hash removed,
- * and bare values beginning with '#' will be quoted.  Returns the parsed object
- * on success, or null on failure.
- * @param {string} str
- * @returns {object|null}
- */
-function safeJsonParse(str) {
-  if (!str || typeof str !== "string") return null;
-  try {
-    return JSON.parse(str);
-  } catch {
-    let s = String(str);
-
-    // Sanitize keys that start with '#', e.g. {"#30-0002": ...} -> {"30-0002": ...}
-    s = s.replace(/"?#([^":]+)":/g, (_, key) => `"${key}":`);
-
-    // Quote bare hash-prefixed values, e.g. {"name": #1234} -> {"name": "1234"}
-    s = s.replace(/:\s*#([A-Za-z0-9_-]+)/g, ': "$1"');
-
-    try {
-      return JSON.parse(s);
-    } catch {
-      return null;
-    }
-  }
-}
-
 function isHttpUrl(u){
   try {
     const x = new URL(u);
@@ -1104,20 +1075,6 @@ app.get("/ingest", async (req, res) => {
     }
 
     if (debug) return res.json({ ...norm, _debug: { ...diag, fetched } });
-    // Validate that name_raw is present and not empty or just a '#'
-    if (!norm.name_raw ||
-        typeof norm.name_raw !== 'string' ||
-        norm.name_raw.trim() === '' ||
-        norm.name_raw.trim() === '#') {
-      return res.status(422).json({ error: 'Expected valid product name, found empty or hash fragment.' });
-    }
-    
-    // Validate that the payload isn’t empty
-    if (!norm || Object.keys(norm).length === 0) {
-      return res.status(422).json({ error: 'Missing Payload JSON or result extraction failed.' });
-    }
-    
-    // Now return the normalized result if checks pass
     return res.json(norm);
 
   } catch (e) {
@@ -1180,19 +1137,7 @@ function extractNormalized(baseUrl, html, opts) {
   };
 
   // ==== FIX: define name and brand before using them ====
-  let name = cleanup(mergedSD.name || og.title || $("h1").first().text());
-
-  // Fallback for missing or hash-only names
-  if (!name || name.trim() === '' || name.trim() === '#') {
-    try {
-      const parsedUrl = new URL(baseUrl);
-      const slug = parsedUrl.pathname.split('/').filter(Boolean).pop() || '';
-      if (slug) {
-        name = slug.replace(/[-_]/g, ' ').replace(/\.html?$/i, '').trim();
-      }
-    } catch { /* ignore */ }
-  }
-
+  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
   let brand = cleanup(mergedSD.brand || "");
   if (!brand && name) brand = inferBrandFromName(name);
   // =====================================================
@@ -1461,18 +1406,19 @@ function schemaPropsToSpecs(props){
 function extractJsonLd($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
-    const raw = $(el).contents().text();
-    if (!raw || !raw.trim()) return;
-    const parsed = safeJsonParse(raw.trim());
-    if (!parsed) return;
-    const arr = Array.isArray(parsed) ? parsed : [parsed];
-    arr.forEach(obj => {
-      if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) {
-        obj['@graph'].forEach(g => nodes.push(g));
-      } else {
-        nodes.push(obj);
-      }
-    });
+    try {
+      const raw = $(el).contents().text();
+      if (!raw || !raw.trim()) return;
+      const parsed = JSON.parse(raw.trim());
+      const arr = Array.isArray(parsed) ? parsed : [parsed];
+      arr.forEach(obj => {
+        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) {
+          obj['@graph'].forEach(g => nodes.push(g));
+        } else {
+          nodes.push(obj);
+        }
+      });
+    } catch {}
   });
 
   const prodCandidates = nodes.filter(n => {
@@ -1960,15 +1906,12 @@ function extractSpecsFromScripts($, container /* optional */) {
     }
   };
 
-    // 1) Strict JSON blobs
+  // 1) Strict JSON blobs
   scope.find('script[type="application/json"], script[type="application/ld+json"]').each((_, el) => {
     if (isRecoBlock($, el)) return;
     const raw = $(el).contents().text();
     if (!raw || !raw.trim()) return;
-    const parsed = safeJsonParse(raw.trim());
-    if (parsed) {
-      visit(parsed, "$");
-    }
+    try { visit(JSON.parse(raw.trim()), "$"); } catch {}
   });
 
   // 2) Looser JS blobs (window.__NEXT_DATA__, __NUXT__, BCData, etc.)
@@ -1977,13 +1920,10 @@ function extractSpecsFromScripts($, container /* optional */) {
     const txt = String($(el).contents().text() || "");
     if (!txt || txt.length < 40) return;
     if (!/\b(__NEXT_DATA__|__NUXT__|BCData|Shopify|spec|attribute|dimensions?)\b/i.test(txt)) return;
-  
+
     const blocks = pluckJsonObjectsFromJs(txt, 5);
     for (const block of blocks) {
-      const parsedBlock = safeJsonParse(block);
-      if (parsedBlock) {
-        visit(parsedBlock, "$");
-      }
+      try { visit(JSON.parse(block), "$"); } catch {}
     }
   });
 
@@ -2000,15 +1940,15 @@ function extractSpecsFromScripts($, container /* optional */) {
 function extractJsonLdAllProductSpecs($){
   const nodes = [];
   $('script[type="application/ld+json"]').each((_, el) => {
-    const raw = $(el).contents().text();
-    if (!raw || !raw.trim()) return;
-    const parsed = safeJsonParse(raw.trim());
-    if (!parsed) return;
-    const arr = Array.isArray(parsed) ? parsed : [parsed];
-    arr.forEach(obj => {
-      if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
-      else nodes.push(obj);
-    });
+    try {
+      const raw = $(el).contents().text();
+      if (!raw || !raw.trim()) return;
+      const parsed = JSON.parse(raw.trim());
+      (Array.isArray(parsed) ? parsed : [parsed]).forEach(obj => {
+        if (obj && obj['@graph'] && Array.isArray(obj['@graph'])) nodes.push(...obj['@graph']);
+        else nodes.push(obj);
+      });
+    } catch {}
   });
 
   // ADD: detect page canonical URL to constrain merges
