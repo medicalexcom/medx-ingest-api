@@ -489,10 +489,26 @@ async function collectMicrodata(page) {
     document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
       const raw = (s.textContent || '').trim();
       if (!raw) return;
+    
+      let parsed = null;
       try {
-        const parsed = JSON.parse(raw);
-        jsonLd.push(parsed);
+        // First pass: parse as-is
+        parsed = JSON.parse(raw);
       } catch {
+        // Second pass: sanitize hash-prefixed keys and values
+        let sanitized = raw
+          .replace(/"?#([^":]+)":/g, (_, key) => `"${key}":`)
+          .replace(/:\s*#([A-Za-z0-9_-]+)/g, ': "$1"');
+        try {
+          parsed = JSON.parse(sanitized);
+        } catch {
+          parsed = null;
+        }
+      }
+    
+      if (parsed) {
+        jsonLd.push(parsed);
+      } else {
         jsonLd.push({ __raw: raw.slice(0, 100000) });
       }
     });
@@ -527,16 +543,31 @@ async function collectInlineData(page) {
       window_vars: {},
     };
 
-    // <script type="application/json"> blobs
     document.querySelectorAll('script[type="application/json"]').forEach(s => {
       const raw = (s.textContent || '').trim();
       if (!raw) return;
+    
+      let parsed = null;
       try {
-        out.application_json_scripts.push(JSON.parse(raw));
+        parsed = JSON.parse(raw);
       } catch {
+        let sanitized = raw
+          .replace(/"?#([^":]+)":/g, (_, key) => `"${key}":`)
+          .replace(/:\s*#([A-Za-z0-9_-]+)/g, ': "$1"');
+        try {
+          parsed = JSON.parse(sanitized);
+        } catch {
+          parsed = null;
+        }
+      }
+    
+      if (parsed) {
+        out.application_json_scripts.push(parsed);
+      } else {
         out.application_json_scripts.push({ __raw: raw.slice(0, 100000) });
       }
     });
+
 
     // Common app frameworks / globals
     const WIN_KEYS = [
