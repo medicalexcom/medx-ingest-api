@@ -135,9 +135,16 @@ function indexToColumn(index) {
 async function processPendingRow(header, rowData) {
   const { rowNumber, values } = rowData;
   // Find the relevant columns (1-based)
-  const statusIndex = header.findIndex((h) => h.toLowerCase() === 'ingest status') + 1;
-  const auditIndex  = header.findIndex((h) => h.toLowerCase() === 'audit log') + 1;
-  const attemptsIdx = header.findIndex((h) => h.toLowerCase() === 'gpt attempts') + 1;
+  const statusIndex   = header.findIndex((h) => h.toLowerCase() === 'ingest status') + 1;
+  const auditIndex    = header.findIndex((h) => h.toLowerCase() === 'audit log') + 1;
+  const attemptsIdx   = header.findIndex((h) => h.toLowerCase() === 'gpt attempts') + 1;
+  const descIndex     = header.findIndex((h) => h.toLowerCase() === 'description') + 1;
+  const variantsIndex = header.findIndex((h) => h.toLowerCase() === 'variants') + 1;
+  const warrantyIndex = header.findIndex((h) => h.toLowerCase() === 'warranty') + 1;
+  const metaTitleIndex   = header.findIndex((h) => h.toLowerCase() === 'meta title') + 1;
+  const metaDescIndex    = header.findIndex((h) => h.toLowerCase() === 'meta description') + 1;
+  const genUrlIndex      = header.findIndex((h) => h.toLowerCase() === 'generated url') + 1;
+  const keywordsIndex    = header.findIndex((h) => h.toLowerCase() === 'search keywords' || h.toLowerCase() === 'keywords') + 1;
   // Build payload for ingest API
   const payload = {
     rowNumber,
@@ -160,15 +167,46 @@ async function processPendingRow(header, rowData) {
   }
   // Prepare sheet updates
   const updates = [];
+  // Always update status
   if (statusIndex > 0) {
     updates.push({ row: rowNumber, col: statusIndex, value: result.status || 'processed' });
   }
+  // Update audit log
   if (auditIndex > 0) {
     const logVal = result.auditLog ? JSON.stringify(result.auditLog) : '';
     updates.push({ row: rowNumber, col: auditIndex, value: logVal });
   }
+  // Update GPT attempts
   if (attemptsIdx > 0) {
     updates.push({ row: rowNumber, col: attemptsIdx, value: result.gptAttempts != null ? String(result.gptAttempts) : '' });
+  }
+  // Update description
+  if (descIndex > 0) {
+    updates.push({ row: rowNumber, col: descIndex, value: result.description || '' });
+  }
+  // Update variants
+  if (variantsIndex > 0) {
+    updates.push({ row: rowNumber, col: variantsIndex, value: result.variants || '' });
+  }
+  // Update warranty
+  if (warrantyIndex > 0) {
+    updates.push({ row: rowNumber, col: warrantyIndex, value: result.warranty || '' });
+  }
+  // Update meta title
+  if (metaTitleIndex > 0) {
+    updates.push({ row: rowNumber, col: metaTitleIndex, value: result.metaTitle || '' });
+  }
+  // Update meta description
+  if (metaDescIndex > 0) {
+    updates.push({ row: rowNumber, col: metaDescIndex, value: result.metaDesc || '' });
+  }
+  // Update generated URL
+  if (genUrlIndex > 0) {
+    updates.push({ row: rowNumber, col: genUrlIndex, value: result.generatedUrl || '' });
+  }
+  // Update search keywords
+  if (keywordsIndex > 0) {
+    updates.push({ row: rowNumber, col: keywordsIndex, value: result.keywords || '' });
   }
   await writeSheetCells(updates);
   console.log(`Row ${rowNumber} processed with status ${result.status || 'processed'}`);
