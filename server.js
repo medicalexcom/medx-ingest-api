@@ -8,7 +8,7 @@ import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
-iimport { removeNoise } from './mergeRaw.js';
+import { removeNoise } from './mergeRaw.js';
 import setupQueueRoutes from './queueRoutes.js';
 
 // Removed GPT-ready helper: no longer needed
