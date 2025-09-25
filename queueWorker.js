@@ -208,9 +208,14 @@ async function main() {
   }
 }
 
-if (require.main === module) {
-  main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
-}
+// In an ES module context (`type: "module"` in package.json), `require` is not
+// available and the conventional `if (require.main === module)` check will
+// throw a ReferenceError.  Since this script is intended to run as a
+// standalone worker rather than being imported as a library, we simply
+// invoke `main()` unconditionally here.  If you import this file into
+// another module and need to prevent the worker from running automatically,
+// remove or guard the following invocation.
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
