@@ -35,6 +35,7 @@
     "tesseract.js": "^4.0.2",
     "pdfjs-dist": "^3.10.111",
     "canvas": "^2.11.0",
-    "playwright": "^1.39.0"
+    "playwright": "^1.39.0",
+    "googleapis": "^118.0.0"
   }
 }
