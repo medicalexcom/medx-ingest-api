@@ -11,6 +11,9 @@
 
 import { google } from 'googleapis';
 
+// Use node-fetch for HTTP requests (native fetch is available in recent Node versions).
+// If running on older Node (<18), install node-fetch and import it instead.
+
 // Helper to get an authenticated Sheets client using a service account.
 async function getSheetsClient() {
   const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT;
@@ -96,27 +99,102 @@ export default function setupQueueRoutes(app) {
       if (data.error) {
         return res.status(422).json({ error: data.error });
       }
-      // Construct a simple result using scraped fields. Use raw descriptions and names.
+      // Base fields extracted from the scraped data
       const rawDescription = data.description_raw || data.description || '';
       const descText   = String(rawDescription).replace(/\n+/g, ' ').trim();
-      const description = String(rawDescription).replace(/\n/g, '<br/>').trim();
-      const metaTitle   = data.name_raw || data.name || '';
-      const metaDesc    = descText.slice(0, 155);
+      const baseDescription = String(rawDescription).replace(/\n/g, '<br/>').trim();
+      const baseMetaTitle   = data.name_raw || data.name || '';
+      const baseMetaDesc    = descText.slice(0, 155);
       // Collect keywords from spec keys and features
       const specKeys = Object.keys(data.specs || {});
       const features = Array.isArray(data.features_raw) ? data.features_raw : [];
       const keywordsArray = [...specKeys, ...features].map(s => String(s).toLowerCase());
-      const keywords = keywordsArray.join(', ');
+      const baseKeywords = keywordsArray.join(', ');
+
+      // Initialize result object with defaults
       const result = {
-        description,
-        metaTitle,
-        metaDesc,
-        keywords,
+        description: baseDescription,
+        metaTitle: baseMetaTitle,
+        metaDesc: baseMetaDesc,
+        keywords: baseKeywords,
+        warranty: '',
+        variants: '',
+        generatedUrl: '',
         auditLog: data.warnings ? { warnings: data.warnings } : {},
         gptAttempts: 0,
         status: 'processed',
         original: row
       };
+
+      // Optionally call OpenAI to generate enhanced copy
+      const apiKey = process.env.OPENAI_API_KEY;
+      // Read custom GPT instructions from environment variable if provided
+      const customInstructions = process.env.GPT_INSTRUCTIONS || '';
+      if (apiKey) {
+        try {
+          // Compose prompt for GPT: include instructions and scraped data. Ask for JSON output with required keys.
+          const promptLines = [];
+          if (customInstructions) {
+            promptLines.push(customInstructions);
+          } else {
+            promptLines.push('You are a product description generator. Use the provided scraped product information to craft a rich HTML product description, an SEO-friendly meta title (max 60 characters), a meta description (max 155 characters), search keywords, variant options (if available), and warranty information. If a field cannot be determined, leave it blank.');
+          }
+          promptLines.push('Return your answer strictly as a JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl.');
+          promptLines.push(`Scraped Name: ${data.name_raw || data.name || ''}`);
+          promptLines.push(`Scraped Description: ${rawDescription}`);
+          promptLines.push(`Scraped Specs: ${JSON.stringify(data.specs || {})}`);
+          promptLines.push(`Scraped Features: ${JSON.stringify(data.features_raw || [])}`);
+          const userPrompt = promptLines.join('\n\n');
+          const messages = [
+            { role: 'system', content: 'You are a helpful assistant.' },
+            { role: 'user', content: userPrompt }
+          ];
+          const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+              model: process.env.OPENAI_MODEL || 'gpt-4o',
+              messages,
+              temperature: 0.5
+            })
+          });
+          if (openaiRes.ok) {
+            const openaiJson = await openaiRes.json();
+            const content = openaiJson.choices?.[0]?.message?.content || '';
+            try {
+              const gptData = JSON.parse(content);
+              // Merge GPT-generated fields into result, preserving defaults when blank
+              if (gptData.description) result.description = gptData.description;
+              if (gptData.metaTitle) result.metaTitle = gptData.metaTitle;
+              if (gptData.metaDesc) result.metaDesc = gptData.metaDesc;
+              if (gptData.keywords) result.keywords = gptData.keywords;
+              if (gptData.warranty) result.warranty = gptData.warranty;
+              if (gptData.variants) result.variants = gptData.variants;
+              if (gptData.generatedUrl) result.generatedUrl = gptData.generatedUrl;
+              result.gptAttempts = 1;
+            } catch (e) {
+              // If parsing fails, include raw message in audit log
+              result.auditLog = { ...result.auditLog, gpt_raw: content };
+            }
+          } else {
+            const errText = await openaiRes.text();
+            result.auditLog = { ...result.auditLog, gpt_error: `${openaiRes.status} ${openaiRes.statusText} - ${errText}` };
+          }
+        } catch (gptErr) {
+          result.auditLog = { ...result.auditLog, gpt_error: gptErr.message };
+        }
+      }
+
+      // Generate slug for Generated URL if not provided by GPT
+      if (!result.generatedUrl) {
+        const slug = (data.name_raw || data.name || '').toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        result.generatedUrl = `/${slug}`;
+      }
       return res.json(result);
     } catch (err) {
       console.error(err);
