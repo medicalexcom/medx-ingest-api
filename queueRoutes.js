@@ -4,41 +4,28 @@
  * It integrates with Google Sheets to retrieve rows awaiting ingestion.
  * To use, set the following environment variables:
  *   SHEET_ID - the ID of the Google Sheet storing your ingest queue
- *   GOOGLE_SERVICE_ACCOUNT - the service account email for Google Sheets API
- *   GOOGLE_PRIVATE_KEY - the private key for the service account (with \n newlines)
- *
- * Optionally you can set SHEET_RANGE to restrict the range to read (e.g. "Sheet1!A1:Z1000").
+ *   GOOGLE_SHEETS_API_KEY - the API key to access Google Sheets
+ *   SHEET_RANGE (optional) - the A1 notation range to read
  */
-
-import { google } from 'googleapis';
-
-function getSheetsClient() {
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT;
-  const privateKey  = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-  if (!clientEmail || !privateKey) {
-    throw new Error('Missing Google Sheets credentials. Set GOOGLE_SERVICE_ACCOUNT and GOOGLE_PRIVATE_KEY in env.');
-  }
-  const auth = new google.auth.JWT(
-    clientEmail,
-    null,
-    privateKey,
-    ['https://www.googleapis.com/auth/spreadsheets']
-  );
-  return google.sheets({ version: 'v4', auth });
-}
 
 async function getPendingRows() {
   const sheetId = process.env.SHEET_ID;
   if (!sheetId) {
     throw new Error('SHEET_ID environment variable must be set');
   }
-  const sheets = getSheetsClient();
-  const range = process.env.SHEET_RANGE || 'Sheet1';
-  const result = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range
-  });
-  const values = result.data.values || [];
+  const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
+  if (!apiKey) {
+    throw new Error('GOOGLE_SHEETS_API_KEY environment variable must be set');
+  }
+  const range = encodeURIComponent(process.env.SHEET_RANGE || 'Sheet1!A1:Z1000');
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}?key=${apiKey}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to fetch sheet: ${response.status} ${response.statusText} - ${text}`);
+  }
+  const data = await response.json();
+  const values = data.values || [];
   if (!values.length) return [];
   const header = values[0].map(h => String(h).trim());
   const statusIndex = header.findIndex(h => h.toLowerCase() === 'ingest status');
@@ -62,7 +49,6 @@ async function getPendingRows() {
 
 export default function setupQueueRoutes(app) {
   // GET /scrape-queue
-  // Return pending rows from the Google Sheet
   app.get('/scrape-queue', async (req, res) => {
     try {
       const items = await getPendingRows();
@@ -74,12 +60,10 @@ export default function setupQueueRoutes(app) {
   });
 
   // POST /ingest-and-return
-  // Accepts a row payload, runs scraping + GPT, and returns the result
   app.post('/ingest-and-return', async (req, res) => {
     try {
       const row = req.body || {};
       // TODO: integrate with your scraping and GPT pipeline.
-      // For now, simply echo the original input with placeholder fields.
       const result = {
         description: '',
         metaTitle: '',
