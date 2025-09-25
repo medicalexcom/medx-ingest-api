@@ -8,8 +8,9 @@ import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
 import { createWorker } from 'tesseract.js';
-import { harvestTabsFromHtml } from './tabHarvester.js';
-import { removeNoise } from './mergeRaw.js';
+iimport { removeNoise } from './mergeRaw.js';
+import setupQueueRoutes from './queueRoutes.js';
+
 // Removed GPT-ready helper: no longer needed
 
 
@@ -4484,6 +4485,8 @@ function harvestCompassSpecs($) {
 
 /* ================== Listen ================== */
 const PORT = process.env.PORT || 8080;
+setupQueueRoutes(app);
+
 
 // Health endpoints (keep these near your routes)
 app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
