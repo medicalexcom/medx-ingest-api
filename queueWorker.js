@@ -189,9 +189,27 @@ async function runWorker() {
   }
 }
 
-// Run the worker if executed directly
+// Run the worker continuously if executed directly
+// Instead of exiting after a single run, loop forever with a delay between
+// iterations. This allows the worker to pick up new pending rows shortly
+// after they are added. The delay can be adjusted via the QUEUE_POLL_INTERVAL
+// environment variable (milliseconds) or defaults to 30 seconds.
+async function main() {
+  const pollMs = parseInt(process.env.QUEUE_POLL_INTERVAL, 10);
+  const delay = Number.isFinite(pollMs) && pollMs > 0 ? pollMs : 30000;
+  while (true) {
+    try {
+      await runWorker();
+    } catch (err) {
+      console.error('Worker iteration failed:', err);
+    }
+    // Sleep for the configured interval before checking again
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
 if (require.main === module) {
-  runWorker().catch((err) => {
+  main().catch((err) => {
     console.error(err);
     process.exit(1);
   });
