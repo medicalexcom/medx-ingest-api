@@ -1,68 +1,90 @@
 /*
  * queueWorker.js
  *
- * This script runs as a background worker for the ingest queue. It
- * polls the ingest API for rows marked `pending_scrape` in your
+ * This script runs as a background worker for the ingest queue.
+ * It polls the ingest API for rows marked `pending_scrape` in your
  * Google Sheet, sends each row to the `/ingest-and-return` endpoint
  * to perform scraping and GPT generation, and then writes the
  * resulting status back to the sheet.  It can be run on a schedule
  * (e.g. via cron or a Render background worker) to keep your queue
  * flowing without manual intervention.
  *
- * Usage:
- *   export INGEST_API_URL=https://your-ingest-api.example.com
- *   export SHEET_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
- *   export GOOGLE_SHEETS_API_KEY=your_sheets_api_key
- *   node queueWorker.js
+ * Authentication: This version uses a Google service account to
+ * authenticate to the Google Sheets API for both reading and writing.
+ * You must set the environment variables GOOGLE_SERVICE_ACCOUNT
+ * (service account email) and GOOGLE_PRIVATE_KEY (private key with
+ * newline characters escaped as \n).  The service account must be
+ * shared as an editor on your queue sheet.
  *
  * Environment variables:
  *   INGEST_API_URL          – Base URL of your ingest API (no trailing slash).
  *   SHEET_ID                – Google Sheets ID for the ingest queue.
- *   GOOGLE_SHEETS_API_KEY   – API key for reading/writing the sheet.
+ *   GOOGLE_SERVICE_ACCOUNT  – Service account email (required).
+ *   GOOGLE_PRIVATE_KEY      – Service account private key (required).
  *   SHEET_RANGE (optional)  – A1 range to read/write (default: Sheet1!A1:Z1000).
  *   SHEET_NAME  (optional)  – Sheet name (default: Sheet1).
- *
- * Note: This script uses the native fetch API available in recent
- * versions of Node.js (18+).  If running on an older Node version,
- * install and import `node-fetch` instead.
+ *   QUEUE_POLL_INTERVAL     – Delay between queue checks in ms (default: 30000).
  */
 
+import { google } from 'googleapis';
+
+// Base URL of your ingest API (no trailing slash)
 const baseUrl = process.env.INGEST_API_URL;
+// Google Sheets ID for your queue
 const sheetId = process.env.SHEET_ID;
-const apiKey  = process.env.GOOGLE_SHEETS_API_KEY;
+// Service account credentials
+const serviceAccount = process.env.GOOGLE_SERVICE_ACCOUNT;
+const privateKey = process.env.GOOGLE_PRIVATE_KEY;
+// Sheet range and name
 const sheetRange = process.env.SHEET_RANGE || 'Sheet1!A1:Z1000';
 const sheetName  = process.env.SHEET_NAME  || 'Sheet1';
 
+// Validate required environment variables
 if (!baseUrl) {
   throw new Error('INGEST_API_URL environment variable is required');
 }
 if (!sheetId) {
   throw new Error('SHEET_ID environment variable is required');
 }
-if (!apiKey) {
-  throw new Error('GOOGLE_SHEETS_API_KEY environment variable is required');
+if (!serviceAccount || !privateKey) {
+  throw new Error('GOOGLE_SERVICE_ACCOUNT and GOOGLE_PRIVATE_KEY environment variables are required');
 }
 
 /**
- * Fetch the header and data rows from the ingest queue sheet.
- * Returns an object with `header` and `rows` arrays.  Each row
- * includes the raw values and the 1-based row number in the sheet.
+ * Create an authenticated Google Sheets client using a service account.
+ * The private key may have embedded newlines escaped as \n; these are
+ * converted back to real newlines.  The client is cached for a short
+ * period because googleapis will reuse the JWT automatically.
+ */
+async function getSheetsClient() {
+  const auth = new google.auth.JWT(
+    serviceAccount,
+    null,
+    privateKey.replace(/\\n/g, '\n'),
+    ['https://www.googleapis.com/auth/spreadsheets']
+  );
+  await auth.authorize();
+  return google.sheets({ version: 'v4', auth });
+}
+
+/**
+ * Read the header row and data rows from the queue sheet.  Returns
+ * an object with `header` (array of column names) and `rows` (array
+ * of objects with `rowNumber` and `values`).  The returned row
+ * numbers are 1-based (including the header row at index 1).
  */
 async function readSheet() {
-  const encodedRange = encodeURIComponent(sheetRange);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodedRange}?key=${apiKey}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to read sheet: ${res.status} ${res.statusText} – ${text}`);
-  }
-  const data = await res.json();
-  const values = data.values || [];
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: sheetRange,
+  });
+  const values = res.data.values || [];
   if (values.length === 0) {
     return { header: [], rows: [] };
   }
   const header = values[0].map((h) => String(h).trim());
-  const rows   = [];
+  const rows = [];
   for (let i = 1; i < values.length; i++) {
     rows.push({ rowNumber: i + 1, values: values[i] });
   }
@@ -71,28 +93,20 @@ async function readSheet() {
 
 /**
  * Write one or more cells back to the sheet.  Accepts an array of
- * updates, each with `row`, `col`, and `value`.  Uses the Google
- * Sheets API `values.update` endpoint for each cell.  If you have
- * multiple cells in the same row, it may be more efficient to batch
- * them together; this implementation keeps things simple.
- *
- * @param {Array<{row:number, col:number, value:any}>} updates
+ * updates where each element has the form `{ row, col, value }`.
+ * Uses the Google Sheets API `values.update` endpoint for each cell.
  */
 async function writeSheetCells(updates) {
+  const sheets = await getSheetsClient();
   for (const { row, col, value } of updates) {
     const columnLetter = indexToColumn(col);
     const range = `${sheetName}!${columnLetter}${row}`;
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW&key=${apiKey}`;
-    const body = JSON.stringify({ values: [[value]] });
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body,
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[value]] },
     });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Failed to write cell ${range}: ${res.status} ${res.statusText} – ${text}`);
-    }
   }
 }
 
@@ -112,37 +126,39 @@ function indexToColumn(index) {
 }
 
 /**
- * Process a single pending row: POST it to the ingest API and write
- * back the status, audit log, and GPT attempts.  The ingest API
- * response should include a `status` field (e.g. "processed",
- * "error"), an `auditLog` object, and `gptAttempts` number.  If it
- * doesn’t, the worker will simply mark the row as processed.
- *
- * @param {Object} header  Header row array
- * @param {Object} rowData Row data { rowNumber, values }
+ * Process a single pending row: post it to the ingest API and then
+ * write the resulting status, audit log, and GPT attempt count back
+ * to the sheet.  Any error communicating with the ingest API is
+ * logged and skipped; the sheet update will still occur with a
+ * default status.
  */
 async function processPendingRow(header, rowData) {
   const { rowNumber, values } = rowData;
-  // Find column indices (1-based) for key fields
+  // Find the relevant columns (1-based)
   const statusIndex = header.findIndex((h) => h.toLowerCase() === 'ingest status') + 1;
   const auditIndex  = header.findIndex((h) => h.toLowerCase() === 'audit log') + 1;
   const attemptsIdx = header.findIndex((h) => h.toLowerCase() === 'gpt attempts') + 1;
-  // Construct the payload: include row number and original values
+  // Build payload for ingest API
   const payload = {
     rowNumber,
     row: values,
   };
-  const res = await fetch(`${baseUrl}/ingest-and-return`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    console.error(`Ingest API returned ${res.status} for row ${rowNumber}`);
-    return;
+  let result = {};
+  try {
+    const res = await fetch(`${baseUrl}/ingest-and-return`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      result = await res.json();
+    } else {
+      console.error(`Ingest API returned ${res.status} for row ${rowNumber}`);
+    }
+  } catch (err) {
+    console.error(`Error calling ingest API for row ${rowNumber}:`, err);
   }
-  const result = await res.json();
-  // Prepare cell updates
+  // Prepare sheet updates
   const updates = [];
   if (statusIndex > 0) {
     updates.push({ row: rowNumber, col: statusIndex, value: result.status || 'processed' });
@@ -158,6 +174,11 @@ async function processPendingRow(header, rowData) {
   console.log(`Row ${rowNumber} processed with status ${result.status || 'processed'}`);
 }
 
+/**
+ * Scan the sheet for rows with Ingest Status = 'pending_scrape' (case
+ * insensitive) and process each one.  Logs the number of rows found
+ * and any errors encountered while processing.
+ */
 async function runWorker() {
   console.log('Reading sheet…');
   const { header, rows } = await readSheet();
@@ -165,10 +186,9 @@ async function runWorker() {
     console.log('Sheet is empty or missing header row');
     return;
   }
-  // Identify pending rows (case-insensitive)
   const statusIndex = header.findIndex((h) => h.toLowerCase() === 'ingest status');
   if (statusIndex === -1) {
-    console.log('No “Ingest Status” column found; nothing to process');
+    console.log('No "Ingest Status" column found; nothing to process');
     return;
   }
   const pendingRows = rows.filter(({ values }) => {
@@ -184,16 +204,17 @@ async function runWorker() {
     try {
       await processPendingRow(header, rowData);
     } catch (err) {
-      console.error(`Error processing row ${rowData.rowNumber}:`, err.message);
+      console.error(`Error processing row ${rowData.rowNumber}:`, err);
     }
   }
 }
 
-// Run the worker continuously if executed directly
-// Instead of exiting after a single run, loop forever with a delay between
-// iterations. This allows the worker to pick up new pending rows shortly
-// after they are added. The delay can be adjusted via the QUEUE_POLL_INTERVAL
-// environment variable (milliseconds) or defaults to 30 seconds.
+/**
+ * Main loop: continuously poll the queue and process pending rows.
+ * Uses QUEUE_POLL_INTERVAL (ms) environment variable or defaults to
+ * 30 seconds.  The loop runs indefinitely and logs any iteration
+ * failures.
+ */
 async function main() {
   const pollMs = parseInt(process.env.QUEUE_POLL_INTERVAL, 10);
   const delay = Number.isFinite(pollMs) && pollMs > 0 ? pollMs : 30000;
@@ -203,19 +224,11 @@ async function main() {
     } catch (err) {
       console.error('Worker iteration failed:', err);
     }
-    // Sleep for the configured interval before checking again
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
 }
 
-// In an ES module context (`type: "module"` in package.json), `require` is not
-// available and the conventional `if (require.main === module)` check will
-// throw a ReferenceError.  Since this script is intended to run as a
-// standalone worker rather than being imported as a library, we simply
-// invoke `main()` unconditionally here.  If you import this file into
-// another module and need to prevent the worker from running automatically,
-// remove or guard the following invocation.
+// In ES modules, require is undefined, so call main() unconditionally
 main().catch((err) => {
   console.error(err);
-  process.exit(1);
 });
