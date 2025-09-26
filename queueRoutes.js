@@ -133,7 +133,9 @@ export default function setupQueueRoutes(app) {
       const baseKeywords = keywordsArray.join(', ');
 
       // Initialize result object with defaults
+      // Include productName as its own field. Default to the base meta title (scraped name).
       const result = {
+        productName: baseMetaTitle,
         description: baseDescription,
         metaTitle: baseMetaTitle,
         metaDesc: baseMetaDesc,
@@ -172,14 +174,20 @@ export default function setupQueueRoutes(app) {
             // Trim whitespace to avoid unwanted leading/trailing spaces
             promptLines.push(customInstructions.trim());
           }
-          // Always instruct the model to return a pure JSON object (no markdown fences)
-          promptLines.push('Return your answer strictly as a pure JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl. Do not wrap the JSON in code fences or markdown.');
+          // Always instruct the model to return a pure JSON object (no markdown fences). Include productName as a separate field.
+          promptLines.push('Return your answer strictly as a pure JSON object with these keys: description, productName, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl. Do not wrap the JSON in code fences or markdown.');
           // Include scraped data so GPT can generate relevant text
           promptLines.push(`Scraped Name: ${data.name_raw || data.name || ''}`);
           promptLines.push(`Scraped Description: ${rawDescription}`);
           promptLines.push(`Scraped Specs: ${JSON.stringify(data.specs || {})}`);
           promptLines.push(`Scraped Features: ${JSON.stringify(data.features_raw || [])}`);
           const userPrompt = promptLines.join('\n\n');
+          // Record the custom instructions and the full prompt used for debugging purposes
+          result.auditLog = {
+            ...result.auditLog,
+            instructionsUsed: customInstructions,
+            promptUsed: userPrompt
+          };
           const messages = [
             { role: 'system', content: 'You are a helpful assistant.' },
             { role: 'user', content: userPrompt }
@@ -205,10 +213,23 @@ export default function setupQueueRoutes(app) {
               if (content.startsWith('```')) {
                 content = content.replace(/^```(?:json)?\n/, '').replace(/```$/, '');
               }
+              // Record the cleaned GPT response for debugging
+              result.auditLog = { ...result.auditLog, gpt_response: content };
               const gptData = JSON.parse(content);
               // Merge GPT-generated fields into result. Convert arrays/objects to strings for Sheets compatibility.
               if (gptData.description) result.description = gptData.description;
-              if (gptData.metaTitle) result.metaTitle = gptData.metaTitle;
+              // Use metaTitle and/or productName from GPT. If a separate productName field is provided, prefer it; otherwise, mirror metaTitle.
+              if (gptData.metaTitle) {
+                result.metaTitle = gptData.metaTitle;
+                result.productName = gptData.metaTitle;
+              }
+              if (gptData.productName) {
+                result.productName = gptData.productName;
+                // Keep metaTitle in sync if provided separately
+                if (!gptData.metaTitle) {
+                  result.metaTitle = gptData.productName;
+                }
+              }
               if (gptData.metaDesc) result.metaDesc = gptData.metaDesc;
               if (gptData.keywords) {
                 // If keywords is an array, join with commas; otherwise use as-is
