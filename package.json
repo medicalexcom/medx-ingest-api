@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "NODE_ENV=development node server.js",
-    "postinstall": "npx playwright install --with-deps",
+    "postinstall": "npx playwright install",
     "start": "node server.js",
     "test": "node --test"
   },
