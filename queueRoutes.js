@@ -170,8 +170,8 @@ export default function setupQueueRoutes(app) {
           const promptLines = [];
           if (customInstructions) {
             promptLines.push(customInstructions);
+            promptLines.push('Return your answer strictly as a JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl.');
           } else {
-            promptLines.push('You are a product description generator. Use the provided scraped product information to craft a rich HTML product description, an SEO-friendly meta title (max 60 characters), a meta description (max 155 characters), search keywords, variant options (if available), and warranty information. If a field cannot be determined, leave it blank.');
           }
           promptLines.push('Return your answer strictly as a JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl.');
           promptLines.push(`Scraped Name: ${data.name_raw || data.name || ''}`);
