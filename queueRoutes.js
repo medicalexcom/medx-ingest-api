@@ -166,14 +166,15 @@ export default function setupQueueRoutes(app) {
 
       if (apiKey) {
         try {
-          // Compose prompt for GPT: include instructions and scraped data. Ask for JSON output with required keys.
+          // Compose prompt for GPT: always include custom instructions if available and direct the model to output pure JSON.
           const promptLines = [];
           if (customInstructions) {
-            promptLines.push(customInstructions);
-            promptLines.push('Return your answer strictly as a JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl.');
-          } else {
+            // Trim whitespace to avoid unwanted leading/trailing spaces
+            promptLines.push(customInstructions.trim());
           }
-          promptLines.push('Return your answer strictly as a JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl.');
+          // Always instruct the model to return a pure JSON object (no markdown fences)
+          promptLines.push('Return your answer strictly as a pure JSON object with these keys: description, metaTitle, metaDesc, keywords, warranty, variants, generatedUrl. Do not wrap the JSON in code fences or markdown.');
+          // Include scraped data so GPT can generate relevant text
           promptLines.push(`Scraped Name: ${data.name_raw || data.name || ''}`);
           promptLines.push(`Scraped Description: ${rawDescription}`);
           promptLines.push(`Scraped Specs: ${JSON.stringify(data.specs || {})}`);
@@ -197,8 +198,13 @@ export default function setupQueueRoutes(app) {
           });
           if (openaiRes.ok) {
             const openaiJson = await openaiRes.json();
-            const content = openaiJson.choices?.[0]?.message?.content || '';
+            let content = openaiJson.choices?.[0]?.message?.content || '';
             try {
+              // Remove potential markdown code fences from the response before parsing
+              content = content.trim();
+              if (content.startsWith('```')) {
+                content = content.replace(/^```(?:json)?\n/, '').replace(/```$/, '');
+              }
               const gptData = JSON.parse(content);
               // Merge GPT-generated fields into result, preserving defaults when blank
               if (gptData.description) result.description = gptData.description;
@@ -210,7 +216,7 @@ export default function setupQueueRoutes(app) {
               if (gptData.generatedUrl) result.generatedUrl = gptData.generatedUrl;
               result.gptAttempts = 1;
             } catch (e) {
-              // If parsing fails, include raw message in audit log
+              // If parsing fails, include the raw content in the audit log for troubleshooting
               result.auditLog = { ...result.auditLog, gpt_raw: content };
             }
           } else {
@@ -218,6 +224,7 @@ export default function setupQueueRoutes(app) {
             result.auditLog = { ...result.auditLog, gpt_error: `${openaiRes.status} ${openaiRes.statusText} - ${errText}` };
           }
         } catch (gptErr) {
+          // Capture any errors thrown during the GPT call
           result.auditLog = { ...result.auditLog, gpt_error: gptErr.message };
         }
       }
