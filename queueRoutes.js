@@ -206,13 +206,31 @@ export default function setupQueueRoutes(app) {
                 content = content.replace(/^```(?:json)?\n/, '').replace(/```$/, '');
               }
               const gptData = JSON.parse(content);
-              // Merge GPT-generated fields into result, preserving defaults when blank
+              // Merge GPT-generated fields into result. Convert arrays/objects to strings for Sheets compatibility.
               if (gptData.description) result.description = gptData.description;
               if (gptData.metaTitle) result.metaTitle = gptData.metaTitle;
               if (gptData.metaDesc) result.metaDesc = gptData.metaDesc;
-              if (gptData.keywords) result.keywords = gptData.keywords;
+              if (gptData.keywords) {
+                // If keywords is an array, join with commas; otherwise use as-is
+                if (Array.isArray(gptData.keywords)) {
+                  result.keywords = gptData.keywords.join(', ');
+                } else {
+                  result.keywords = gptData.keywords;
+                }
+              }
               if (gptData.warranty) result.warranty = gptData.warranty;
-              if (gptData.variants) result.variants = gptData.variants;
+              if (gptData.variants) {
+                // Convert variants to a string representation. If already a string, keep it; else stringify.
+                if (typeof gptData.variants === 'string') {
+                  result.variants = gptData.variants;
+                } else {
+                  try {
+                    result.variants = JSON.stringify(gptData.variants);
+                  } catch {
+                    result.variants = String(gptData.variants);
+                  }
+                }
+              }
               if (gptData.generatedUrl) result.generatedUrl = gptData.generatedUrl;
               result.gptAttempts = 1;
             } catch (e) {
