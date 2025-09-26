@@ -11,9 +11,6 @@
 
 import { google } from 'googleapis';
 
-// Use node-fetch for HTTP requests (native fetch is available in recent Node versions).
-// If running on older Node (<18), install node-fetch and import it instead.
-
 // Helper to get an authenticated Sheets client using a service account.
 async function getSheetsClient() {
   const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT;
@@ -24,7 +21,7 @@ async function getSheetsClient() {
   const jwt = new google.auth.JWT(
     clientEmail,
     null,
-    privateKey.replace(/\\n/g, '\n'),
+    privateKey.replace(/\n/g, '\n'),
     ['https://www.googleapis.com/auth/spreadsheets']
   );
   await jwt.authorize();
@@ -62,6 +59,30 @@ async function getPendingRows() {
     }
   }
   return pending;
+}
+
+// New helper to get authenticated Drive client using existing Sheets credentials
+async function getDriveClient() {
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT;
+  const privateKey  = process.env.GOOGLE_PRIVATE_KEY;
+  if (!clientEmail || !privateKey) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT and GOOGLE_PRIVATE_KEY must be set');
+  }
+  const jwt = new google.auth.JWT(
+    clientEmail,
+    null,
+    privateKey.replace(/\n/g, '\n'),
+    ['https://www.googleapis.com/auth/drive.readonly']
+  );
+  await jwt.authorize();
+  return google.drive({ version: 'v3', auth: jwt });
+}
+
+// Fetch a file's content from Google Drive by its ID. Returns plain text.
+async function getDriveFileContent(fileId) {
+  const drive = await getDriveClient();
+  const res = await drive.files.get({ fileId, alt: 'media' });
+  return res.data;
 }
 
 export default function setupQueueRoutes(app) {
@@ -102,7 +123,7 @@ export default function setupQueueRoutes(app) {
       // Base fields extracted from the scraped data
       const rawDescription = data.description_raw || data.description || '';
       const descText   = String(rawDescription).replace(/\n+/g, ' ').trim();
-      const baseDescription = String(rawDescription).replace(/\n/g, '<br/>').trim();
+      const baseDescription = String(rawDescription).replace(/\n/g, ' ').trim();
       const baseMetaTitle   = data.name_raw || data.name || '';
       const baseMetaDesc    = descText.slice(0, 155);
       // Collect keywords from spec keys and features
@@ -128,8 +149,21 @@ export default function setupQueueRoutes(app) {
 
       // Optionally call OpenAI to generate enhanced copy
       const apiKey = process.env.OPENAI_API_KEY;
-      // Read custom GPT instructions from environment variable if provided
-      const customInstructions = process.env.GPT_INSTRUCTIONS || '';
+      // Determine custom GPT instructions
+      let customInstructions = '';
+      if (process.env.GPT_INSTRUCTIONS_FILE_ID) {
+        try {
+          // Prefer loading instructions from a Google Drive file when FILE_ID is provided
+          customInstructions = await getDriveFileContent(process.env.GPT_INSTRUCTIONS_FILE_ID);
+        } catch (err) {
+          console.error('Failed to fetch GPT instructions from Google Drive:', err.message);
+        }
+      }
+      // Fallback to plain environment variable if no file-based instructions found
+      if (!customInstructions) {
+        customInstructions = process.env.GPT_INSTRUCTIONS || '';
+      }
+
       if (apiKey) {
         try {
           // Compose prompt for GPT: include instructions and scraped data. Ask for JSON output with required keys.
