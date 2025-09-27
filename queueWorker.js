@@ -145,6 +145,7 @@ async function processPendingRow(header, rowData) {
   const metaDescIndex    = header.findIndex((h) => h.toLowerCase() === 'meta description') + 1;
   const genUrlIndex      = header.findIndex((h) => h.toLowerCase() === 'generated url') + 1;
   const keywordsIndex    = header.findIndex((h) => h.toLowerCase() === 'search keywords' || h.toLowerCase() === 'keywords') + 1;
+  const productNameIndex = header.findIndex((h) => h.toLowerCase() === 'product name') + 1;
   // Build payload for ingest API
   const payload = {
     rowNumber,
@@ -208,6 +209,10 @@ async function processPendingRow(header, rowData) {
   // Update search keywords
   if (keywordsIndex > 0) {
     updates.push({ row: rowNumber, col: keywordsIndex, value: result.keywords || '' });
+  }
+  // Update product name
+  if (productNameIndex > 0) {
+  updates.push({ row: rowNumber, col: productNameIndex, value: result.productName || '' });
   }
   await writeSheetCells(updates);
   console.log(`Row ${rowNumber} processed with status ${result.status || 'processed'}`);
