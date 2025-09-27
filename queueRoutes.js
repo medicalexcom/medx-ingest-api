@@ -277,6 +277,9 @@ export default function setupQueueRoutes(app) {
           .replace(/^-+|-+$/g, '');
         result.generatedUrl = `/${slug}`;
       }
+      result.sku = data.sku || row.sku || '';
+      result.weight = data.specs?.weight || data.weight || '';
+
       return res.json(result);
     } catch (err) {
       console.error(err);
