@@ -189,11 +189,7 @@ export default function setupQueueRoutes(app) {
           promptLines.push(`Scraped Features: ${JSON.stringify(data.features_raw || [])}`);
           const userPrompt = promptLines.join('\n\n');
           // Record the custom instructions and the full prompt used for debugging purposes
-          result.auditLog = {
-            ...result.auditLog,
-            instructionsUsed: customInstructions,
-            promptUsed: userPrompt
-          };
+          result.auditLog = {};
           const messages = [
             { role: 'system', content: 'You are a helpful assistant.' },
             { role: 'user', content: userPrompt }
