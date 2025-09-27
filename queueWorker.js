@@ -159,6 +159,7 @@ async function processPendingRow(header, rowData) {
     });
     if (res.ok) {
       result = await res.json();
+      console.log(`🧪 GPT Result for row ${rowNumber}:\n`, JSON.stringify(result, null, 2));
     } else {
       console.error(`Ingest API returned ${res.status} for row ${rowNumber}`);
     }
