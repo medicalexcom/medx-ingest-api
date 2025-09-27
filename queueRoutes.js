@@ -151,18 +151,24 @@ export default function setupQueueRoutes(app) {
 
       // Optionally call OpenAI to generate enhanced copy
       const apiKey = process.env.OPENAI_API_KEY;
-      // Determine custom GPT instructions
+      
+            // Determine custom GPT instructions with debug logging
       let customInstructions = '';
+
+      console.log("🧪 GPT_INSTRUCTIONS_FILE_ID:", process.env.GPT_INSTRUCTIONS_FILE_ID);
+
       if (process.env.GPT_INSTRUCTIONS_FILE_ID) {
         try {
-          // Prefer loading instructions from a Google Drive file when FILE_ID is provided
+          console.log("🧪 Attempting to load GPT instructions from Google Drive...");
           customInstructions = await getDriveFileContent(process.env.GPT_INSTRUCTIONS_FILE_ID);
+          console.log("✅ Loaded GPT instructions from Drive. Length:", customInstructions.length);
         } catch (err) {
-          console.error('Failed to fetch GPT instructions from Google Drive:', err.message);
+          console.error("❌ Failed to load instructions from Drive:", err.message);
         }
       }
-      // Fallback to plain environment variable if no file-based instructions found
+
       if (!customInstructions) {
+        console.warn("⚠️ Falling back to GPT_INSTRUCTIONS env var.");
         customInstructions = process.env.GPT_INSTRUCTIONS || '';
       }
 
