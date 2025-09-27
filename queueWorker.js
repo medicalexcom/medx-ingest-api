@@ -146,6 +146,8 @@ async function processPendingRow(header, rowData) {
   const genUrlIndex      = header.findIndex((h) => h.toLowerCase() === 'generated url') + 1;
   const keywordsIndex    = header.findIndex((h) => h.toLowerCase() === 'search keywords' || h.toLowerCase() === 'keywords') + 1;
   const productNameIndex = header.findIndex((h) => h.toLowerCase() === 'product name') + 1;
+  const skuIndex = header.findIndex((h) => h.toLowerCase() === 'sku') + 1;
+  const weightIndex = header.findIndex((h) => h.toLowerCase() === 'weight') + 1;
   // Build payload for ingest API
   const payload = {
     rowNumber,
@@ -213,6 +215,14 @@ async function processPendingRow(header, rowData) {
   // Update product name
   if (productNameIndex > 0) {
   updates.push({ row: rowNumber, col: productNameIndex, value: result.productName || '' });
+  }
+  // Update sku
+  if (skuIndex > 0) {
+  updates.push({ row: rowNumber, col: skuIndex, value: result.sku || '' });
+  }
+  // Update weight
+  if (weightIndex > 0) {
+    updates.push({ row: rowNumber, col: weightIndex, value: result.weight || '' });
   }
   await writeSheetCells(updates);
   console.log(`Row ${rowNumber} processed with status ${result.status || 'processed'}`);
