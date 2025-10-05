@@ -1069,85 +1069,152 @@ app.get('/ocr', async (req, res) => {
 });
 
 /* ================== Normalization ================== */
+/**
+ * Main extractor that normalises the page, merging JSON‑LD,
+ * microdata, RDFa, and OpenGraph.  It also extracts images
+ * and manuals using the updated manual extraction helpers.
+ *
+ * @param {string} baseUrl The page's base URL.
+ * @param {string} html Raw HTML content.
+ * @param {object} opts Optional options (e.g. { diag: { warnings: [] } }).
+ * @returns {object} Normalised product data with name_raw, description_raw, specs, features_raw, images, manuals, brand, etc.
+ */
 function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
   const $ = cheerio.load(html);
 
-  // Structured data
+  // 1) Structured data (JSON‑LD, microdata, RDFa)
   let jsonld = {};
-  try { jsonld = extractJsonLd($); }
-  catch(e){ diag && diag.warnings.push(`jsonld: ${e.message||e}`); }
+  try {
+    jsonld = extractJsonLd($);
+  } catch (e) {
+    diag && diag.warnings.push(`jsonld: ${e.message || e}`);
+  }
 
   let micro = {};
-  try { micro = extractMicrodataProduct($); }
-  catch(e){ diag && diag.warnings.push(`microdata: ${e.message||e}`); }
+  try {
+    micro = extractMicrodataProduct($);
+  } catch (e) {
+    diag && diag.warnings.push(`microdata: ${e.message || e}`);
+  }
 
   let rdfa = {};
-  try { rdfa = extractRdfaProduct($); }
-  catch(e){ diag && diag.warnings.push(`rdfa: ${e.message||e}`); }
+  try {
+    rdfa = extractRdfaProduct($);
+  } catch (e) {
+    diag && diag.warnings.push(`rdfa: ${e.message || e}`);
+  }
 
   const mergedSD = mergeProductSD(jsonld, micro, rdfa);
 
-  // OpenGraph (+ product tags)
+  // 2) OpenGraph extraction (+og:product)
   const og = {
-    title: $('meta[property="og:title"]').attr("content") || "",
-    description: $('meta[property="og:description"]').attr("content") || "",
-    image: $('meta[property="og:image"]').attr("content") || $('meta[property="og:image:secure_url"]').attr("content") || "",
-    product: extractOgProductMeta($)
+    title: $('meta[property="og:title"]').attr('content') || '',
+    description: $('meta[property="og:description"]').attr('content') || '',
+    image:
+      $('meta[property="og:image"]').attr('content') ||
+      $('meta[property="og:image:secure_url"]').attr('content') ||
+      '',
+    product: extractOgProductMeta($) || {},
   };
 
-  // ==== FIX: define name and brand before using them ====
-  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
-  let brand = cleanup(mergedSD.brand || "");
-  if (!brand && name) brand = inferBrandFromName(name);
-  // =====================================================
+  // 3) Product name and brand fallback
+  const name = cleanup(
+    mergedSD.name || og.title || $('h1').first().text() || ''
+  );
+  let brand = cleanup(mergedSD.brand || '');
+  if (!brand && name) {
+    brand = inferBrandFromName(name);
+  }
 
+  // 4) Description heuristics (prefer structured data; fallback to page sections)
   let description_raw = cleanup(
-    mergedSD.description || (() => {
-      // 1) Prefer obvious description containers
-      const selectors = [
-        '[itemprop="description"]',
-        '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
-        '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
-        // generic safety net: any node with "description/details/overview/copy" in id or class
-        '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
-      ].join(', ');
+    mergedSD.description ||
+      (() => {
+        // Heuristic: look for description panels/paragraphs
+        const selectors = [
+          '[itemprop="description"]',
+          '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
+          '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
+          '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]',
+        ].join(', ');
 
-      let best = "";
-      $(selectors).each((_, el) => {
-        // ADD: skip footer/nav wrappers & legal-like text
-        if (isFooterOrNav($, el)) return;
-        const elText = cleanup($(el).text() || "");
-        if (!elText) return;
-        if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
+        let best = '';
+        $(selectors).each((_, el) => {
+          // Skip footer or navigation
+          if (isFooterOrNav($, el)) return;
+          const elText = cleanup($(el).text() || '');
+          if (!elText) return;
+          if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
 
-        const $el = $(el);
-        // headings + lead + paragraphs feel like a true description
-        const text = [
-          $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
-          $el.find('p').map((i, n) => $(n).text()).get().join(' ')
-        ].join(' ');
-        const cleaned = cleanup(text);
-        if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
-      });
+          const $el = $(el);
+          const text = [
+            $el
+              .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro')
+              .map((i, n) => $(n).text())
+              .get()
+              .join(' '),
+            $el
+              .find('p')
+              .map((i, n) => $(n).text())
+              .get()
+              .join(' '),
+          ].join(' ');
+          const cleaned = cleanup(text);
+          if (cleaned && cleaned.length > cleanup(best).length) {
+            best = cleaned;
+          }
+        });
 
-      // 2) Fallback: longest paragraph anywhere in main content (skip footer/nav)
-      if (!best) {
-        const scope = $('main,#main,.main,#content,.content').first(); // avoid body-wide scan
-        const paras = scope.find('p').map((i, el) => {
-          if (isFooterOrNav($, el)) return "";
-          const t = cleanup($(el).text());
-          return LEGAL_MENU_RE.test(t) ? "" : t;
-        }).get().filter(Boolean);
-
-        best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), "");
-      }
-      return best || "";
-    })() || og.description || $('meta[name="description"]').attr('content') || ""
+        // Fallback: longest paragraph in <main> or <body>
+        if (!best) {
+          const scope = $('main,#main,.main,#content,.content').first();
+          const paras = scope
+            .find('p')
+            .map((i, el) => {
+              if (isFooterOrNav($, el)) return '';
+              const t = cleanup($(el).text() || '');
+              return LEGAL_MENU_RE.test(t) ? '' : t;
+            })
+            .get()
+            .filter(Boolean);
+          best = paras.reduce(
+            (longest, cur) => (cur.length > longest.length ? cur : longest),
+            ''
+          );
+        }
+        return best || '';
+      })() ||
+      og.description ||
+      $('meta[name="description"]').attr('content') ||
+      ''
   );
 
-  const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
-  const manuals = extractManuals($, baseUrl, name, html, opts);
+  // 5) Images extraction (existing helper)
+  const images = extractImages($, mergedSD, og, baseUrl, name, html, opts);
+
+  // 6) Manuals extraction (use our enhanced helper)
+  const manuals = extractManualsPlus($, baseUrl, name, html, opts, mergedSD);
+
+  // 7) Build and return the final normalised object
+  return {
+    name_raw: name,
+    description_raw,
+    specs: mergedSD.specs || {},
+    features_raw: mergedSD.features || [],
+    images,
+    manuals,
+    brand,
+    sku:
+      (mergedSD.sku || og.product.sku || mergedSD.productID || '').toString().trim(),
+  };
+}
+
+module.exports = {
+  extractManuals,
+  extractManualsPlus,
+  extractNormalized,
+};
 
   /* ================== SKU Helpers (ADD-ONLY) ================== */
   function _normSkuVal(v){
@@ -2460,122 +2527,143 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
 }
 
 // --- UPDATED extractManuals: broaden keywords & accept any .pdf links ---
-function extractManuals($) {
-  // Allow generic names like "catalog", "pdf", "datasheet" etc.
-  const allowRe = /manual|ifu|instructions?|user guide|operator|datasheet|catalog|product\s*sheet|pdf/i;
-  const blockRe = /certificate|iso|mdsap|regulation|warranty|ce\s?mark/i;
-  const urls = new Set();
+// extractManuals – find PDF manuals and datasheets in the HTML.
+//  • Accept direct .pdf links (regardless of link text).
+//  • Accept "proxy" links (e.g. /download?foo=…) when the anchor text hints at a manual/datasheet.
+//  • Use a fallback: if no manuals found, accept the first anchor whose text contains "pdf".
+//  • Block obvious certificates/ISO PDFs (e.g. ISO certificates).
+function extractManuals($, abs) {
+  const manuals = [];
+  const seen = new Set();
+  // block certain pdf links that are certificates or compliance docs
+  const blockRe = /(certificate|iso)/i;
+  const hintRe = /manual|ifu|instruction|guide|datasheet|catalog|product\s*sheet|pdf/i;
 
-  // helper to test and add a link
-  const tryAdd = (url, text) => {
-    if (!url || !url.toLowerCase().startsWith('http')) return;
-    if (blockRe.test(url) || blockRe.test(text)) return;
+  $('a').each((i, el) => {
+    let href = $(el).attr('href');
+    if (!href) return;
+    href = href.trim();
+    const text = $(el).text().replace(/\s+/g, ' ').trim().toLowerCase();
+    const fullUrl = abs(href);
 
-    // always accept direct PDF links
-    if (/\.pdf(\?|$)/i.test(url)) {
-      urls.add(url.trim());
+    // Always accept direct pdf links
+    if (/\.pdf(\?|$)/i.test(fullUrl)) {
+      if (!blockRe.test(text) && !blockRe.test(fullUrl) && !seen.has(fullUrl)) {
+        manuals.push(fullUrl);
+        seen.add(fullUrl);
+      }
       return;
     }
 
-    // allow proxies (document/view/download/asset/file) if anchor text hints at a document
-    if (/\/(document|view|download|asset|file)\b/i.test(url) && allowRe.test(text)) {
-      urls.add(url.trim());
-      return;
+    // Accept proxy links when the link text hints at a manual
+    if (hintRe.test(text) && /\/view|\/download|download=|\.pdf\b/i.test(href)) {
+      const resolved = abs(href);
+      if (!blockRe.test(text) && !seen.has(resolved)) {
+        manuals.push(resolved);
+        seen.add(resolved);
+      }
     }
 
-    // final fallback: if anchor text itself contains 'pdf' we consider it a manual
-    if (/\bpdf\b/i.test(text)) {
-      urls.add(url.trim());
+    // Fallback: if no manual found yet but anchor text contains "pdf", accept the link
+    if (manuals.length === 0 && /pdf/i.test(text)) {
+      const resolved = abs(href);
+      if (!seen.has(resolved)) {
+        manuals.push(resolved);
+        seen.add(resolved);
+      }
     }
-  };
-
-  // scan anchor tags
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim().toLowerCase();
-    tryAdd(href, text);
   });
 
-  // also scan script tags for PDF links
-  $('script').each((_, el) => {
-    const content = $(el).html() || '';
-    const matches = content.match(/https?:\/\/[^"' ]+\.pdf/gi);
-    if (matches) matches.forEach(m => tryAdd(m, m));
+  // Search JSON-LD scripts for pdf URLs
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const txt = $(el).contents().text();
+    try {
+      const obj = JSON.parse(txt);
+      const matches = JSON.stringify(obj).match(/https?:\/\/[^"']+\.pdf/gi);
+      if (matches) {
+        matches.forEach(u => {
+          const url = abs(u);
+          if (!blockRe.test(url) && !seen.has(url)) {
+            manuals.push(url);
+            seen.add(url);
+          }
+        });
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
   });
 
-  // return all unique manuals found (limit enforced by caller)
-  return Array.from(urls);
+  return manuals;
 }
 
-// --- UPDATED extractManualsPlus: reduce scoring threshold & fallback on empty ---
-function extractManualsPlus($) {
-  const allowRe = /manual|ifu|instructions?|guide|datasheet|catalog|product\s*sheet|pdf/i;
-  const blockRe = /certificate|iso|mdsap|regulation|warranty|ce\s?mark/i;
+// extractManualsPlus – collect additional PDF manuals (exhaustive).
+//  • Accept any direct .pdf link or obvious proxy (download/view).
+//  • Accept proxies based on anchor text (same hintRe as above).
+//  • Scan JSON-LD for PDFs.
+//  • Fallback: if none found, return all anchor links ending with .pdf.
+function extractManualsPlus($, abs) {
+  const results = [];
+  const seen = new Set();
+  const hintRe = /manual|ifu|instruction|guide|datasheet|catalog|product\s*sheet|pdf/i;
 
-  const found = new Set();
+  // search anchors for .pdf or proxies
+  $('a').each((_, el) => {
+    let href = $(el).attr('href');
+    if (!href) return;
+    href = href.trim();
+    const txt = $(el).text().replace(/\s+/g, ' ').trim().toLowerCase();
+    const fullUrl = abs(href);
 
-  const push = (url, text) => {
-    if (!url || blockRe.test(url) || blockRe.test(text)) return;
-
-    // accept direct PDF links
-    if (/\.pdf(\?|$)/i.test(url)) {
-      found.add(url.trim());
+    // direct pdf link
+    if (/\.pdf(\?|$)/i.test(fullUrl)) {
+      if (!seen.has(fullUrl)) {
+        results.push(fullUrl);
+        seen.add(fullUrl);
+      }
       return;
     }
 
-    // accept known proxy paths regardless of baseScore
-    if (/\/(document|view|download|asset|file)\b/i.test(url)) {
-      found.add(url.trim());
-      return;
+    // proxy: link contains 'download' or 'view' and text hints at manual/datasheet
+    if (/(\/view|\/download|download=)/i.test(href) && hintRe.test(txt)) {
+      const resolved = abs(href);
+      if (!seen.has(resolved)) {
+        results.push(resolved);
+        seen.add(resolved);
+      }
     }
-
-    // accept if anchor text mentions pdf or allowed keywords
-    if (allowRe.test(text)) {
-      found.add(url.trim());
-    }
-  };
-
-  // anchors and onclicks
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const txt = ($(el).text() || '').trim();
-    push(href, txt);
-
-    // also scan onclick handlers for embedded PDF URLs
-    const onclick = $(el).attr('onclick') || '';
-    const m = onclick.match(/https?:\/\/[^'"]+\.pdf/);
-    if (m) push(m[0], onclick);
   });
 
-  // embedded objects/iframes
-  $('object[data], embed[src], iframe[src]').each((_, el) => {
-    const src = $(el).attr('data') || $(el).attr('src') || '';
-    push(src, 'embedded');
-  });
-
-  // JSON blobs (structured data)
-  $('script[type="application/ld+json"], script[type="application/json"]').each((_, el) => {
+  // scan JSON-LD scripts for pdf links
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const txt = $(el).contents().text();
     try {
-      const json = JSON.parse($(el).text());
-      const findPdf = (val) => {
-        if (!val) return;
-        if (typeof val === 'string' && /\.pdf(\?|$)/i.test(val) && !blockRe.test(val)) found.add(val.trim());
-        else if (Array.isArray(val)) val.forEach(findPdf);
-        else if (typeof val === 'object') Object.values(val).forEach(findPdf);
-      };
-      findPdf(json);
-    } catch { /* ignore */ }
+      const obj = JSON.parse(txt);
+      const matches = JSON.stringify(obj).match(/https?:\/\/[^"']+\.pdf/gi);
+      if (matches) {
+        matches.forEach(url => {
+          const resolved = abs(url);
+          if (!seen.has(resolved)) {
+            results.push(resolved);
+            seen.add(resolved);
+          }
+        });
+      }
+    } catch (e) {}
   });
 
-  // Fallback: if none found but PDF anchors exist, include them all
-  if (found.size === 0) {
+  // final fallback: if nothing found, return every anchor ending in '.pdf'
+  if (results.length === 0) {
     $('a[href$=".pdf"]').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      if (!blockRe.test(href)) found.add(href.trim());
+      const url = abs($(el).attr('href'));
+      if (!seen.has(url)) {
+        results.push(url);
+        seen.add(url);
+      }
     });
   }
 
-  return Array.from(found);
+  return results;
 }
 
 function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
