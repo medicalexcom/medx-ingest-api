@@ -1068,6 +1068,87 @@ app.get('/ocr', async (req, res) => {
   }
 });
 
+/* ================== Normalization ================== */
+function extractNormalized(baseUrl, html, opts) {
+  const { diag } = opts || {};
+  const $ = cheerio.load(html);
+
+  // Structured data
+  let jsonld = {};
+  try { jsonld = extractJsonLd($); }
+  catch(e){ diag && diag.warnings.push(`jsonld: ${e.message||e}`); }
+
+  let micro = {};
+  try { micro = extractMicrodataProduct($); }
+  catch(e){ diag && diag.warnings.push(`microdata: ${e.message||e}`); }
+
+  let rdfa = {};
+  try { rdfa = extractRdfaProduct($); }
+  catch(e){ diag && diag.warnings.push(`rdfa: ${e.message||e}`); }
+
+  const mergedSD = mergeProductSD(jsonld, micro, rdfa);
+
+  // OpenGraph (+ product tags)
+  const og = {
+    title: $('meta[property="og:title"]').attr("content") || "",
+    description: $('meta[property="og:description"]').attr("content") || "",
+    image: $('meta[property="og:image"]').attr("content") || $('meta[property="og:image:secure_url"]').attr("content") || "",
+    product: extractOgProductMeta($)
+  };
+
+  // ==== FIX: define name and brand before using them ====
+  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
+  let brand = cleanup(mergedSD.brand || "");
+  if (!brand && name) brand = inferBrandFromName(name);
+  // =====================================================
+
+  let description_raw = cleanup(
+    mergedSD.description || (() => {
+      // 1) Prefer obvious description containers
+      const selectors = [
+        '[itemprop="description"]',
+        '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
+        '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
+        // generic safety net: any node with "description/details/overview/copy" in id or class
+        '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
+      ].join(', ');
+
+      let best = "";
+      $(selectors).each((_, el) => {
+        // ADD: skip footer/nav wrappers & legal-like text
+        if (isFooterOrNav($, el)) return;
+        const elText = cleanup($(el).text() || "");
+        if (!elText) return;
+        if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
+
+        const $el = $(el);
+        // headings + lead + paragraphs feel like a true description
+        const text = [
+          $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
+          $el.find('p').map((i, n) => $(n).text()).get().join(' ')
+        ].join(' ');
+        const cleaned = cleanup(text);
+        if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
+      });
+
+      // 2) Fallback: longest paragraph anywhere in main content (skip footer/nav)
+      if (!best) {
+        const scope = $('main,#main,.main,#content,.content').first(); // avoid body-wide scan
+        const paras = scope.find('p').map((i, el) => {
+          if (isFooterOrNav($, el)) return "";
+          const t = cleanup($(el).text());
+          return LEGAL_MENU_RE.test(t) ? "" : t;
+        }).get().filter(Boolean);
+
+        best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), "");
+      }
+      return best || "";
+    })() || og.description || $('meta[name="description"]').attr('content') || ""
+  );
+
+  const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
+  const manuals = extractManuals($, baseUrl, name, html, opts);
+
   /* ================== SKU Helpers (ADD-ONLY) ================== */
   function _normSkuVal(v){
     return String(v||"").trim().replace(/\s+/g, " ");
@@ -2378,192 +2459,167 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
   return out;
 }
 
-/**
- * Extract PDF manuals and documents from the page and any normalized JSON.
- * This helper consolidates PDF links from anchors on the page and from known fields such as
- * `manuals`, `pdf_docs`, `pdfs`, and `documents` on the normalized product object.
- *
- * @param {CheerioStatic} $ - The loaded cheerio instance.
- * @param {string} baseUrl - The base URL used to resolve relative links.
- * @param {string} productName - The product name used to build link titles.
- * @param {string} html - The raw HTML of the page (unused but kept for API compatibility).
- * @param {object} opts - Additional options; pass `{ norm: mergedSD }` to merge normalized fields.
- * @returns {Array<{url: string, title: string}>} A list of unique manual objects.
- */
-function extractManualsPlus($, baseUrl, productName, html, opts) {
-  const manuals = [];
-  const seen = new Set();
+/* === Manuals === */
+function extractManuals($, baseUrl, name, rawHtml, opts){
+  const urls = new Set();
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
 
-  // helper to normalise and add a PDF
-  function addPdf(href, text) {
-    if (!href || !/\.pdf(\?.*)?$/i.test(href)) return;
-    let url = href;
-    // resolve relative URLs against base
-    try {
-      url = new URL(href, baseUrl).href;
-    } catch (_) {}
-    if (seen.has(url)) return;
-    seen.add(url);
+  const scopeSel = [
+    '.product-details','.product-detail','.product-description','.product__info',
+    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','main','#main','.main','#content','.content',
+    '.downloads','.documents','.resources','.manuals','.product-resources','.product-documents'
+  ].join(', ');
 
-    // derive a friendly title from anchor text or the filename
-    let title = '';
-    if (text && text.trim()) {
-      title = text.trim();
-    } else {
-      const fileName = decodeURIComponent(url.split('/').pop().split('?')[0] || '');
-      title = fileName.replace(/\.pdf$/i, '').replace(/[_\-]+/g, ' ').trim();
-    }
-    if (productName) {
-      title = `${productName} – ${title}`;
-    }
-    manuals.push({ url, title });
+  const scope = $(scopeSel);
+  scope.find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+    const href = String($(el).attr("href")||"");
+    const txt  = cleanup($(el).text()).toLowerCase();
+    const full = abs(baseUrl, href);
+    if (!full) return;
+    const L = (txt + " " + full).toLowerCase();
+    if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+  });
+
+  if (!urls.size) {
+    $('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+      const href=String($(el).attr("href")||"");
+      const txt =cleanup($(el).text()).toLowerCase();
+      const full=abs(baseUrl, href);
+      if (!full) return;
+      const L = (txt + " " + full).toLowerCase();
+      if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+    });
   }
 
-  // 1) Extract from normalized data if provided
-  const norm = (opts && opts.norm) || {};
-  const collectFrom = (v) => {
-    if (!v) return;
-    if (Array.isArray(v)) v.forEach(collectFrom);
-    else if (typeof v === 'string') addPdf(v);
-    else if (typeof v === 'object' && v.url) addPdf(v.url);
-  };
-  collectFrom(norm.manuals);
-  collectFrom(norm.pdf_docs);
-  collectFrom(norm.pdfs);
-  collectFrom(norm.documents);
-
-  // 2) Extract from <a> tags in the HTML
-  $('a[href$=".pdf"]').each((_, el) => {
-    const href = $(el).attr('href');
-    const text = $(el).text();
-    addPdf(href, text);
-  });
-
-  // 3) Extract from embedded <object> or <embed> tags
-  $('object[data$=".pdf"], embed[src$=".pdf"]').each((_, el) => {
-    const src = $(el).attr('data') || $(el).attr('src');
-    addPdf(src);
-  });
-
-  return manuals;
-}
-
-/**
- * Backwards‑compatibility wrapper.  This function now simply calls extractManualsPlus().
- *
- * @param {CheerioStatic} $ 
- * @param {string} baseUrl 
- * @param {string} productName 
- * @param {string} html 
- * @param {object} opts 
- * @returns {Array<{url: string, title: string}>}
- */
-function extractManuals($, baseUrl, productName, html, opts) {
-  return extractManualsPlus($, baseUrl, productName, html, opts);
-}
-
-/**
- * Parse and normalise a product page into a consistent structure.
- *
- * @param {string} baseUrl - The URL used to resolve relative links.
- * @param {string} html - Raw HTML of the product page.
- * @param {object} opts - Options, including a diagnostics collector.
- * @returns {object} Normalised product data.
- */
-function extractNormalized(baseUrl, html, opts) {
-  const { diag } = opts || {};
-  const $ = cheerio.load(html);
-
-  // Structured data
-  let jsonld = {};
-  try { jsonld = extractJsonLd($); }
-  catch(e){ diag && diag.warnings.push(`jsonld: ${e.message||e}`); }
-
-  let micro = {};
-  try { micro = extractMicrodataProduct($); }
-  catch(e){ diag && diag.warnings.push(`microdata: ${e.message||e}`); }
-
-  let rdfa = {};
-  try { rdfa = extractRdfaProduct($); }
-  catch(e){ diag && diag.warnings.push(`rdfa: ${e.message||e}`); }
-
-  const mergedSD = mergeProductSD(jsonld, micro, rdfa);
-
-  // OpenGraph (+ product tags)
-  const og = {
-    title: $('meta[property="og:title"]').attr("content") || "",
-    description: $('meta[property="og:description"]').attr("content") || "",
-    image: $('meta[property="og:image"]').attr("content") || $('meta[property="og:image:secure_url"]').attr("content") || "",
-    product: extractOgProductMeta($)
-  };
-
-  // compute name and brand safely
-  const name = cleanup(mergedSD.name || og.title || $("h1").first().text());
-  let brand = cleanup(mergedSD.brand || "");
-  if (!brand && name) brand = inferBrandFromName(name);
-
-  // rich description extraction
-  let description_raw = cleanup(
-    mergedSD.description || (() => {
-      // 1) Prefer obvious description containers
-      const selectors = [
-        '[itemprop="description"]',
-        '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
-        '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
-        // generic safety net: any node with "description/details/overview/copy" in id or class
-        '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
-      ].join(', ');
-
-      let best = "";
-      $(selectors).each((_, el) => {
-        if (isFooterOrNav($, el)) return;
-        const elText = cleanup($(el).text() || "");
-        if (!elText) return;
-        if (LEGAL_MENU_RE.test(elText) || /^©\s?\d{4}/.test(elText)) return;
-
-        const $el = $(el);
-        const text = [
-          $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
-          $el.find('p').map((i, n) => $(n).text()).get().join(' ')
-        ].join(' ');
-        const cleaned = cleanup(text);
-        if (cleaned && cleaned.length > cleanup(best).length) best = cleaned;
+  $('script').each((_, el)=>{
+    const txt = String($(el).contents().text() || '');
+    if (!/\.pdf\b/i.test(txt)) return;
+    try {
+      const obj = JSON.parse(txt);
+      deepFindPdfsFromJson(obj).forEach(u => {
+        const full = abs(baseUrl, u);
+        if (!full) return;
+        const L = full.toLowerCase();
+        if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
       });
-
-      if (!best) {
-        const scope = $('main,#main,.main,#content,.content').first();
-        const paras = scope.find('p').map((i, el) => {
-          if (isFooterOrNav($, el)) return "";
-          const t = cleanup($(el).text());
-          return LEGAL_MENU_RE.test(t) ? "" : t;
-        }).get().filter(Boolean);
-
-        best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), "");
+    } catch {
+      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
+      let m;
+      while ((m = re.exec(txt))) {
+        const full = abs(baseUrl, m[1]);
+        if (!full) continue;
+        const L = full.toLowerCase();
+        if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
       }
-      return best || "";
-    })() || og.description || $('meta[name="description"]').attr('content') || ""
-  );
+    }
+  });
 
-  // images and manuals
-  const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
-  // Pass mergedSD via the opts so that extractManualsPlus can pick up pdf_docs/manuals/pdf_text
-  const manuals = extractManualsPlus($, baseUrl, name, html, { norm: mergedSD, diag });
+  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(Boolean);
+  const codes = collectCodesFromUrl(baseUrl);
 
-  // Build the final normalised object
-  const norm = {
-    name_raw: name,
-    description_raw,
-    brand,
-    url: baseUrl,
-    images,
-    manuals,
-    specs: mergedSD.specs || {},
-    features_raw: mergedSD.features || [],
-    sku: mergedSD.sku || '',
-    pdf_text: mergedSD.pdf_text || ''
+  const arr = Array.from(urls);
+  arr.sort((a,b)=>{
+    const A = a.toLowerCase(), B = b.toLowerCase();
+    const as = (codes.some(c=>A.includes(c)) ? 2 : 0) + (titleTokens.some(t=>t.length>2 && A.includes(t)) ? 1 : 0);
+    const bs = (codes.some(c=>B.includes(c)) ? 2 : 0) + (titleTokens.some(t=>t.length>2 && B.includes(t)) ? 1 : 0);
+    return bs - as;
+  });
+
+  return arr;
+}
+/* ================== ADD-ONLY: Enhanced manuals harvester ================== */
+function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
+  const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
+  const urls = new Map(); // url -> score
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
+  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
+
+  const push = (node, url, baseScore = 0) => {
+    if (!url) return;
+    const u = decodeHtml(abs(baseUrl, url));
+    if (!u) return;
+    const L = u.toLowerCase();
+    const ctx = scoreByContext($, node, { mainOnly });
+    if (ctx <= -999) return;
+        // If the URL does not look like a PDF or a known proxy (document, view,
+        // download, asset, file) then skip it unless the baseScore is high.
+        // A high baseScore (>= 4) indicates the anchor text strongly suggested
+        // a manual (e.g. "User Manual"), so allow it through for further
+        // processing. This makes it possible to follow manual pages that
+        // ultimately link to PDFs, without polluting results with unrelated
+        // pages. Existing behaviour for direct PDF or known proxy URLs is
+        // preserved.
+        if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) {
+          if (baseScore < 4) return;
+        }
+    if (blockRe.test(L)) return;
+    const cur = urls.get(u) || 0;
+    urls.set(u, Math.max(cur, baseScore + ctx));
   };
 
-  return norm;
+  const scope = findMainProductScope($);
+
+  // 1) Direct anchors with wider attribute coverage
+  scope.find('a').each((_, el) => {
+    const $el = $(el);
+    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
+    const t = ($el.text() || $el.attr('aria-label') || '').toLowerCase();
+    // If the anchor text strongly suggests a manual (matches allowRe), assign a higher
+    // base score (5) so that the link passes the subsequent filtering threshold even
+    // if the URL itself does not look like a PDF or known proxy. Otherwise use the
+    // default score of 4 for direct PDFs or known proxy URLs. This is additive and
+    // preserves existing behaviour for other links.
+    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) {
+      const base = allowRe.test(t) ? 5 : 4;
+      push(el, href, base);
+    }
+  });
+
+  // 2) onclick handlers that open PDFs
+  $('a[onclick], button[onclick]').each((_, el) => {
+    const s = String($(el).attr('onclick') || '');
+    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
+    if (m) push(el, m[0], 3);
+  });
+
+  // 3) PDF in <object>/<embed>/<iframe>
+  $('object[type="application/pdf"], embed[type="application/pdf"], iframe[src*=".pdf"]').each((_, el) => {
+    const $el = $(el);
+    push(el, $el.attr('data') || $el.attr('src') || '', 5);
+  });
+
+  // 4) JSON blobs (documents arrays)
+  $('script').each((_, el) => {
+    const txt = String($(el).contents().text() || '');
+    if (!/\.(pdf)\b/i.test(txt) && !/documents?|downloads?|resources?/i.test(txt)) return;
+    try {
+      const obj = JSON.parse(txt);
+      const arr = deepFindPdfsFromJson(obj, []);
+      for (const u of arr) {
+        const L = String(u||'').toLowerCase();
+        if (allowRe.test(L) && !blockRe.test(L)) push(el, u, 3);
+      }
+    } catch {
+      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
+      let m; while ((m = re.exec(txt))) push(el, m[1], 2);
+    }
+  });
+
+  // 5) Last-resort: global anchors with strong text hints
+  $('a[href*=".pdf"], a[download]').each((_, el) => {
+    const $el = $(el);
+    const href = $el.attr('href') || '';
+    const txt  = ($el.text() || $el.attr('title') || '').toLowerCase();
+    if (allowRe.test(txt)) push(el, href, 2);
+  });
+
+  const ranked = Array.from(urls.entries())
+    .map(([url, score]) => ({ url, score }))
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.url);
+
+  return dedupeManualUrls(ranked);
 }
 
 function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
