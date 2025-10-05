@@ -2461,74 +2461,108 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
 }
 
 /* === Manuals === */
-function extractManuals($, baseUrl, name, rawHtml, opts){
+function extractManualsImproved($, baseUrl, name, rawHtml, opts) {
   const urls = new Set();
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
-  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
+  // Block obvious non-manual documents
+  const blockRe =
+    /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
 
+  // Define the main product scope
   const scopeSel = [
-    '.product-details','.product-detail','.product-description','.product__info',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','main','#main','.main','#content','.content',
-    '.downloads','.documents','.resources','.manuals','.product-resources','.product-documents'
+    '.product-details',
+    '.product-detail',
+    '.product-description',
+    '.product__info',
+    '.tab-content',
+    '.tabs-content',
+    '[role="tabpanel"]',
+    '#tabs',
+    'main',
+    '#main',
+    '.main',
+    '#content',
+    '.content',
+    '.downloads',
+    '.documents',
+    '.resources',
+    '.manuals',
+    '.product-resources',
+    '.product-documents',
   ].join(', ');
 
-  const scope = $(scopeSel);
-  scope.find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr("href")||"");
-    const txt  = cleanup($(el).text()).toLowerCase();
-    const full = abs(baseUrl, href);
-    if (!full) return;
-    const L = (txt + " " + full).toLowerCase();
-    if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
-  });
-
-  if (!urls.size) {
-    $('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-      const href=String($(el).attr("href")||"");
-      const txt =cleanup($(el).text()).toLowerCase();
-      const full=abs(baseUrl, href);
+  // Collect all PDF anchors in the scoped area
+  $(scopeSel)
+    .find('a[href$=".pdf"], a[href*=".pdf"]')
+    .each((_, el) => {
+      const href = String($(el).attr('href') || '');
+      const full = abs(baseUrl, href);
       if (!full) return;
-      const L = (txt + " " + full).toLowerCase();
-      if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+      const L = full.toLowerCase();
+      if (!blockRe.test(L)) {
+        urls.add(full);
+      }
+    });
+
+  // If none found, fall back to global anchors
+  if (!urls.size) {
+    $('a[href$=".pdf"], a[href*=".pdf"]').each((_, el) => {
+      const href = String($(el).attr('href') || '');
+      const full = abs(baseUrl, href);
+      if (!full) return;
+      const L = full.toLowerCase();
+      if (!blockRe.test(L)) {
+        urls.add(full);
+      }
     });
   }
 
-  $('script').each((_, el)=>{
+  // Search in inline JSON and scripts for PDF links
+  $('script').each((_, el) => {
     const txt = String($(el).contents().text() || '');
+    // Quick filter to avoid parsing unrelated scripts
     if (!/\.pdf\b/i.test(txt)) return;
+    // Try JSON parse
     try {
       const obj = JSON.parse(txt);
-      deepFindPdfsFromJson(obj).forEach(u => {
+      deepFindPdfsFromJson(obj).forEach((u) => {
         const full = abs(baseUrl, u);
         if (!full) return;
         const L = full.toLowerCase();
-        if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+        if (!blockRe.test(L)) urls.add(full);
       });
     } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
+      // Fallback to regex scanning
+      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/gi;
       let m;
       while ((m = re.exec(txt))) {
         const full = abs(baseUrl, m[1]);
         if (!full) continue;
         const L = full.toLowerCase();
-        if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+        if (!blockRe.test(L)) urls.add(full);
       }
     }
   });
 
-  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(Boolean);
+  // Rank by whether URL contains product codes or title tokens
+  const titleTokens = (name || '').toLowerCase().split(/\s+/).filter(Boolean);
   const codes = collectCodesFromUrl(baseUrl);
 
   const arr = Array.from(urls);
-  arr.sort((a,b)=>{
-    const A = a.toLowerCase(), B = b.toLowerCase();
-    const as = (codes.some(c=>A.includes(c)) ? 2 : 0) + (titleTokens.some(t=>t.length>2 && A.includes(t)) ? 1 : 0);
-    const bs = (codes.some(c=>B.includes(c)) ? 2 : 0) + (titleTokens.some(t=>t.length>2 && B.includes(t)) ? 1 : 0);
+  arr.sort((a, b) => {
+    const A = a.toLowerCase(),
+      B = b.toLowerCase();
+    const as =
+      (codes.some((c) => A.includes(c)) ? 2 : 0) +
+      (titleTokens.some((t) => t.length > 2 && A.includes(t)) ? 1 : 0);
+    const bs =
+      (codes.some((c) => B.includes(c)) ? 2 : 0) +
+      (titleTokens.some((t) => t.length > 2 && B.includes(t)) ? 1 : 0);
     return bs - as;
   });
 
   return arr;
 }
+
 /* ================== ADD-ONLY: Enhanced manuals harvester ================== */
 function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
