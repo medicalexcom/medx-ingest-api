@@ -2459,167 +2459,114 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
   return out;
 }
 
-/* === Manuals === */
-function extractManuals($, baseUrl, name, rawHtml, opts){
+// --- UPDATED extractManuals: broaden keywords & accept any .pdf links ---
+function extractManuals(dom) {
+  const $ = dom.$;
+  // Allow generic names like "catalog", "pdf", "datasheet" etc.
+  const allowRe = /manual|ifu|instructions?|user guide|operator|datasheet|catalog|product\s*sheet|pdf/i;
+  const blockRe = /certificate|iso|mdsap|regulation|warranty|ce\s?mark/i;
   const urls = new Set();
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
-  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
 
-  const scopeSel = [
-    '.product-details','.product-detail','.product-description','.product__info',
-    '.tab-content','.tabs-content','[role="tabpanel"]','#tabs','main','#main','.main','#content','.content',
-    '.downloads','.documents','.resources','.manuals','.product-resources','.product-documents'
-  ].join(', ');
+  // helper to test and add a link
+  const tryAdd = (url, text) => {
+    if (!url || !url.toLowerCase().startsWith('http')) return;
+    if (blockRe.test(url) || blockRe.test(text)) return;
+    if (/\.pdf(\?|$)/i.test(url)) { // always accept direct PDF links
+      urls.add(url.trim());
+      return;
+    }
+    // allow proxies (document/view/download/asset/file) if anchor text hints at a document
+    if (/\/(document|view|download|asset|file)\b/i.test(url) && allowRe.test(text)) {
+      urls.add(url.trim());
+      return;
+    }
+    // final fallback: if anchor text itself contains 'pdf' we consider it a manual
+    if (/\bpdf\b/i.test(text)) {
+      urls.add(url.trim());
+    }
+  };
 
-  const scope = $(scopeSel);
-  scope.find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-    const href = String($(el).attr("href")||"");
-    const txt  = cleanup($(el).text()).toLowerCase();
-    const full = abs(baseUrl, href);
-    if (!full) return;
-    const L = (txt + " " + full).toLowerCase();
-    if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+  // scan anchor tags
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const text = $(el).text().trim().toLowerCase();
+    tryAdd(href, text);
   });
 
-  if (!urls.size) {
-    $('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-      const href=String($(el).attr("href")||"");
-      const txt =cleanup($(el).text()).toLowerCase();
-      const full=abs(baseUrl, href);
-      if (!full) return;
-      const L = (txt + " " + full).toLowerCase();
-      if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
+  // also scan script tags for PDF links
+  $('script').each((_, el) => {
+    const content = $(el).html() || '';
+    const matches = content.match(/https?:\/\/[^"' ]+\.pdf/gi);
+    if (matches) matches.forEach(m => tryAdd(m, m));
+  });
+
+  // return up to maxManuals (later enforced by caller)
+  return Array.from(urls);
+}
+
+// --- UPDATED extractManualsPlus: reduce scoring threshold & fallback on empty ---
+function extractManualsPlus(dom) {
+  const $ = dom.$;
+  const allowRe = /manual|ifu|instructions?|guide|datasheet|catalog|product\s*sheet|pdf/i;
+  const blockRe = /certificate|iso|mdsap|regulation|warranty|ce\s?mark/i;
+
+  const found = new Set();
+  const push = (url, text) => {
+    if (!url || blockRe.test(url) || blockRe.test(text)) return;
+    if (/\.pdf(\?|$)/i.test(url)) {
+      found.add(url.trim());
+      return;
+    }
+    // accept known proxy paths regardless of baseScore
+    if (/\/(document|view|download|asset|file)\b/i.test(url)) {
+      found.add(url.trim());
+      return;
+    }
+    // accept if anchor text mentions pdf or allowed keywords
+    if (allowRe.test(text)) {
+      found.add(url.trim());
+    }
+  };
+
+  // anchors and onclicks
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const txt = ($(el).text() || '').trim();
+    push(href, txt);
+    const onclick = $(el).attr('onclick') || '';
+    const m = onclick.match(/https?:\/\/[^'"]+\.pdf/);
+    if (m) push(m[0], onclick);
+  });
+
+  // embedded objects/iframes
+  $('object[data], embed[src], iframe[src]').each((_, el) => {
+    const src = $(el).attr('data') || $(el).attr('src') || '';
+    push(src, 'embedded');
+  });
+
+  // JSON blobs
+  $('script[type="application/ld+json"], script[type="application/json"]').each((_, el) => {
+    try {
+      const json = JSON.parse($(el).text());
+      const findPdf = (val) => {
+        if (!val) return;
+        if (typeof val === 'string' && /\.pdf(\?|$)/i.test(val) && !blockRe.test(val)) found.add(val.trim());
+        else if (Array.isArray(val)) val.forEach(findPdf);
+        else if (typeof val === 'object') Object.values(val).forEach(findPdf);
+      };
+      findPdf(json);
+    } catch { /* ignore */ }
+  });
+
+  // Fallback: if none found but pdf_text exists, add all .pdf links
+  if (found.size === 0) {
+    $('a[href$=".pdf"]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      if (!blockRe.test(href)) found.add(href.trim());
     });
   }
 
-  $('script').each((_, el)=>{
-    const txt = String($(el).contents().text() || '');
-    if (!/\.pdf\b/i.test(txt)) return;
-    try {
-      const obj = JSON.parse(txt);
-      deepFindPdfsFromJson(obj).forEach(u => {
-        const full = abs(baseUrl, u);
-        if (!full) return;
-        const L = full.toLowerCase();
-        if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
-      });
-    } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
-      let m;
-      while ((m = re.exec(txt))) {
-        const full = abs(baseUrl, m[1]);
-        if (!full) continue;
-        const L = full.toLowerCase();
-        if (allowRe.test(L) && !blockRe.test(L)) urls.add(full);
-      }
-    }
-  });
-
-  const titleTokens = (name||"").toLowerCase().split(/\s+/).filter(Boolean);
-  const codes = collectCodesFromUrl(baseUrl);
-
-  const arr = Array.from(urls);
-  arr.sort((a,b)=>{
-    const A = a.toLowerCase(), B = b.toLowerCase();
-    const as = (codes.some(c=>A.includes(c)) ? 2 : 0) + (titleTokens.some(t=>t.length>2 && A.includes(t)) ? 1 : 0);
-    const bs = (codes.some(c=>B.includes(c)) ? 2 : 0) + (titleTokens.some(t=>t.length>2 && B.includes(t)) ? 1 : 0);
-    return bs - as;
-  });
-
-  return arr;
-}
-/* ================== ADD-ONLY: Enhanced manuals harvester ================== */
-function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
-  const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
-  const urls = new Map(); // url -> score
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
-  const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-
-  const push = (node, url, baseScore = 0) => {
-    if (!url) return;
-    const u = decodeHtml(abs(baseUrl, url));
-    if (!u) return;
-    const L = u.toLowerCase();
-    const ctx = scoreByContext($, node, { mainOnly });
-    if (ctx <= -999) return;
-        // If the URL does not look like a PDF or a known proxy (document, view,
-        // download, asset, file) then skip it unless the baseScore is high.
-        // A high baseScore (>= 4) indicates the anchor text strongly suggested
-        // a manual (e.g. "User Manual"), so allow it through for further
-        // processing. This makes it possible to follow manual pages that
-        // ultimately link to PDFs, without polluting results with unrelated
-        // pages. Existing behaviour for direct PDF or known proxy URLs is
-        // preserved.
-        if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) {
-          if (baseScore < 4) return;
-        }
-    if (blockRe.test(L)) return;
-    const cur = urls.get(u) || 0;
-    urls.set(u, Math.max(cur, baseScore + ctx));
-  };
-
-  const scope = findMainProductScope($);
-
-  // 1) Direct anchors with wider attribute coverage
-  scope.find('a').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
-    const t = ($el.text() || $el.attr('aria-label') || '').toLowerCase();
-    // If the anchor text strongly suggests a manual (matches allowRe), assign a higher
-    // base score (5) so that the link passes the subsequent filtering threshold even
-    // if the URL itself does not look like a PDF or known proxy. Otherwise use the
-    // default score of 4 for direct PDFs or known proxy URLs. This is additive and
-    // preserves existing behaviour for other links.
-    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) {
-      const base = allowRe.test(t) ? 5 : 4;
-      push(el, href, base);
-    }
-  });
-
-  // 2) onclick handlers that open PDFs
-  $('a[onclick], button[onclick]').each((_, el) => {
-    const s = String($(el).attr('onclick') || '');
-    const m = s.match(/https?:\/\/[^\s"'<>]+?\.pdf(?:\?[^"'<>]*)?/i);
-    if (m) push(el, m[0], 3);
-  });
-
-  // 3) PDF in <object>/<embed>/<iframe>
-  $('object[type="application/pdf"], embed[type="application/pdf"], iframe[src*=".pdf"]').each((_, el) => {
-    const $el = $(el);
-    push(el, $el.attr('data') || $el.attr('src') || '', 5);
-  });
-
-  // 4) JSON blobs (documents arrays)
-  $('script').each((_, el) => {
-    const txt = String($(el).contents().text() || '');
-    if (!/\.(pdf)\b/i.test(txt) && !/documents?|downloads?|resources?/i.test(txt)) return;
-    try {
-      const obj = JSON.parse(txt);
-      const arr = deepFindPdfsFromJson(obj, []);
-      for (const u of arr) {
-        const L = String(u||'').toLowerCase();
-        if (allowRe.test(L) && !blockRe.test(L)) push(el, u, 3);
-      }
-    } catch {
-      const re = /(https?:\/\/[^\s"'<>]+?\.pdf)(?:\?[^"'<>]*)?/ig;
-      let m; while ((m = re.exec(txt))) push(el, m[1], 2);
-    }
-  });
-
-  // 5) Last-resort: global anchors with strong text hints
-  $('a[href*=".pdf"], a[download]').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') || '';
-    const txt  = ($el.text() || $el.attr('title') || '').toLowerCase();
-    if (allowRe.test(txt)) push(el, href, 2);
-  });
-
-  const ranked = Array.from(urls.entries())
-    .map(([url, score]) => ({ url, score }))
-    .sort((a, b) => b.score - a.score)
-    .map(x => x.url);
-
-  return dedupeManualUrls(ranked);
+  return Array.from(found);
 }
 
 function fallbackManualsFromPaths($, baseUrl, name, rawHtml){
