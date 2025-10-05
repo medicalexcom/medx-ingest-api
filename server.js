@@ -22,8 +22,8 @@ const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
 const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
 
 // Hardening & performance knobs
-const DEFAULT_RENDER_TIMEOUT_MS = parseInt(process.env.RENDER_TIMEOUT_MS || "20000", 10);
-const MAX_TOTAL_TIMEOUT_MS      = parseInt(process.env.TOTAL_TIMEOUT_MS  || "30000", 10);
+const DEFAULT_RENDER_TIMEOUT_MS = parseInt(process.env.RENDER_TIMEOUT_MS || "45000", 10);
+const MAX_TOTAL_TIMEOUT_MS      = parseInt(process.env.TOTAL_TIMEOUT_MS  || "60000", 10);
 const MAX_HTML_BYTES            = parseInt(process.env.MAX_HTML_BYTES    || "3000000", 10); // ~3MB safety cap
 const CACHE_TTL_MS              = parseInt(process.env.CACHE_TTL_MS      || "180000", 10); // 3 min
 const CACHE_MAX_ITEMS           = parseInt(process.env.CACHE_MAX_ITEMS   || "100", 10);
@@ -490,7 +490,8 @@ app.get("/ingest", async (req, res) => {
 
       let rendered = "";
       try {
-        const r = await fetchWithRetry(endpoint, { headers });
+        const requestTimeoutMs = req.query.timeout ? parseInt(String(req.query.timeout), 10) : DEFAULT_RENDER_TIMEOUT_MS;
+        const r = await fetchWithRetry(endpoint, { headers, timeoutMs: requestTimeoutMs });
         rendered = r.html;
       } catch (e) {
         const status = e && e.status ? Number(e.status) : 0;
