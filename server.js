@@ -1070,78 +1070,67 @@ app.get('/ocr', async (req, res) => {
 
 /* ================== Normalization ================== */
 /**
- * Main extractor that normalises the page, merging JSON‑LD,
- * microdata, RDFa, and OpenGraph.  It also extracts images
- * and manuals using the updated manual extraction helpers.
+ * High‑level normalisation pipeline.  Merges JSON‑LD, Microdata and RDFa
+ * product entities; derives a name and brand; extracts raw description,
+ * images and manuals; and returns a consolidated object.  The manuals
+ * array is derived from both the page HTML (via extractManuals) and the
+ * structured data fields (via extractManualsPlus).  Only the first
+ * MAX_MANUALS unique manuals are returned.
  *
- * @param {string} baseUrl The page's base URL.
- * @param {string} html Raw HTML content.
- * @param {object} opts Optional options (e.g. { diag: { warnings: [] } }).
- * @returns {object} Normalised product data with name_raw, description_raw, specs, features_raw, images, manuals, brand, etc.
+ * @param {string} baseUrl The page URL.
+ * @param {string} html Raw HTML string.
+ * @param {object} opts Optional diagnostics (e.g. { diag: {warnings: []} }).
+ * @returns {object} The normalised product data.
  */
 function extractNormalized(baseUrl, html, opts) {
   const { diag } = opts || {};
   const $ = cheerio.load(html);
 
-  // 1) Structured data (JSON‑LD, microdata, RDFa)
+  // --- Structured data parsing ---
   let jsonld = {};
-  try {
-    jsonld = extractJsonLd($);
-  } catch (e) {
-    diag && diag.warnings.push(`jsonld: ${e.message || e}`);
-  }
+  try { jsonld = extractJsonLd($); }
+  catch (e) { diag && diag.warnings && diag.warnings.push(`jsonld: ${e.message || e}`); }
 
   let micro = {};
-  try {
-    micro = extractMicrodataProduct($);
-  } catch (e) {
-    diag && diag.warnings.push(`microdata: ${e.message || e}`);
-  }
+  try { micro = extractMicrodataProduct($); }
+  catch (e) { diag && diag.warnings && diag.warnings.push(`microdata: ${e.message || e}`); }
 
   let rdfa = {};
-  try {
-    rdfa = extractRdfaProduct($);
-  } catch (e) {
-    diag && diag.warnings.push(`rdfa: ${e.message || e}`);
-  }
+  try { rdfa = extractRdfaProduct($); }
+  catch (e) { diag && diag.warnings && diag.warnings.push(`rdfa: ${e.message || e}`); }
 
   const mergedSD = mergeProductSD(jsonld, micro, rdfa);
 
-  // 2) OpenGraph extraction (+og:product)
+  // --- OpenGraph fallback ---
   const og = {
     title: $('meta[property="og:title"]').attr('content') || '',
     description: $('meta[property="og:description"]').attr('content') || '',
-    image:
-      $('meta[property="og:image"]').attr('content') ||
-      $('meta[property="og:image:secure_url"]').attr('content') ||
-      '',
-    product: extractOgProductMeta($) || {},
+    image: $('meta[property="og:image"]').attr('content') ||
+           $('meta[property="og:image:secure_url"]').attr('content') || '',
+    product: extractOgProductMeta($)
   };
 
-  // 3) Product name and brand fallback
-  const name = cleanup(
-    mergedSD.name || og.title || $('h1').first().text() || ''
-  );
+  // Derive name and brand
+  const name = cleanup(mergedSD.name || og.title || $('h1').first().text());
   let brand = cleanup(mergedSD.brand || '');
   if (!brand && name) {
     brand = inferBrandFromName(name);
   }
 
-  // 4) Description heuristics (prefer structured data; fallback to page sections)
+  // Build a raw description using multiple heuristics
   let description_raw = cleanup(
     mergedSD.description ||
       (() => {
-        // Heuristic: look for description panels/paragraphs
+        // 1) Targeted containers
         const selectors = [
           '[itemprop="description"]',
           '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
           '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
-          '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]',
+          '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
         ].join(', ');
 
         let best = '';
         $(selectors).each((_, el) => {
-          // Skip footer or navigation
           if (isFooterOrNav($, el)) return;
           const elText = cleanup($(el).text() || '');
           if (!elText) return;
@@ -1149,16 +1138,8 @@ function extractNormalized(baseUrl, html, opts) {
 
           const $el = $(el);
           const text = [
-            $el
-              .find('h1,h2,h3,h4,h5,strong,b,.lead,.intro')
-              .map((i, n) => $(n).text())
-              .get()
-              .join(' '),
-            $el
-              .find('p')
-              .map((i, n) => $(n).text())
-              .get()
-              .join(' '),
+            $el.find('h1,h2,h3,h4,h5,strong,b,.lead,.intro').map((i, n) => $(n).text()).get().join(' '),
+            $el.find('p').map((i, n) => $(n).text()).get().join(' ')
           ].join(' ');
           const cleaned = cleanup(text);
           if (cleaned && cleaned.length > cleanup(best).length) {
@@ -1166,22 +1147,16 @@ function extractNormalized(baseUrl, html, opts) {
           }
         });
 
-        // Fallback: longest paragraph in <main> or <body>
+        // 2) Fallback: longest paragraph in main content
         if (!best) {
           const scope = $('main,#main,.main,#content,.content').first();
-          const paras = scope
-            .find('p')
-            .map((i, el) => {
-              if (isFooterOrNav($, el)) return '';
-              const t = cleanup($(el).text() || '');
-              return LEGAL_MENU_RE.test(t) ? '' : t;
-            })
-            .get()
-            .filter(Boolean);
-          best = paras.reduce(
-            (longest, cur) => (cur.length > longest.length ? cur : longest),
-            ''
-          );
+          const paras = scope.find('p').map((_, el) => {
+            if (isFooterOrNav($, el)) return '';
+            const t = cleanup($(el).text());
+            return LEGAL_MENU_RE.test(t) ? '' : t;
+          }).get().filter(Boolean);
+
+          best = paras.reduce((longest, cur) => (cur.length > longest.length ? cur : longest), '');
         }
         return best || '';
       })() ||
@@ -1190,14 +1165,16 @@ function extractNormalized(baseUrl, html, opts) {
       ''
   );
 
-  // 5) Images extraction (existing helper)
-  const images = extractImages($, mergedSD, og, baseUrl, name, html, opts);
+  // Extract images and manuals
+  const images  = extractImages($, mergedSD, og, baseUrl, name, html, opts);
+  const manualsFromHTML = extractManuals($, baseUrl, name, html, opts);
+  const manualsFromSD   = extractManualsPlus(mergedSD);
 
-  // 6) Manuals extraction (use our enhanced helper)
-  const manuals = extractManualsPlus($, baseUrl, name, html, opts, mergedSD);
+  // Merge and deduplicate manuals, capped at MAX_MANUALS
+  const manuals = Array.from(new Set([...manualsFromHTML, ...manualsFromSD])).slice(0, MAX_MANUALS);
 
-  // 7) Build and return the final normalised object
   return {
+    source: baseUrl,
     name_raw: name,
     description_raw,
     specs: mergedSD.specs || {},
@@ -1205,16 +1182,10 @@ function extractNormalized(baseUrl, html, opts) {
     images,
     manuals,
     brand,
-    sku:
-      (mergedSD.sku || og.product.sku || mergedSD.productID || '').toString().trim(),
+    sku: mergedSD.sku || mergedSD.product_code || '',
+    // you can return other fields here as needed...
   };
 }
-
-module.exports = {
-  extractManuals,
-  extractManualsPlus,
-  extractNormalized,
-};
 
   /* ================== SKU Helpers (ADD-ONLY) ================== */
   function _normSkuVal(v){
