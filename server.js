@@ -536,7 +536,7 @@ app.get("/ingest", async (req, res) => {
       // returned object. This ensures that tab-harvested specs stay separate.
       const siteSpecsSnapshot = { ...(norm.specs || {}) };
       try {
-        norm = await enrichFromManuals(norm, { maxManuals: 3, maxCharsText: 20000 });
+        norm = await enrichFromManuals(norm, { maxManuals: 5, maxCharsText: 49750 });
       } catch (e) {
         const msg = e && e.message ? e.message : String(e);
         diag.warnings.push(`pdf-enrich: ${msg}`);
