@@ -5,7 +5,7 @@ import { kvPairs, pickBySynonyms, parsePdfFromUrl } from './pdfParser.js';
 // Instead, use parsePdfFromUrl from pdfParser.js which handles multiple candidate URLs
 // and adds browser-like headers. Leaving this comment in place for context.
 
-export async function enrichFromManuals(norm, { maxManuals = 3, maxCharsText = 20000 } = {}) {
+export async function enrichFromManuals(norm, { maxManuals = 5, maxCharsText = 49750 } = {}) {
   const manuals = Array.isArray(norm.manuals) ? norm.manuals.slice(0, maxManuals) : [];
   // Always set pdf_text: if there are no manuals, indicate no documents
   if (!manuals.length) {
