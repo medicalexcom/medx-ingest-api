@@ -2460,8 +2460,7 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
 }
 
 // --- UPDATED extractManuals: broaden keywords & accept any .pdf links ---
-function extractManuals(dom) {
-  const $ = dom.$;
+function extractManuals($) {
   // Allow generic names like "catalog", "pdf", "datasheet" etc.
   const allowRe = /manual|ifu|instructions?|user guide|operator|datasheet|catalog|product\s*sheet|pdf/i;
   const blockRe = /certificate|iso|mdsap|regulation|warranty|ce\s?mark/i;
@@ -2471,15 +2470,19 @@ function extractManuals(dom) {
   const tryAdd = (url, text) => {
     if (!url || !url.toLowerCase().startsWith('http')) return;
     if (blockRe.test(url) || blockRe.test(text)) return;
-    if (/\.pdf(\?|$)/i.test(url)) { // always accept direct PDF links
+
+    // always accept direct PDF links
+    if (/\.pdf(\?|$)/i.test(url)) {
       urls.add(url.trim());
       return;
     }
+
     // allow proxies (document/view/download/asset/file) if anchor text hints at a document
     if (/\/(document|view|download|asset|file)\b/i.test(url) && allowRe.test(text)) {
       urls.add(url.trim());
       return;
     }
+
     // final fallback: if anchor text itself contains 'pdf' we consider it a manual
     if (/\bpdf\b/i.test(text)) {
       urls.add(url.trim());
@@ -2500,28 +2503,32 @@ function extractManuals(dom) {
     if (matches) matches.forEach(m => tryAdd(m, m));
   });
 
-  // return up to maxManuals (later enforced by caller)
+  // return all unique manuals found (limit enforced by caller)
   return Array.from(urls);
 }
 
 // --- UPDATED extractManualsPlus: reduce scoring threshold & fallback on empty ---
-function extractManualsPlus(dom) {
-  const $ = dom.$;
+function extractManualsPlus($) {
   const allowRe = /manual|ifu|instructions?|guide|datasheet|catalog|product\s*sheet|pdf/i;
   const blockRe = /certificate|iso|mdsap|regulation|warranty|ce\s?mark/i;
 
   const found = new Set();
+
   const push = (url, text) => {
     if (!url || blockRe.test(url) || blockRe.test(text)) return;
+
+    // accept direct PDF links
     if (/\.pdf(\?|$)/i.test(url)) {
       found.add(url.trim());
       return;
     }
+
     // accept known proxy paths regardless of baseScore
     if (/\/(document|view|download|asset|file)\b/i.test(url)) {
       found.add(url.trim());
       return;
     }
+
     // accept if anchor text mentions pdf or allowed keywords
     if (allowRe.test(text)) {
       found.add(url.trim());
@@ -2533,6 +2540,8 @@ function extractManualsPlus(dom) {
     const href = $(el).attr('href') || '';
     const txt = ($(el).text() || '').trim();
     push(href, txt);
+
+    // also scan onclick handlers for embedded PDF URLs
     const onclick = $(el).attr('onclick') || '';
     const m = onclick.match(/https?:\/\/[^'"]+\.pdf/);
     if (m) push(m[0], onclick);
@@ -2544,7 +2553,7 @@ function extractManualsPlus(dom) {
     push(src, 'embedded');
   });
 
-  // JSON blobs
+  // JSON blobs (structured data)
   $('script[type="application/ld+json"], script[type="application/json"]').each((_, el) => {
     try {
       const json = JSON.parse($(el).text());
@@ -2558,7 +2567,7 @@ function extractManualsPlus(dom) {
     } catch { /* ignore */ }
   });
 
-  // Fallback: if none found but pdf_text exists, add all .pdf links
+  // Fallback: if none found but PDF anchors exist, include them all
   if (found.size === 0) {
     $('a[href$=".pdf"]').each((_, el) => {
       const href = $(el).attr('href') || '';
