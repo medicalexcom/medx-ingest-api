@@ -557,64 +557,58 @@ function pickBySynonyms(pairs, rawText) {
     return hits;
   }
 
-/**
- * Fetch a PDF from a URL and extract structured data.
- *
- * @param {string} url - The full URL to the PDF document.
- * @returns {Promise<{ text: string, pairs: Record<string,string>, hits: Record<string,string> }>} Parsed data
- */
+// pdfParser.js
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+import { kvPairs, pickBySynonyms, normText } from './pdfParser.js'; // adjust imports if needed
+import { ocrScanPdf } from './your_ocr_module.js'; // keep your existing import for OCR fallback
+
 export async function parsePdfFromUrl(url) {
   if (!url || typeof url !== 'string') {
     throw new Error('A valid PDF URL must be provided');
   }
-  // Build a list of candidate URLs to try. Start with the original URL and
-  // optionally a version without the leading www. Some hosts only serve PDFs
-  // from the bare domain. We'll also generate additional candidates by
-  // stripping common "download" or "view" segments from the path. This is
-  // important for sites that proxy PDF downloads through intermediate
-  // endpoints like /download/ or /view/ but ultimately serve the same file
-  // when that segment is removed. Duplicates are automatically deduped by
-  // using a Set. See notes in README for examples (e.g. motifmedical.com).
+
+  // Build a list of candidate URLs by stripping known proxy segments
   const candidateSet = new Set();
   try {
     const u = new URL(url);
     const { hostname } = u;
     candidateSet.add(url);
-    // Remove www. prefix if present
+    // Remove www.
     if (hostname && hostname.startsWith('www.')) {
-      const bare = hostname.replace(/^www\./, '');
-      candidateSet.add(url.replace(`//${hostname}`, `//${bare}`));
+      candidateSet.add(url.replace(`//${hostname}`, `//${hostname.replace(/^www\./, '')}`));
     }
-    // Generate additional candidates by stripping common download/view segments
+    // Include additional proxy segments to strip
     const parts = u.pathname.split('/').filter(Boolean);
-    const skipSegments = new Set(['download', 'view', 'asset', 'file', 'document', 'documents']);
-    // Generate candidates by removing each skip segment individually
+    const skipSegments = new Set([
+      'download', 'view', 'asset', 'file', 'document', 'documents',
+      'content', 'downloadfile', 'docs', 'doc', 'media'
+    ]);
+    // Remove each segment individually
     for (let i = 0; i < parts.length; i++) {
       if (skipSegments.has(parts[i].toLowerCase())) {
         const newParts = parts.filter((_, j) => j !== i);
-        const newPath = '/' + newParts.join('/');
-        candidateSet.add(u.origin + newPath + u.search);
+        candidateSet.add(u.origin + '/' + newParts.join('/') + u.search);
       }
     }
-    // Also generate a candidate with *all* skip segments removed. This handles
-    // cases where multiple proxy segments (e.g. /file/download/file/) appear in the URL.
-    const strippedParts = parts.filter(p => !skipSegments.has(p.toLowerCase()));
-    if (strippedParts.length < parts.length) {
-      const strippedPath = '/' + strippedParts.join('/');
-      candidateSet.add(u.origin + strippedPath + u.search);
+    // Remove all proxy segments at once
+    const stripped = parts.filter(p => !skipSegments.has(p.toLowerCase()));
+    if (stripped.length < parts.length) {
+      candidateSet.add(u.origin + '/' + stripped.join('/') + u.search);
     }
-  } catch (e) {
+  } catch {
     candidateSet.add(url);
   }
   const candidates = Array.from(candidateSet);
 
-  // Use a browser-like User-Agent and Accept header to bypass simplistic server checks.
+  // Base headers
   const headers = {
     'User-Agent': 'Mozilla/5.0 (compatible; medx-ingest-bot/1.0)',
-    Accept: 'application/pdf, application/octet-stream;q=0.9',
+    Accept: 'application/pdf, application/octet-stream;q=0.9'
   };
   let resp;
   let lastErr;
+
+  // Try each candidate URL
   for (const candidate of candidates) {
     try {
       resp = await fetch(candidate, { headers });
@@ -624,16 +618,16 @@ export async function parsePdfFromUrl(url) {
       lastErr = err;
     }
   }
+
+  // If none succeeded, fall back
   if (!resp || !resp.ok) {
-    // Try fallback strategies to fetch the PDF. Some hosts may return
-    // HTTP 403 unless a Referer or more generic User-Agent header is present.
     let fallbackResp = null;
-    // 1) Try again with a Referer header set to the PDF's origin
+    // 1) Add a Referer header
     const referer = (() => {
       try {
         return new URL(url).origin;
       } catch {
-        return "";
+        return '';
       }
     })();
     if (referer) {
@@ -643,15 +637,28 @@ export async function parsePdfFromUrl(url) {
         lastErr = e;
       }
     }
-    // 2) Try again with a different desktop User-Agent and Accept-Language
+    // 2) Use a Firefox UA with Accept-Language
     if (!fallbackResp || !fallbackResp.ok) {
       const altHeaders = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:113.0) Gecko/20100101 Firefox/113.0',
-        'Accept': headers['Accept'],
-        'Accept-Language': 'en-US,en;q=0.8',
+        Accept: headers.Accept,
+        'Accept-Language': 'en-US,en;q=0.8'
       };
       try {
         fallbackResp = await fetch(url, { headers: altHeaders });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    // 3) NEW: Use a Chrome UA with slightly different language preferences
+    if (!fallbackResp || !fallbackResp.ok) {
+      const altHeaders2 = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        Accept: headers.Accept,
+        'Accept-Language': 'en-US,en;q=0.6'
+      };
+      try {
+        fallbackResp = await fetch(url, { headers: altHeaders2 });
       } catch (e) {
         lastErr = e;
       }
@@ -662,150 +669,109 @@ export async function parsePdfFromUrl(url) {
       throw new Error(`Failed to fetch PDF: ${lastErr?.message || 'unknown error'}`);
     }
   }
-      // At this point resp is an HTTP response that may or may not be a PDF.
-      // Check the content-type header. If it's not a PDF, attempt to parse the
-      // body as HTML and look for a PDF link. This allows us to handle
-      // intermediate landing pages that link to a manual PDF rather than
-      // serving the file directly (e.g. "User Manual" pages with a download
-      // button). Only proceed to PDF parsing once we have a confirmed PDF
-      // response.  If no PDF link can be found, throw an error so the caller
-      // can decide how to handle missing manuals.
-      let pdfResp = resp;
-      try {
-        const ct = (resp.headers.get('content-type') || '').toLowerCase();
-        // If the response does not report a PDF content-type, attempt to detect
-        // PDFs via the Content-Disposition filename or the raw file signature.
-        let needHtmlParse = false;
-        if (!/application\/pdf|application\/octet-stream/.test(ct)) {
-          let isPdf = false;
-          const cd = resp.headers.get('content-disposition') || '';
-          if (/\.pdf\b/i.test(cd)) {
-            isPdf = true;
-          } else {
-            try {
-              const arr = await resp.clone().arrayBuffer();
-              const sig = Buffer.from(arr.slice(0, 5)).toString('ascii');
-              if (sig === '%PDF-') {
-                isPdf = true;
-              }
-            } catch {}
-          }
-          if (!isPdf) {
-            needHtmlParse = true;
-          } else {
-            // treat resp as PDF; pdfResp remains resp
-          }
-        }
-        if (needHtmlParse) {
-          // Not a PDF – parse the HTML to find candidate PDF URLs. Use a simple
-          // regex search for links ending in .pdf. Also handle relative URLs by
-          // resolving them against the response URL. If multiple PDFs are
-          // present, try each until one succeeds.
-          const html = await resp.text();
-          const pdfLinks = [];
-          // Absolute URLs in the document
-          // Use a RegExp constructor instead of a regex literal to avoid issues with
-          // escape sequences being interpreted inconsistently across Node versions.
-          // This pattern matches fully qualified PDF URLs (e.g. https://example.com/file.pdf)
-          // and allows optional query parameters.
-          const absRe = new RegExp(
-            "https?:\\\/\\\/[^\"'<>\\s]+?\\.pdf(?:\\?[^\"'<>\\s]*)?",
-            "gi"
-          );
-          let m;
-          while ((m = absRe.exec(html))) {
-            pdfLinks.push(m[0]);
-          }
-          // Relative links in href/src attributes
-          // Similar RegExp constructor for relative href/src attributes linking to PDF files.
-          const relRe = new RegExp(
-            "(?:href|src)\\s*=\\s*[\"']([^\"']+?\\.pdf(?:\\?[^\"']*)?)[\"']",
-            "gi"
-          );
-          while ((m = relRe.exec(html))) {
-            try {
-              const u = new URL(m[1], resp.url).href;
-              pdfLinks.push(u);
-            } catch {}
-          }
-          // Dedupe while preserving order
-          const seenUrls = new Set();
-          const unique = pdfLinks.filter(u => {
-            if (seenUrls.has(u)) return false;
-            seenUrls.add(u);
-            return true;
-          });
-          // Attempt to fetch each candidate PDF
-          let foundPdf = false;
-          for (const link of unique) {
-            try {
-              let candidateResp;
-              // Use the same headers as before to fetch the PDF
-              candidateResp = await fetch(link, { headers });
-              if (!candidateResp || !candidateResp.ok) {
-                // Try with referer header
-                const ref = (() => {
-                  try { return new URL(link).origin; } catch { return ''; }
-                })();
-                if (ref) {
-                  try {
-                    candidateResp = await fetch(link, { headers: { ...headers, Referer: ref } });
-                  } catch {}
-                }
-              }
-              if (candidateResp && candidateResp.ok) {
-                const ct2 = (candidateResp.headers.get('content-type') || '').toLowerCase();
-                let candidateIsPdf = /application\/pdf|application\/octet-stream/.test(ct2);
-                if (!candidateIsPdf) {
-                  const cd2 = candidateResp.headers.get('content-disposition') || '';
-                  if (/\.pdf\b/i.test(cd2)) {
-                    candidateIsPdf = true;
-                  } else {
-                    try {
-                      const b2 = await candidateResp.clone().arrayBuffer();
-                      const sig2 = Buffer.from(b2.slice(0, 5)).toString('ascii');
-                      if (sig2 === '%PDF-') {
-                        candidateIsPdf = true;
-                      }
-                    } catch {}
-                  }
-                }
-                if (candidateIsPdf) {
-                  pdfResp = candidateResp;
-                  foundPdf = true;
-                  break;
-                }
-              }
-            } catch {}
-          }
-          if (!foundPdf) {
-            throw new Error('HTML page did not contain a reachable PDF');
-          }
-        }
-      } catch (err) {
-        // If the HTML parsing or fallback fetching fails, rethrow the error to
-        // indicate that the PDF could not be retrieved. Do not silently
-        // continue with an invalid pdfResp.
-        throw err;
-      }
-      // At this point pdfResp should contain an actual PDF response. Parse it.
-      const buffer = Buffer.from(await pdfResp.arrayBuffer());
-      const data = await pdfParse(buffer);
-      let text = data.text || '';
-      // If no text was extracted, perform an OCR fallback on the scanned PDF.
-      if (!text || !text.trim()) {
+
+  // Validate the response and detect indirect HTML pages
+  let pdfResp = resp;
+  try {
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    let needHtmlParse = false;
+    if (!/application\/pdf|application\/octet-stream/.test(ct)) {
+      let isPdf = false;
+      const cd = resp.headers.get('content-disposition') || '';
+      if (/\.pdf\b/i.test(cd)) {
+        isPdf = true;
+      } else {
         try {
-          text = await ocrScanPdf(buffer);
-        } catch (err) {
-          // ignore OCR errors; keep text as empty string
-        }
+          const arr = await resp.clone().arrayBuffer();
+          const sig = Buffer.from(arr.slice(0, 5)).toString('ascii');
+          if (sig === '%PDF-') isPdf = true;
+        } catch {}
       }
-      const pairs = kvPairs(text);
-      const hits = pickBySynonyms(pairs, text);
-      // Include kv and tables for downstream consumers
-      const kv = pairs;
-      const tables = Array.isArray(data.tables) ? data.tables : [];
-      return { text, pairs, kv, tables, hits };
+      needHtmlParse = !isPdf;
+    }
+    if (needHtmlParse) {
+      const html = await resp.text();
+      const pdfLinks = [];
+      // absolute links
+      const absRe = new RegExp('https?:\\/\\/[^\"\'<>\\s]+?\\.pdf(?:\\?[^\"\'<>\\s]*)?', 'gi');
+      let m;
+      while ((m = absRe.exec(html))) pdfLinks.push(m[0]);
+      // relative links
+      const relRe = new RegExp('(?:href|src)\\s*=\\s*["\']([^"\']+?\\.pdf(?:\\?[^"\']*)?)["\']', 'gi');
+      while ((m = relRe.exec(html))) {
+        try {
+          const u = new URL(m[1], resp.url).href;
+          pdfLinks.push(u);
+        } catch {}
+      }
+      const seen = new Set();
+      let foundPdf = false;
+      for (const link of pdfLinks) {
+        if (seen.has(link)) continue;
+        seen.add(link);
+        try {
+          let candidateResp = await fetch(link, { headers });
+          if (!candidateResp || !candidateResp.ok) {
+            // try referer
+            const ref = (() => {
+              try {
+                return new URL(link).origin;
+              } catch {
+                return '';
+              }
+            })();
+            if (ref) {
+              candidateResp = await fetch(link, {
+                headers: { ...headers, Referer: ref }
+              });
+            }
+          }
+          if (candidateResp && candidateResp.ok) {
+            const ct2 = (candidateResp.headers.get('content-type') || '').toLowerCase();
+            let candidateIsPdf = /application\/pdf|application\/octet-stream/.test(ct2);
+            if (!candidateIsPdf) {
+              const cd2 = candidateResp.headers.get('content-disposition') || '';
+              if (/\.pdf\b/i.test(cd2)) candidateIsPdf = true;
+              else {
+                try {
+                  const arr2 = await candidateResp.clone().arrayBuffer();
+                  const sig2 = Buffer.from(arr2.slice(0, 5)).toString('ascii');
+                  if (sig2 === '%PDF-') candidateIsPdf = true;
+                } catch {}
+              }
+            }
+            if (candidateIsPdf) {
+              pdfResp = candidateResp;
+              foundPdf = true;
+              break;
+            }
+          }
+        } catch {}
+      }
+      if (!foundPdf) {
+        throw new Error('HTML page did not contain a reachable PDF');
+      }
+    }
+  } catch (err) {
+    throw err;
+  }
+
+  // Parse the PDF
+  const buffer = Buffer.from(await pdfResp.arrayBuffer());
+  const data = await pdfParse(buffer);
+  let text = data.text || '';
+  if (!text || !text.trim()) {
+    try {
+      text = await ocrScanPdf(buffer);
+    } catch {
+      // ignore OCR errors
+    }
+  }
+  const pairs = kvPairs(text);
+  const hits = pickBySynonyms(pairs, text);
+  const kv = pairs;
+  const tables = Array.isArray(data.tables) ? data.tables : [];
+  return { text, pairs, kv, tables, hits };
 }
 
 // Extend KEYMAP with additional synonyms for environmental specifications found in manuals.
