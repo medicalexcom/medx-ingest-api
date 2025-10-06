@@ -7,6 +7,7 @@ import { URL } from "node:url";
 import net from "node:net";
 import { parsePdfFromUrl } from './pdfParser.js';
 import { enrichFromManuals } from './pdfEnrichment.js';
+import { harvestTabsFromHtml } from './tabHarvester.js';
 import { createWorker } from 'tesseract.js';
 import { removeNoise } from './mergeRaw.js';
 import setupQueueRoutes from './queueRoutes.js';
