@@ -2461,7 +2461,7 @@ function fallbackImagesFromMain($, baseUrl, og, opts){
 }
 
 /* === Manuals === */
-function extractManualsImproved($, baseUrl, name, rawHtml, opts) {
+function extractManuals($, baseUrl, name, rawHtml, opts) {
   const urls = new Set();
   // Block obvious non-manual documents
   const blockRe =
