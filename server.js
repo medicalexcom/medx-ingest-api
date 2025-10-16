@@ -3015,9 +3015,21 @@ function resolveTabPane($, names){
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
 
-    if (href && href.startsWith('#')) target = $(href)[0];
-    if (!target && controls) target = documentQueryById($, controls);
-    if (!target && dataTarget && dataTarget.startsWith('#')) target = $(dataTarget)[0];
+    if if (href && href.startsWith('#')) {
+  const id = href.slice(1);
+  if (id) {
+    target = documentQueryById($, id);
+  }
+}
+if (!target && controls) {
+  target = documentQueryById($, controls);
+}
+if (!target && dataTarget && dataTarget.startsWith('#')) {
+  const id = dataTarget.slice(1);
+  if (id) {
+
+
+
 
     if (target) { pane = target; return false; }
   });
@@ -3132,17 +3144,21 @@ function resolveAllPanes($, names){
     const controls = $(el).attr('aria-controls') || '';
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
 
-    if (href && href.startsWith('#')) {
-      const t = $(href)[0]; if (t) out.add(t);
-    }
-    if (controls) {
-      const t = documentQueryById($, controls); if (t) out.add(t);
-    }
-    if (dataTarget && dataTarget.startsWith('#')) {
-      const t = $(dataTarget)[0]; if (t) out.add(t);
-    }
-  });
-
+  
+ if (href && href.startsWith('#')) {
+    const id = href.slice(1);
+    const t = id ? documentQueryById($, id) : null;
+    if (t) out.add(t);
+  }
+  if (controls) {
+    const t = documentQueryById($, controls);
+    if (t) out.add(t);
+  }
+  if (dataTarget && dataTarget.startsWith('#')) {
+    const id = dataTarget.slice(1);
+    const t = id ? documentQueryById($, id) : null;
+    if (t) out.add(t);
+  }
   $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
