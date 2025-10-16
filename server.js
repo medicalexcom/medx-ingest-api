@@ -15,7 +15,6 @@ import setupQueueRoutes from './queueRoutes.js';
 // Removed GPT-ready helper: no longer needed
 
 
-
 /* ================== Config via env ================== */
 const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
 const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
