@@ -13,7 +13,7 @@
 //     quantities were ignored and duplicates were not counted.
 
 import { load as cheerioLoad } from 'cheerio';
-import { sanitizeRawHtml, stripTags, norm, extractHtmlAndText } from '.harvesters/common.js';
+import { sanitizeRawHtml, stripTags, norm, extractHtmlAndText } from './harvesters/common.js';
 
 // -----------------------------------------------------------------------------
 // Selector normalisation helpers
