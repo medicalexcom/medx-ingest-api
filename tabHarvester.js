@@ -66,10 +66,6 @@ function loadHtmlSafe(html) {
 // -----------------------------------------------------------------------------
 // Existing helpers
 
-// Normalise whitespace and trim.  Converts any sequence of whitespace
-// characters into a single space and trims leading/trailing spaces.
-const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
-
 /**
  * Extract the raw inner HTML, a sanitised version of that HTML (tags stripped),
  * and the plain text for a cheerio element.  The raw HTML is preserved for
