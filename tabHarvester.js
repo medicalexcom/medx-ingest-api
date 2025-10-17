@@ -67,24 +67,6 @@ function loadHtmlSafe(html) {
 // Existing helpers
 
 /**
- * Extract the raw inner HTML, a sanitised version of that HTML (tags stripped),
- * and the plain text for a cheerio element.  The raw HTML is preserved for
- * downstream consumers that need structural markup (e.g. list extraction),
- * while the sanitised HTML removes all tags to prevent leaking arbitrary
- * markup.  The text property normalises whitespace.
- *
- * @param {CheerioAPI} $ The cheerio instance
- * @param {Cheerio} el The element to extract from
- * @returns {{rawHtml: string, html: string, text: string}}
- */
-function extractHtmlAndText($, el) {
-  const rawHtml = $(el).html() || '';
-  const html = stripTags(rawHtml);
-  const text = norm($(el).text() || '');
-  return { rawHtml, html, text };
-}
-
-/**
  * Deduplicate tab/accordion container nodes.  Given an array of
  * candidate elements, remove duplicates based on tag name and class
  * combination.  This helps avoid redundant processing of the same
