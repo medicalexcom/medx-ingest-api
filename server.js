@@ -2997,56 +2997,72 @@ function documentQueryById($, id){
   catch { return id ? $(`#${id}`)[0] : null; }
 }
 
-function resolveTabPane($, names){
-  const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
+function resolveTabPane($, names) {
+  const nameRe = new RegExp(`\\b(?:${names.map(n => escapeRe(n)).join('|')})\\b`, 'i');
   let pane = null;
 
-  $('a,button,[role="tab"]').each((_, el)=>{
+  $('a,button,[role="tab"]').each((_, el) => {
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
 
+    // get href: if the tab element itself has no href, check its inner anchor
     let href = $(el).attr('href') || '';
     if (!href && $(el).is('[role="tab"]')) {
       const innerA = $(el).find('a[href^="#"]').first().attr('href');
       if (innerA) href = innerA;
     }
-    
-    const controls = $(el).attr('aria-controls') || '';
+
+    const controls   = $(el).attr('aria-controls') || '';
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
-    let target = null;
+    let target       = null;
 
+    // handle href="#some-id"
     if (href && href.startsWith('#')) {
-  const id = href.slice(1);
-  if (id) {
-    target = documentQueryById($, id);
-  }
-}
-if (!target && controls) {
-  target = documentQueryById($, controls);
-}
-if (!target && dataTarget && dataTarget.startsWith('#')) {
-  const id = dataTarget.slice(1);
-  if (id) {
+      const id = href.slice(1);
+      if (id) {
+        target = documentQueryById($, id);
+      }
+    }
 
+    // handle aria-controls (no '#')
+    if (!target && controls) {
+      target = documentQueryById($, controls);
+    }
 
+    // handle data-target="#some-id" or data-tab="#some-id"
+    if (!target && dataTarget && dataTarget.startsWith('#')) {
+      const dtId = dataTarget.slice(1);
+      if (dtId) {
+        target = documentQueryById($, dtId);
+      }
+    }
 
-
+    // if we found a matching pane, stop the loop
     if (target) { pane = target; return false; }
-  };
+  });
 
-  if (!pane){
-    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
+  // fallback: look for headings within panels
+  if (!pane) {
+    $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el) => {
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
-      if (heading && nameRe.test(heading)) { pane = el; return false; }
+      if (heading && nameRe.test(heading)) {
+        pane = el;
+        return false;
+      }
     });
   }
 
-  if (!pane){
-    const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
-    $('[class]').each((_, el)=>{
-      if (classRe.test($(el).attr('class')||'')) { pane = el; return false; }
+  // fallback: look for matching class names
+  if (!pane) {
+    const classRe = new RegExp(names.map(n => escapeRe(n)).join('|'), 'i');
+    $('[class]').each((_, el) => {
+      if (classRe.test($(el).attr('class') || '')) {
+        pane = el;
+        return false;
+      }
     });
   }
+
   return pane;
 }
 
@@ -3132,40 +3148,46 @@ function mergeTabTexts(tabs, order = ['Overview','Technical Specifications','Fea
     .join('\n');
 }
 
-function resolveAllPanes($, names){
-  const out = new Set();
-  const nameRe = new RegExp(`\\b(?:${names.map(n=>escapeRe(n)).join('|')})\\b`, 'i');
+function resolveAllPanes($, names) {
+  const out    = new Set();
+  const nameRe = new RegExp(`\\b(?:${names.map(n => escapeRe(n)).join('|')})\\b`, 'i');
 
-  $('a,button,[role="tab"]').each((_, el)=>{
+  $('a,button,[role="tab"]').each((_, el) => {
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
 
-    const href = $(el).attr('href') || '';
-    const controls = $(el).attr('aria-controls') || '';
+    const href       = $(el).attr('href') || '';
+    const controls   = $(el).attr('aria-controls') || '';
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
 
-  
- if (href && href.startsWith('#')) {
-    const id = href.slice(1);
-    const t = id ? documentQueryById($, id) : null;
-    if (t) out.add(t);
-  }
-  if (controls) {
-    const t = documentQueryById($, controls);
-    if (t) out.add(t);
-  }
-  if (dataTarget && dataTarget.startsWith('#')) {
-    const id = dataTarget.slice(1);
-    const t = id ? documentQueryById($, id) : null;
-    if (t) out.add(t);
-  }
-  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el)=>{
+    // add panel by href="#id"
+    if (href && href.startsWith('#')) {
+      const id = href.slice(1);
+      const t  = id ? documentQueryById($, id) : null;
+      if (t) out.add(t);
+    }
+    // add panel by aria-controls
+    if (controls) {
+      const t = documentQueryById($, controls);
+      if (t) out.add(t);
+    }
+    // add panel by data-target="#id" or data-tab="#id"
+    if (dataTarget && dataTarget.startsWith('#')) {
+      const dtId = dataTarget.slice(1);
+      const t    = dtId ? documentQueryById($, dtId) : null;
+      if (t) out.add(t);
+    }
+  });
+
+  // additional panels discovered by headings
+  $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content, section').each((_, el) => {
     const heading = cleanup($(el).find('h1,h2,h3,h4,h5').first().text());
     if (heading && nameRe.test(heading)) out.add(el);
   });
 
-  const classRe = new RegExp(names.map(n=>escapeRe(n)).join('|'), 'i');
-  $('[class]').each((_, el)=>{
+  // additional panels discovered by matching class names
+  const classRe = new RegExp(names.map(n => escapeRe(n)).join('|'), 'i');
+  $('[class]').each((_, el) => {
     if (classRe.test($(el).attr('class') || '')) out.add(el);
   });
 
