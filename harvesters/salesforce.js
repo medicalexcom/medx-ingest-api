@@ -1,5 +1,5 @@
 import { load as cheerioLoad } from 'cheerio';
-import { sanitizeRawHtml, stripTags, norm } from './common-3.js';
+import { sanitizeRawHtml, stripTags, norm } from './harvesters/common.js';
 
 // -----------------------------------------------------------------------------
 // Local HTML/text extraction helper (mirrors tabHarvester.js implementation)
