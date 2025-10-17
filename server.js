@@ -3239,18 +3239,18 @@ function collectTabCandidates($, baseUrl){
   const out = [];
 
   // 1) ARIA/role-based tabs
-  $('[role="tablist"]').each((_, tl)=>{
-    $(tl).find('[role="tab"]').each((__, tab)=>{
-      const $tab = $(tab);
-      const title = cleanup($tab.attr('aria-label') || $tab.attr('title') || $tab.text());
+  $('[role="tablist"]').each((_, tl) => {
+    $(tl).find('[role="tab"]').each((__, tab) => {
+      const $tab     = $(tab);
+      const title    = cleanup($tab.attr('aria-label') || $tab.attr('title') || $tab.text());
       const controls = $tab.attr('aria-controls') || '';
-      let $panel = controls ? $(documentQueryById($, controls)) : $();
-      if (!$panel || !$panel.length){
+      let   $panel   = controls ? $(documentQueryById($, controls)) : $();
+      if (!$panel || !$panel.length) {
         // try labelledby reverse
         const id = $tab.attr('id');
         if (id) $panel = $(`[role="tabpanel"][aria-labelledby="${id}"]`).first();
       }
-      if ($panel && $panel.length){
+      if ($panel && $panel.length) {
         out.push({
           title,
           type: 'aria',
@@ -3264,11 +3264,16 @@ function collectTabCandidates($, baseUrl){
   });
 
   // 2) Classic .tabs / .tab-pane / .accordion variants
+  // Added selectors for bootstrap accordions and native <details> elements
   const paneSel = [
-    '.tab-pane','.tabs-panel','[role="tabpanel"]','.accordion-content','.accordion-item .content',
-    '.panel','.panel-body','.product-tabs .tab-content > *','.tabs-content > *','section[data-tab]'
+    '.tab-pane','.tabs-panel','[role="tabpanel"]',
+    '.accordion-content','.accordion-item .content',
+    '.accordion-body','.accordion-collapse','.collapse', // NEW
+    'details',                                           // NEW
+    '.panel','.panel-body','.product-tabs .tab-content > *','.tabs-content > *',
+    'section[data-tab]'
   ].join(', ');
-  $(paneSel).each((_, el)=>{
+  $(paneSel).each((_, el) => {
     if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     const $el = $(el);
     // Heading inside panel or previous sibling heading acts as the title
@@ -3278,7 +3283,8 @@ function collectTabCandidates($, baseUrl){
       $el.prev('h1,h2,h3,h4,h5,button,a').first().text(),
       $el.find('h1,h2,h3,h4,h5').first().text(),
       // some themes echo tab name in class (e.g., "tab-description")
-      ($el.attr('class')||'').replace(/[-_]/g,' ').split(/\s+/).find(w => /desc|overview|spec|feature|download/i.test(w)) || ''
+      ($el.attr('class') || '').replace(/[-_]/g,' ').split(/\s+/)
+        .find(w => /desc|overview|spec|feature|download/i.test(w)) || ''
     );
     out.push({
       title,
@@ -3290,10 +3296,51 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
+  // 2b) Additional: capture native <details> accordions (summary/body)
+  $('details').each((_, el) => {
+    const $details = $(el);
+    const title    = cleanup($details.find('summary').first().text());
+    if (!title) return;
+    // Exclude <summary> from content
+    const $body    = $details.children().not('summary');
+    out.push({
+      title,
+      type: 'accordion',
+      el,
+      html: $body.html() || '',
+      text: cleanup($body.text() || ''),
+      href: paneRemoteHref($, el) ? abs(baseUrl, paneRemoteHref($, el)) : ''
+    });
+  });
+
+  // 2c) Additional: capture Bootstrap accordion items (.accordion-item)
+  $('.accordion-item').each((_, item) => {
+    const $item = $(item);
+    // Try to derive a title from various possible header elements
+    const title = firstNonEmpty(
+      $item.attr('data-title'),
+      $item.attr('aria-label'),
+      $item.find('.accordion-header,.accordion-button,summary').first().text(),
+      $item.find('h1,h2,h3,h4,h5').first().text(),
+      ($item.attr('class') || '').replace(/[-_]/g,' ').split(/\s+/)
+        .find(w => /packaging|spec|feature|download|overview/i.test(w)) || ''
+    );
+    const $body = $item.find('.accordion-body,.accordion-collapse,.collapse').first();
+    if (!$body.length) return;
+    out.push({
+      title,
+      type: 'accordion',
+      el: $body[0],
+      html: $body.html() || '',
+      text: cleanup($body.text() || ''),
+      href: paneRemoteHref($, $body[0]) ? abs(baseUrl, paneRemoteHref($, $body[0])) : ''
+    });
+  });
+
   // 3) Fallback: tab triggers (a/button) that point to #id panels
-  $('a[data-target], button[data-target], a[data-tab], button[data-tab], a[href^="#tab"], a[href^="#panel"]').each((_, t)=>{
-    const $t = $(t);
-    const title = cleanup($t.text() || $t.attr('aria-label') || $t.attr('title') || '');
+  $('a[data-target], button[data-target], a[data-tab], button[data-tab], a[href^="#tab"], a[href^="#panel"]').each((_, t) => {
+    const $t     = $(t);
+    const title  = cleanup($t.text() || $t.attr('aria-label') || $t.attr('title') || '');
     const target = $t.attr('data-target') || $t.attr('data-tab') || $t.attr('href') || '';
     if (!target || !target.startsWith('#')) return;
     const $panel = $(target).first();
@@ -3311,7 +3358,7 @@ function collectTabCandidates($, baseUrl){
   // De-dupe by panel element id or index
   const seen = new Set();
   const uniq = [];
-  out.forEach((p, i)=>{
+  out.forEach((p, i) => {
     const id = (p.el && $(p.el).attr('id')) || `idx:${i}`;
     if (seen.has(id)) return;
     seen.add(id);
