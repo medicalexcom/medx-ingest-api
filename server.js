@@ -3032,7 +3032,7 @@ if (!target && dataTarget && dataTarget.startsWith('#')) {
 
 
     if (target) { pane = target; return false; }
-  });
+  };
 
   if (!pane){
     $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el)=>{
