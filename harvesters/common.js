@@ -119,47 +119,39 @@ export function sanitizeRawHtml(rawHtml = '') {
   if (!rawHtml) return '';
   const $ = cheerioLoad(rawHtml);
 
-  // 1️⃣ Remove obvious non-content elements: scripts, media, embeds, form controls, UI scaffolding
+  // 1️⃣ Absolute removals: scripts, form controls, ads, modals, headers/footers
   $([
     'script','style','template','noscript','canvas','svg','iframe','object','embed','video','audio','link','meta',
     'form','input','select','option','textarea','button','label',
-    // UI containers / carousels / sliders
-    '.slick-slider','.carousel','.gallery','.slider','.image-gallery','.js-tab-btn',
-    // Popups, modals, overlays
-    '.modal','.popup','.overlay','.lightbox','.dialog','.backdrop',
-    // Login, signup, contact, forms
-    '.login','.signup','.register','.contact-form','.form-group','.form-control',
-    // Marketing, tracking, analytics, or privacy elements
-    '.cookie','.consent','.privacy','.gdpr','.opt-in','.policy-banner','.marketo','.mktoForm',
-    // Navigation, utility bars, share icons
-    '.compare-products','.breadcrumbs','.pagination','.nav','.navbar','.site-nav','.share','.social','.utility',
-    // Headers / footers / promos
+    '.slick-slider','.carousel','.gallery','.slider','.image-gallery',
+    '.modal','.popup','.overlay','.lightbox','.dialog','.dropdown','.dropdown-menu','.backdrop',
+    '.login','.signup','.register','.contact','.contact-form','.form-group','.form-control','.marketo','.mktoForm',
+    '.cookie','.consent','.privacy','.gdpr','.opt-in','.policy','.policy-banner',
+    '.breadcrumbs','.pagination','.nav','.navbar','.site-nav','.share','.social','.utility','.toolbar',
     '.footer','.header','.banner','.promo','.ad','.advertisement','.ads','.sponsor','.sponsored',
-    // Buttons, icons, toggles
     '.fa-angle-left','.fa-angle-right','.btn','.collapse','.expand','.accordion-button','.toggle','.arrow',
-    // Accessibility / hidden
+    '.sidebar','.search','.searchbar','.announcement','.newsletter',
     '[aria-hidden="true"]','[hidden]','[role="navigation"]','[role="banner"]'
   ].join(',')).remove();
 
-  // 2️⃣ Remove entire divs/sections that *look like* forms, cookies, or nav instructions
-  $('div, section').each((_, el) => {
+  // 2️⃣ Drop sections/divs that look like sales forms, contact, or BD modals
+  $('div, section, article').each((_, el) => {
     const text = ($(el).text() || '').toLowerCase();
     const tooManyTags = $(el).find('*').length > 40 && $(el).text().length < 400;
-    const cookieish = /cookie|privacy|preferences|allow cookies|your preferences|gdpr/.test(text);
-    const formish = /(name\*|zipcode\*|email\*|comments\*|log in|sign up|register|quote|contact sales|submit|first name|last name|address|postal code|country)/.test(text);
-    const navish = /(next|previous|collapse|expand|compare|design your own|download|view alternatives|submit a form|order lookup|thank you for contacting)/.test(text);
-    const modalish = /(thank you for contacting|sales team|order lookup|submit a form|capability:|select subject)/.test(text);
-    if (tooManyTags || cookieish || formish || navish || modalish) $(el).remove();
+    const marketingJunk = /cookie|privacy|your preferences|allow cookies|gdpr|terms|policy/.test(text);
+    const contactish = /(thank you for contacting|contact sales|submit a form|sales team|onsite visiting|customer service|order lookup|bardmedical|1\.844\.8\.bd\.life|capability:|select subject|please select subject first)/.test(text);
+    const navish = /(next|previous|collapse|expand|download|compare|design your own|view all distributors|view alternatives)/.test(text);
+    if (tooManyTags || marketingJunk || contactish || navish) $(el).remove();
   });
 
-  // 3️⃣ Remove event handler attributes (onclick, onmouseover, etc.)
+  // 3️⃣ Remove event handlers and inline JS attributes
   $('[onclick],[onmouseover],[onmouseout],[onchange],[onfocus],[onload]').each((_, el) => {
     Object.keys(el.attribs || {}).forEach(attr => {
       if (attr.startsWith('on')) $(el).removeAttr(attr);
     });
   });
 
-  // 4️⃣ Keep only structural, meaningful tags (convert others to text)
+  // 4️⃣ Convert non-structural tags to text, but preserve content from valid tags
   const ALLOW_TAGS = new Set([
     'article','section','main',
     'h1','h2','h3','h4','h5','h6',
@@ -180,19 +172,20 @@ export function sanitizeRawHtml(rawHtml = '') {
     }
   });
 
-  // 5️⃣ Drop empty or whitespace-only elements
+  // 5️⃣ Remove empty elements and repeated boilerplate
   $('p, li, div, section, span').each((_, el) => {
-    if (!($(el).text() || '').trim()) $(el).remove();
+    const txt = ($(el).text() || '').trim();
+    if (!txt) $(el).remove();
   });
 
-  // 6️⃣ Remove repetitive boilerplate lines and normalize whitespace
+  // 6️⃣ Normalize text & strip repetitive phrases
   let html = $.root().html() || '';
   html = html
     .replace(/\u00A0/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/(Collapse|Expand|Next|Previous|Log in.*|Submit|Download.*|Add to Compare.*|Thank you for contacting.*|Order Lookup.*|Submit a form online.*)/gi, '')
+    .replace(/(Collapse|Expand|Next|Previous|Submit|Download.*|Add to Compare.*|Thank you for contacting.*|Submit a form online.*|Order Lookup.*|Customer Service.*|Sales 1\.844\.8\.BD\.LIFE.*|Onsite Visiting.*|bardmedical\.customerservice.*)/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 
