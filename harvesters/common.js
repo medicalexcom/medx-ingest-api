@@ -119,38 +119,53 @@ export function sanitizeRawHtml(rawHtml = '') {
   if (!rawHtml) return '';
   const $ = cheerioLoad(rawHtml);
 
-  // 1️⃣ Quick nukes — obvious boilerplate or UI components
+  // 1️⃣ Remove obvious non-content elements: scripts, media, embeds, form controls, UI scaffolding
   $([
-    'script', 'style', 'template', 'noscript', 'canvas', 'svg', 'iframe', 'object', 'embed', 'video', 'audio',
-    'form', 'input', 'select', 'textarea', 'button', 'label',
-    '.slick-slider', '.carousel', '.gallery', '.slider', '.image-gallery',
-    '.modal', '.popup', '.overlay', '.lightbox',
-    '.login', '.signup', '.register', '.contact-form', '.form-group', '.form-control',
-    '.cookie', '.consent', '.privacy', '.gdpr',
-    '.compare-products', '.breadcrumbs', '.pagination', '.nav', '.navbar', '.site-nav',
-    '.footer', '.header', '.banner', '.promo', '.ad', '.advertisement', '.sponsor',
-    '.fa-angle-left', '.fa-angle-right', '.btn', '.collapse', '.expand', '.accordion-button',
-    '[aria-hidden="true"]', '[hidden]', '[role="navigation"]'
+    'script','style','template','noscript','canvas','svg','iframe','object','embed','video','audio','link','meta',
+    'form','input','select','option','textarea','button','label',
+    // UI containers / carousels / sliders
+    '.slick-slider','.carousel','.gallery','.slider','.image-gallery','.js-tab-btn',
+    // Popups, modals, overlays
+    '.modal','.popup','.overlay','.lightbox','.dialog','.backdrop',
+    // Login, signup, contact, forms
+    '.login','.signup','.register','.contact-form','.form-group','.form-control',
+    // Marketing, tracking, analytics, or privacy elements
+    '.cookie','.consent','.privacy','.gdpr','.opt-in','.policy-banner','.marketo','.mktoForm',
+    // Navigation, utility bars, share icons
+    '.compare-products','.breadcrumbs','.pagination','.nav','.navbar','.site-nav','.share','.social','.utility',
+    // Headers / footers / promos
+    '.footer','.header','.banner','.promo','.ad','.advertisement','.ads','.sponsor','.sponsored',
+    // Buttons, icons, toggles
+    '.fa-angle-left','.fa-angle-right','.btn','.collapse','.expand','.accordion-button','.toggle','.arrow',
+    // Accessibility / hidden
+    '[aria-hidden="true"]','[hidden]','[role="navigation"]','[role="banner"]'
   ].join(',')).remove();
 
-  // 2️⃣ Drop entire divs/sections if they look like cookie or form text
+  // 2️⃣ Remove entire divs/sections that *look like* forms, cookies, or nav instructions
   $('div, section').each((_, el) => {
     const text = ($(el).text() || '').toLowerCase();
-    const tag = $(el).prop('tagName')?.toLowerCase() || '';
     const tooManyTags = $(el).find('*').length > 40 && $(el).text().length < 400;
-    const cookieish = /cookie|privacy|your preferences|allow cookies|we use cookies/.test(text);
-    const formish = /(name\*|zipcode\*|email\*|comments\*|log in|quote|contact sales|submit)/.test(text);
-    const navish = /(next|previous|collapse|expand|compare|design your own|download|view alternatives)/.test(text);
-    if (tooManyTags || cookieish || formish || navish) $(el).remove();
+    const cookieish = /cookie|privacy|preferences|allow cookies|your preferences|gdpr/.test(text);
+    const formish = /(name\*|zipcode\*|email\*|comments\*|log in|sign up|register|quote|contact sales|submit|first name|last name|address|postal code|country)/.test(text);
+    const navish = /(next|previous|collapse|expand|compare|design your own|download|view alternatives|submit a form|order lookup|thank you for contacting)/.test(text);
+    const modalish = /(thank you for contacting|sales team|order lookup|submit a form|capability:|select subject)/.test(text);
+    if (tooManyTags || cookieish || formish || navish || modalish) $(el).remove();
   });
 
-  // 3️⃣ Keep structural tags only
+  // 3️⃣ Remove event handler attributes (onclick, onmouseover, etc.)
+  $('[onclick],[onmouseover],[onmouseout],[onchange],[onfocus],[onload]').each((_, el) => {
+    Object.keys(el.attribs || {}).forEach(attr => {
+      if (attr.startsWith('on')) $(el).removeAttr(attr);
+    });
+  });
+
+  // 4️⃣ Keep only structural, meaningful tags (convert others to text)
   const ALLOW_TAGS = new Set([
-    'article', 'section', 'main',
+    'article','section','main',
     'h1','h2','h3','h4','h5','h6',
     'p','ul','ol','li',
     'table','thead','tbody','tr','th','td',
-    'blockquote','pre','code','hr','br','a'
+    'blockquote','pre','code','hr','br','a','strong','em','b','i'
   ]);
   $('*').each((_, el) => {
     const tag = el.tagName?.toLowerCase();
@@ -165,21 +180,21 @@ export function sanitizeRawHtml(rawHtml = '') {
     }
   });
 
-  // 4️⃣ Drop empty nodes
+  // 5️⃣ Drop empty or whitespace-only elements
   $('p, li, div, section, span').each((_, el) => {
     if (!($(el).text() || '').trim()) $(el).remove();
   });
 
-  // 5️⃣ Remove repeated lines, normalize whitespace
+  // 6️⃣ Remove repetitive boilerplate lines and normalize whitespace
   let html = $.root().html() || '';
   html = html
     .replace(/\u00A0/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/(Collapse|Expand|Next|Previous|Log in.*|Submit|Download.*|Add to Compare.*)/gi, '')
+    .replace(/(Collapse|Expand|Next|Previous|Log in.*|Submit|Download.*|Add to Compare.*|Thank you for contacting.*|Order Lookup.*|Submit a form online.*)/gi, '')
+    .replace(/\s+/g, ' ')
     .trim();
 
   return html;
 }
-
