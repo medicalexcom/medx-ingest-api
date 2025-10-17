@@ -17,7 +17,6 @@ import {
   stripTags,
   norm,
   sanitizeRawHtml,
-  extractHtmlAndText,
 } from '/harvesters/common.js';
 
 // -----------------------------------------------------------------------------
