@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "type": "module",
   "engines": {
-    "node": ">=18.17"
+    "node": "20.x"
   },
   "scripts": {
     "dev": "NODE_ENV=development node server.js",
-    "postinstall": "npx playwright install",
+    "postinstall": "npx playwright install && npm rebuild canvas",
     "start": "node server.js",
     "test": "node --test"
   },
@@ -34,7 +34,7 @@
     "pdf-parse": "^1.1.1",
     "tesseract.js": "^4.0.2",
     "pdfjs-dist": "^3.10.111",
-    "canvas": "^2.11.0",
+    "canvas": "^2.11.2",
     "playwright": "^1.39.0",
     "googleapis": "^118.0.0"
   }
