@@ -119,38 +119,45 @@ export function sanitizeRawHtml(rawHtml = '') {
   if (!rawHtml) return '';
   const $ = cheerioLoad(rawHtml);
 
-  // 1) Fast removals by tag/role/class and obvious overlays
-  $(NOISE_SELECTOR).remove();
+  // 1️⃣ Quick nukes — obvious boilerplate or UI components
+  $([
+    'script', 'style', 'template', 'noscript', 'canvas', 'svg', 'iframe', 'object', 'embed', 'video', 'audio',
+    'form', 'input', 'select', 'textarea', 'button', 'label',
+    '.slick-slider', '.carousel', '.gallery', '.slider', '.image-gallery',
+    '.modal', '.popup', '.overlay', '.lightbox',
+    '.login', '.signup', '.register', '.contact-form', '.form-group', '.form-control',
+    '.cookie', '.consent', '.privacy', '.gdpr',
+    '.compare-products', '.breadcrumbs', '.pagination', '.nav', '.navbar', '.site-nav',
+    '.footer', '.header', '.banner', '.promo', '.ad', '.advertisement', '.sponsor',
+    '.fa-angle-left', '.fa-angle-right', '.btn', '.collapse', '.expand', '.accordion-button',
+    '[aria-hidden="true"]', '[hidden]', '[role="navigation"]'
+  ].join(',')).remove();
 
-  // 2) Strip comments
-  $('*').contents().each((_, node) => {
-    if (node.type === 'comment') $(node).remove();
+  // 2️⃣ Drop entire divs/sections if they look like cookie or form text
+  $('div, section').each((_, el) => {
+    const text = ($(el).text() || '').toLowerCase();
+    const tag = $(el).prop('tagName')?.toLowerCase() || '';
+    const tooManyTags = $(el).find('*').length > 40 && $(el).text().length < 400;
+    const cookieish = /cookie|privacy|your preferences|allow cookies|we use cookies/.test(text);
+    const formish = /(name\*|zipcode\*|email\*|comments\*|log in|quote|contact sales|submit)/.test(text);
+    const navish = /(next|previous|collapse|expand|compare|design your own|download|view alternatives)/.test(text);
+    if (tooManyTags || cookieish || formish || navish) $(el).remove();
   });
 
-  // 3) Heuristic boilerplate removal
-  removeBoilerplateHeuristics($);
-
-  // 4) Replace <header>/<footer> that survive with their text if they look content-like; else remove
-  $('header, footer').each((_, el) => {
-    const $el = $(el);
-    const ld = linkDensity($, el);
-    const textLen = norm($el.text()).length;
-    if (ld > 0.6 || textLen < 40) {
-      $el.remove();
-    } else {
-      $el.replaceWith(`<p>${norm($el.text())}</p>`);
-    }
-  });
-
-  // 5) Remove non-allowed tags by unwrapping (keep their text)
+  // 3️⃣ Keep structural tags only
+  const ALLOW_TAGS = new Set([
+    'article', 'section', 'main',
+    'h1','h2','h3','h4','h5','h6',
+    'p','ul','ol','li',
+    'table','thead','tbody','tr','th','td',
+    'blockquote','pre','code','hr','br','a'
+  ]);
   $('*').each((_, el) => {
-    const tag = el.tagName && el.tagName.toLowerCase();
-    if (!tag) return;
+    const tag = el.tagName?.toLowerCase();
     if (!ALLOW_TAGS.has(tag)) {
       const $el = $(el);
-      // Convert <img> to its alt text if present; otherwise drop
       if (tag === 'img') {
-        const alt = norm($el.attr('alt') || '');
+        const alt = $el.attr('alt') || '';
         $el.replaceWith(alt ? alt : '');
       } else {
         $el.replaceWith($el.text());
@@ -158,35 +165,21 @@ export function sanitizeRawHtml(rawHtml = '') {
     }
   });
 
-  // 6) Attribute scrubbing
-  scrubAttributes($);
-
-  // 7) Normalise excessive whitespace and empty nodes
-  // - collapse consecutive <br>s
-  $('br + br').remove();
-  // - drop empty paragraphs/list items
-  $('p,li,dt,dd,th,td').each((_, el) => {
-    if (!norm(cheerioLoad.outerHTML ? cheerioLoad.outerHTML(el) : $(el).text())) {
-      if (!norm($(el).text())) $(el).remove();
-    }
+  // 4️⃣ Drop empty nodes
+  $('p, li, div, section, span').each((_, el) => {
+    if (!($(el).text() || '').trim()) $(el).remove();
   });
 
-  // 8) Final tidy HTML string
+  // 5️⃣ Remove repeated lines, normalize whitespace
   let html = $.root().html() || '';
-  html = html.replace(/\u00A0/g, ' ');     // nbsp → space
-  html = html.replace(/[ \t]+\n/g, '\n');  // trim right
-  html = html.replace(/\n{3,}/g, '\n\n');  // collapse blank lines
+  html = html
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/(Collapse|Expand|Next|Previous|Log in.*|Submit|Download.*|Add to Compare.*)/gi, '')
+    .trim();
 
-  return html.trim();
+  return html;
 }
 
-/**
- * Given a Cheerio context and a node, return { rawHtml, html, text } with
- * consistent semantics across the codebase.
- */
-export function extractHtmlAndText($, node) {
-  const rawHtml = outerHtml($, node);
-  const cleanedHtml = sanitizeRawHtml(rawHtml);
-  const text = norm(stripTags(cleanedHtml));
-  return { rawHtml, html: cleanedHtml, text };
-}
