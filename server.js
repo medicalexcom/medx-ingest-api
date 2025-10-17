@@ -3534,6 +3534,21 @@ function extractSpecsFromContainer($, container){
     if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
   });
 
+  // === NEW: handle BD accordion tables (bd-table__container) ===
+  $c.find('.bd-table__container').each((_, cont) => {
+    const $cont = $(cont);
+    const key = cleanup($cont.find('.bd-table__heading').first().text())
+                   .toLowerCase()
+                   .replace(/\s+/g,'_')
+                   .replace(/:$/,'');
+    const val = cleanup($cont.find('.bd-table__description').first().text());
+    // only capture keys/values that are non-empty and reasonably short,
+    // and avoid overwriting keys already set by earlier rules
+    if (key && val && key.length < 80 && val.length < 400 && !out[key]) {
+      out[key] = val;
+    }
+  });
+
   // As a last resort, parse any remaining div/span/p elements within the container for
   // colon- or hyphen-separated key/value pairs.  Some websites place technical
   // specifications in freeform grids or styled rows without using <table>, <dl> or <li>.
