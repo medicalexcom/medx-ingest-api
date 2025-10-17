@@ -15,8 +15,6 @@ export function stripTags(html = '') {
 // Normalize whitespace and trim.
 export const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
 
-import { load as cheerioLoad } from 'cheerio';
-
 /**
  * Extract raw HTML, cleaned HTML and plain text from a DOM element.
  *  - rawHtml: original innerHTML of the element.
@@ -24,7 +22,7 @@ import { load as cheerioLoad } from 'cheerio';
  *          structural tags (e.g. paragraphs, lists).
  *  - text: plain text derived from the cleaned HTML.
  *
- * @param {CheerioStatic} $ - The cheerio instance representing the original document.
+ * @param {CheerioAPI} $ - The cheerio instance representing the original document.
  * @param {CheerioElement} el - The element to extract HTML and text from.
  */
 export function extractHtmlAndText($, el) {
