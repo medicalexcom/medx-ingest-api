@@ -13,6 +13,7 @@
 //     quantities were ignored and duplicates were not counted.
 
 import { load as cheerioLoad } from 'cheerio';
+import { sanitizeRawHtml, stripTags, norm } from './common.js';
 
 // -----------------------------------------------------------------------------
 // Selector normalisation helpers
@@ -51,7 +52,7 @@ function normalizeSelector(selector) {
 function loadHtmlSafe(html) {
   const $ = cheerioLoad(html || '');
   const origFind = $.prototype.find;
-  $.prototype.find = function(selector) {
+  $.prototype.find = function (selector) {
     const safeSelector = typeof selector === 'string' ? normalizeSelector(selector) : selector;
     try {
       return origFind.call(this, safeSelector);
@@ -63,44 +64,7 @@ function loadHtmlSafe(html) {
 }
 
 // -----------------------------------------------------------------------------
-// Existing helpers
-
-// Strip all HTML tags and normalise whitespace.  When sanitising markup
-// we still want to preserve the text content but drop all tags.  This is
-// used to create a cleaned version of tab bodies that no longer leak
-// arbitrary markup.  We keep the original HTML separately for cases
-// (like list parsing) that rely on structural tags such as <li>.
-function stripTags(html = '') {
-  const $ = loadHtmlSafe(html || '');
-  return $.root().text().replace(/\s+/g, ' ').trim();
-}
-
-// Normalise whitespace and trim.  Converts any sequence of whitespace
-// characters into a single space and trims leading/trailing spaces.
-const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
-
-/**
- * Sanitize an HTML fragment by removing non‑content elements.
- * @param {CheerioAPI} $ The cheerio instance
- * @param {Cheerio} el The element to sanitize
- * @returns {string} The cleaned raw HTML
- */
-function sanitizeRawHtml($, el) {
-  const $clone = $(el).clone();
-  // Remove tags that never contain useful product content
-  $clone.find('script, style, link, iframe, noscript, svg, canvas, form, input, button, select, option').remove();
-  // Drop any elements explicitly hidden
-  $clone.find('[hidden], [aria-hidden="true"], [style*="display:none"]').remove();
-  // Strip inline event handlers (e.g. onclick) to avoid embedding JS
-  $clone.find('*').each((_, node) => {
-    Object.keys(node.attribs || {}).forEach(attr => {
-      if (/^on[a-z]+/.test(attr)) {
-        $(node).removeAttr(attr);
-      }
-    });
-  });
-  return $clone.html() || '';
-}
+// Existing helpers (stripTags and norm) now imported from common.js
 
 /**
  * Extract the raw inner HTML, a sanitised version of that HTML (tags stripped),
@@ -115,18 +79,15 @@ function sanitizeRawHtml($, el) {
  */
 function extractHtmlAndText($, el) {
   // Sanitize the raw HTML to remove non-content tags while preserving structural markup.
-  // This helper should be defined above: it clones the element and removes
-  // script/style/link/iframe/noscript/svg/canvas/form/input/button/select/option,
-  // plus hidden elements and inline event handlers.
-  const cleanRawHtml = sanitizeRawHtml($, el);
-
-  // Strip all tags for a plain-text view (uses existing stripTags helper)
-  const html = stripTags(cleanRawHtml);
-
-  // Normalise whitespace from the element’s text content
-  const text = norm($(el).text() || '');
-
-  return { rawHtml: cleanRawHtml, html, text };
+  const rawHtml = $(el).html() || '';
+  const cleanedHtml = sanitizeRawHtml(rawHtml);
+  const htmlText = stripTags(cleanedHtml);
+  const text = norm(htmlText);
+  return {
+    rawHtml: cleanedHtml.trim(),
+    html: cleanedHtml.trim(),
+    text,
+  };
 }
 
 /**
@@ -242,34 +203,36 @@ function extractSalesforceTabs($) {
   $('[role="tablist"]').each((_, tablist) => {
     const titles = {};
     // Find all tab controls within the tablist; they may be anchors or custom elements
-    $(tablist).find('[role="tab"], a').each((__, el) => {
-      const $el = $(el);
-      // Determine the content ID: href (#id) or aria-controls or data-target-selection-name
-      let id = ($el.attr('href') || '').replace(/^#/, '');
-      if (!id) {
-        id = $el.attr('aria-controls') || $el.attr('data-target-selection-name') || '';
-      }
-      if (!id) return;
-      // Derive a title: prefer a title attribute, then nested .title span, then text
-      const title = norm(
-        $el.attr('title') ||
-        $el.find('.title').text() ||
-        $el.text()
-      );
-      if (title) {
-        titles[id] = title;
-      }
-    });
+    $(tablist)
+      .find('[role="tab"], a')
+      .each((__, el) => {
+        const $el = $(el);
+        // Determine the content ID: href (#id) or aria-controls or data-target-selection-name
+        let id = ($el.attr('href') || '').replace(/^#/, '');
+        if (!id) {
+          id = $el.attr('aria-controls') || $el.attr('data-target-selection-name') || '';
+        }
+        if (!id) return;
+        // Derive a title: prefer a title attribute, then nested .title span, then text
+        const title = norm(
+          $el.attr('title') || $el.find('.title').text() || $el.text(),
+        );
+        if (title) {
+          titles[id] = title;
+        }
+      });
     // Locate the nearest tabset container; fall back to document if none found
     const $container = $(tablist).closest('[class*=tabset], .js-tabset').first();
     const panelRoot = $container.length ? $container : $(tablist).parent();
     panelRoot.find('[role="tabpanel"]').each((__, pane) => {
       const id = $(pane).attr('id');
       // Look up the tab title from the navigation; fallback to headings within the pane
-      let title = titles[id] || norm(
-        $(pane).attr('aria-label') ||
-        $(pane).find('h2,h3,h4').first().text()
-      );
+      let title =
+        titles[id] ||
+        norm(
+          $(pane).attr('aria-label') ||
+            $(pane).find('h2,h3,h4').first().text(),
+        );
       // If title is still blank, synthesise a name from the order
       if (!title) {
         const index = out.length + 1;
@@ -316,22 +279,28 @@ function extractTabsFromDoc($) {
     });
     $cont.find('.woocommerce-Tabs-panel').each((_, p) => {
       const id = $(p).attr('id');
-      const title = titles[id] || norm($(p).attr('aria-label') || $(p).find('h2,h3,h4').first().text());
+      const title =
+        titles[id] ||
+        norm($(p).attr('aria-label') || $(p).find('h2,h3,h4').first().text());
       const { rawHtml, html, text } = extractHtmlAndText($, p);
       if (html || text) results.push({ title, html, rawHtml, text, source: 'woocommerce' });
     });
   });
   // 2) Bootstrap/ARIA tabs
   const navTitles = {};
-  $('.nav-tabs, [role="tablist"]').find('a[href]').each((_, a) => {
-    const $a = $(a);
-    const href = $a.attr('href') || '';
-    const id = href.startsWith('#') ? href.slice(1) : href;
-    if (id) navTitles[id] = norm($a.text());
-  });
+  $('.nav-tabs, [role="tablist"]')
+    .find('a[href]')
+    .each((_, a) => {
+      const $a = $(a);
+      const href = $a.attr('href') || '';
+      const id = href.startsWith('#') ? href.slice(1) : href;
+      if (id) navTitles[id] = norm($a.text());
+    });
   $('.tab-content .tab-pane').each((_, pane) => {
     const id = $(pane).attr('id');
-    const title = navTitles[id] || norm($(pane).attr('aria-label') || $(pane).find('h2,h3,h4').first().text());
+    const title =
+      navTitles[id] ||
+      norm($(pane).attr('aria-label') || $(pane).find('h2,h3,h4').first().text());
     const { rawHtml, html, text } = extractHtmlAndText($, pane);
     if (html || text) results.push({ title, html, rawHtml, text, source: 'bootstrap' });
   });
@@ -346,7 +315,7 @@ function extractTabsFromDoc($) {
       const title = norm($(h).text());
       const frag = $(' ');
       let sib = $(h).next();
-      while (sib.length && !/H2|H3|H4/.test((sib.prop('tagName') || ''))) {
+      while (sib.length && !/H2|H3|H4/.test(sib.prop('tagName') || '')) {
         frag.append(sib.clone());
         sib = sib.next();
       }
@@ -360,7 +329,7 @@ function extractTabsFromDoc($) {
     /what'?s?\s+in\s+the\s+box/i,
     /\b(inclusions?|package\s+contents?)\b/i,
     /\b(specs?|specifications?)\b/i,
-    /\bfeatures?\b/i
+    /\bfeatures?\b/i,
   ];
   $('section, div, article').each((_, sec) => {
     const heading = norm($(sec).find('h2,h3,h4').first().text());
@@ -442,8 +411,16 @@ async function maybeFetchRemoteTabs($) {
 function normalizeIncluded(lines = []) {
   const counts = {};
   const NUMWORDS = {
-    one: 1, two: 2, three: 3, four: 4, five: 5,
-    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
   };
   for (const rawLine of lines) {
     if (!rawLine) continue;
@@ -502,7 +479,9 @@ function normalizeIncluded(lines = []) {
 export async function harvestTabsFromHtml(html, baseUrl) {
   const $ = loadHtmlSafe(html);
   // Remove navigation and other common noise elements before extracting tabs.
-  $('body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination').remove();
+  $(
+    'body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination',
+  ).remove();
   // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
   // Fetch remote tab content if any
@@ -527,6 +506,6 @@ export async function harvestTabsFromHtml(html, baseUrl) {
   return {
     tabs,
     includedItems: normIncluded,
-    productsInclude: normProducts
+    productsInclude: normProducts,
   };
 }
