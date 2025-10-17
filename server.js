@@ -12,6 +12,7 @@ import { createWorker } from 'tesseract.js';
 import { removeNoise } from './mergeRaw.js';
 import setupQueueRoutes from './queueRoutes.js';
 
+
 // Removed GPT-ready helper: no longer needed
 
 
@@ -3014,7 +3015,7 @@ function resolveTabPane($, names){
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target = null;
 
-    if if (href && href.startsWith('#')) {
+    if (href && href.startsWith('#')) {
   const id = href.slice(1);
   if (id) {
     target = documentQueryById($, id);
