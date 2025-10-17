@@ -17,6 +17,7 @@ import {
   stripTags,
   norm,
   sanitizeRawHtml,
+  extractHtmlAndText,
 } from './harvesters/common.js';
 
 // -----------------------------------------------------------------------------
@@ -65,33 +66,6 @@ function loadHtmlSafe(html) {
     }
   };
   return $;
-}
-
-// -----------------------------------------------------------------------------
-// Existing helpers (stripTags and norm) now imported from common.js
-
-/**
- * Extract the raw inner HTML, a sanitised version of that HTML (tags stripped),
- * and the plain text for a cheerio element.  The raw HTML is preserved for
- * downstream consumers that need structural markup (e.g. list extraction),
- * while the sanitised HTML removes all tags to prevent leaking arbitrary
- * markup.  The text property normalises whitespace.
- *
- * @param {CheerioAPI} $ The cheerio instance
- * @param {Cheerio} el The element to extract from
- * @returns {{rawHtml: string, html: string, text: string}}
- */
-function extractHtmlAndText($, el) {
-  // Sanitize the raw HTML to remove non-content tags while preserving structural markup.
-  const rawHtml = $(el).html() || '';
-  const cleanedHtml = sanitizeRawHtml(rawHtml);
-  const htmlText = stripTags(cleanedHtml);
-  const text = norm(htmlText);
-  return {
-    rawHtml: cleanedHtml.trim(),
-    html: cleanedHtml.trim(),
-    text,
-  };
 }
 
 /**
