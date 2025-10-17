@@ -60,3 +60,57 @@ export function extractHtmlAndText($, el) {
     text
   };
 }
+
+import { load } from 'cheerio';
+
+export function sanitizeRawHtml(rawHtml = '') {
+  const $ = load(rawHtml, { decodeEntities: true });
+
+  // remove unwanted markup, modals, forms, pop‑ups, etc.
+  const junkSelectors = [
+    'script', 'style', 'link', 'iframe', 'noscript', 'svg', 'canvas',
+    'form', 'input', 'button', 'select', 'option',
+    '[id*="contact"]', '[class*="contact"]', '[id*="sales"]', '[class*="sales"]',
+    '[class*="modal"]', '[class*="popup"]', '[class*="banner"]',
+    '[class*="cookie"]', '[id*="cookie"]',
+    '[id*="captcha"]', '[class*="captcha"]', '[class*="mkto"]',
+    '[role="dialog"]'
+  ];
+  $(junkSelectors.join(',')).remove();
+
+  // remove hidden elements
+  $('[hidden], [aria-hidden="true"], [style*="display:none"], [style*="visibility: hidden"]').remove();
+
+  // strip inline handlers and unwanted attributes
+  $('*').each((_, el) => {
+    const $el = $(el);
+    Object.keys(el.attribs || {}).forEach(attr => {
+      if (/^on[a-z]+/.test(attr) || attr === 'style' || attr.startsWith('data-') || attr.startsWith('aria-')) {
+        $el.removeAttr(attr);
+      }
+    });
+  });
+
+  // remove Prop 65 and generic WARNINGS
+  $('p:contains("Proposition 65"), p:contains("WARNING")').remove();
+
+  // drop empty elements
+  $('*').each((_, el) => {
+    const $el = $(el);
+    if (!$el.text().trim() && !$el.find('img,a,li,table').length) {
+      $el.remove();
+    }
+  });
+
+  // decode escaped unicode and collapse whitespace
+  let cleaned = $.html()
+    .replace(/\\u003C/g, '<')
+    .replace(/\\u003E/g, '>')
+    .replace(/\\u0026/g, '&')
+    .replace(/\\u003D/g, '=')
+    .replace(/\\u0022/g, '"')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return cleaned;
+}
+
