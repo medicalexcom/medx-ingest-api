@@ -17,7 +17,7 @@ import {
   stripTags,
   norm,
   sanitizeRawHtml,
-} from '/harvesters/common.js';
+} from './harvesters/common.js';
 
 // -----------------------------------------------------------------------------
 // Selector normalisation helpers
