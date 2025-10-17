@@ -19,7 +19,7 @@
 //     extracted `.html` and `.text` fields are production-clean.
 
 import { load as cheerioLoad } from 'cheerio';
-import { sanitizeRawHtml, stripTags, norm } from './common.js';
+import { sanitizeRawHtml, stripTags, norm } from './harvesters/common.js';
 
 // -----------------------------------------------------------------------------
 // Selector normalisation helpers
