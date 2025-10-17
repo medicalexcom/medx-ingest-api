@@ -1,19 +1,5 @@
 import { load as cheerioLoad } from 'cheerio';
-import { sanitizeRawHtml, stripTags, norm } from './common.js';
-
-// -----------------------------------------------------------------------------
-// Local HTML/text extraction helper (mirrors tabHarvester.js implementation)
-// -----------------------------------------------------------------------------
-function extractHtmlAndText($, el) {
-  const rawHtml = $(el).html() || '';
-  // Clean the fragment using the shared sanitizer to remove UI clutter,
-  // cookie banners, and markup noise while preserving meaningful text.
-  const cleaned = sanitizeRawHtml(rawHtml);
-  // Derive text from the cleaned HTML to ensure uniform structure and
-  // readability for later parsing and feature/spec extraction.
-  const text = norm(stripTags(cleaned));
-  return { rawHtml, html: cleaned, text };
-}
+import { norm, extractHtmlAndText } from './common.js';
 
 /**
  * Enhanced Salesforce tab harvester.
