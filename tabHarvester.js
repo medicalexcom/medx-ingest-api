@@ -80,6 +80,29 @@ function stripTags(html = '') {
 const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
 
 /**
+ * Sanitize an HTML fragment by removing non‑content elements.
+ * @param {CheerioAPI} $ The cheerio instance
+ * @param {Cheerio} el The element to sanitize
+ * @returns {string} The cleaned raw HTML
+ */
+function sanitizeRawHtml($, el) {
+  const $clone = $(el).clone();
+  // Remove tags that never contain useful product content
+  $clone.find('script, style, link, iframe, noscript, svg, canvas, form, input, button, select, option').remove();
+  // Drop any elements explicitly hidden
+  $clone.find('[hidden], [aria-hidden="true"], [style*="display:none"]').remove();
+  // Strip inline event handlers (e.g. onclick) to avoid embedding JS
+  $clone.find('*').each((_, node) => {
+    Object.keys(node.attribs || {}).forEach(attr => {
+      if (/^on[a-z]+/.test(attr)) {
+        $(node).removeAttr(attr);
+      }
+    });
+  });
+  return $clone.html() || '';
+}
+
+/**
  * Extract the raw inner HTML, a sanitised version of that HTML (tags stripped),
  * and the plain text for a cheerio element.  The raw HTML is preserved for
  * downstream consumers that need structural markup (e.g. list extraction),
@@ -91,17 +114,18 @@ const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
  * @returns {{rawHtml: string, html: string, text: string}}
  */
 function extractHtmlAndText($, el) {
-  // Clone the node so we don’t mutate the original DOM
-  const $clone = $(el).clone();
-  // Remove tags that don’t contribute to the product description
-  $clone.find('script, style, link, iframe, noscript').remove();
-  // Serialise the cleaned HTML
-  const cleanRawHtml = $clone.html() || '';
+  // Sanitize the raw HTML to remove non-content tags while preserving structural markup.
+  // This helper should be defined above: it clones the element and removes
+  // script/style/link/iframe/noscript/svg/canvas/form/input/button/select/option,
+  // plus hidden elements and inline event handlers.
+  const cleanRawHtml = sanitizeRawHtml($, el);
 
-  // Existing sanitisation: strip all tags for a plain-text HTML
+  // Strip all tags for a plain-text view (uses existing stripTags helper)
   const html = stripTags(cleanRawHtml);
+
   // Normalise whitespace from the element’s text content
   const text = norm($(el).text() || '');
+
   return { rawHtml: cleanRawHtml, html, text };
 }
 
