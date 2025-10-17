@@ -91,10 +91,18 @@ const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
  * @returns {{rawHtml: string, html: string, text: string}}
  */
 function extractHtmlAndText($, el) {
-  const rawHtml = $(el).html() || '';
-  const html = stripTags(rawHtml);
+  // Clone the node so we don’t mutate the original DOM
+  const $clone = $(el).clone();
+  // Remove tags that don’t contribute to the product description
+  $clone.find('script, style, link, iframe, noscript').remove();
+  // Serialise the cleaned HTML
+  const cleanRawHtml = $clone.html() || '';
+
+  // Existing sanitisation: strip all tags for a plain-text HTML
+  const html = stripTags(cleanRawHtml);
+  // Normalise whitespace from the element’s text content
   const text = norm($(el).text() || '');
-  return { rawHtml, html, text };
+  return { rawHtml: cleanRawHtml, html, text };
 }
 
 /**
