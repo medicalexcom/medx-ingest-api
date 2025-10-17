@@ -37,7 +37,7 @@ const NOISE_SELECTOR = [
   '.cookie','.cookies','.consent','.gdpr','.newsletter','.subscribe','.subscription',
   // breadcrumbs/pagination (boilerplate)
   '.breadcrumb','.breadcrumbs','.pagination',
-].join(','));
+].join(',');
 
 /** Class/ID regexes for drop decisions. */
 const KILL_CLASS_ID_RX = new RegExp([
