@@ -66,16 +66,6 @@ function loadHtmlSafe(html) {
 // -----------------------------------------------------------------------------
 // Existing helpers
 
-// Strip all HTML tags and normalise whitespace.  When sanitising markup
-// we still want to preserve the text content but drop all tags.  This is
-// used to create a cleaned version of tab bodies that no longer leak
-// arbitrary markup.  We keep the original HTML separately for cases
-// (like list parsing) that rely on structural tags such as <li>.
-function stripTags(html = '') {
-  const $ = loadHtmlSafe(html || '');
-  return $.root().text().replace(/\s+/g, ' ').trim();
-}
-
 // Normalise whitespace and trim.  Converts any sequence of whitespace
 // characters into a single space and trims leading/trailing spaces.
 const norm = (t = '') => String(t).replace(/\s+/g, ' ').trim();
