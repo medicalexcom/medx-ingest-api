@@ -3263,15 +3263,15 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
-  // 2) Classic .tabs / .tab-pane / .accordion variants
-  // Added selectors for bootstrap accordions and native <details> elements
+  // 2) Classic .tabs / .tab-pane / .accordion variants and AEM tabs
+  // Added AEM .cmp-tabs__tabpanel and expanded accordion selectors
   const paneSel = [
-    '.tab-pane','.tabs-panel','[role="tabpanel"]',
+    '.tab-pane','.tabs-panel','[role="tabpanel"]','.cmp-tabs__tabpanel', // NEW for AEM tabs
     '.accordion-content','.accordion-item .content',
-    '.accordion-body','.accordion-collapse','.collapse', // NEW
-    'details',                                           // NEW
-    '.panel','.panel-body','.product-tabs .tab-content > *','.tabs-content > *',
-    'section[data-tab]'
+    '.accordion-body','.accordion-collapse','.collapse', // capture bootstrap accordions
+    'details',                                            // native HTML accordions
+    '.panel','.panel-body','.product-tabs .tab-content > *',
+    '.tabs-content > *','section[data-tab]'
   ].join(', ');
   $(paneSel).each((_, el) => {
     if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
@@ -3283,7 +3283,9 @@ function collectTabCandidates($, baseUrl){
       $el.prev('h1,h2,h3,h4,h5,button,a').first().text(),
       $el.find('h1,h2,h3,h4,h5').first().text(),
       // some themes echo tab name in class (e.g., "tab-description")
-      ($el.attr('class') || '').replace(/[-_]/g,' ').split(/\s+/)
+      ($el.attr('class') || '')
+        .replace(/[-_]/g,' ')
+        .split(/\s+/)
         .find(w => /desc|overview|spec|feature|download/i.test(w)) || ''
     );
     out.push({
@@ -3296,12 +3298,11 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
-  // 2b) Additional: capture native <details> accordions (summary/body)
+  // 2b) Additional: capture native <details> accordions
   $('details').each((_, el) => {
     const $details = $(el);
     const title    = cleanup($details.find('summary').first().text());
     if (!title) return;
-    // Exclude <summary> from content
     const $body    = $details.children().not('summary');
     out.push({
       title,
@@ -3313,17 +3314,20 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
-  // 2c) Additional: capture Bootstrap accordion items (.accordion-item)
+  // 2c) Additional: capture Bootstrap/BD accordion items (.accordion-item)
   $('.accordion-item').each((_, item) => {
     const $item = $(item);
-    // Try to derive a title from various possible header elements
+    // Try to derive a title from header/button elements, including BD-specific title class
     const title = firstNonEmpty(
       $item.attr('data-title'),
       $item.attr('aria-label'),
-      $item.find('.accordion-header,.accordion-button,summary').first().text(),
+      $item.find('.accordion-header,.accordion-button,summary,.cmp-accordion__title')
+           .first().text(),
       $item.find('h1,h2,h3,h4,h5').first().text(),
-      ($item.attr('class') || '').replace(/[-_]/g,' ').split(/\s+/)
-        .find(w => /packaging|spec|feature|download|overview/i.test(w)) || ''
+      ($item.attr('class') || '')
+        .replace(/[-_]/g,' ')
+        .split(/\s+/)
+        .find(w => /packaging|gtin|spec|feature|download|overview/i.test(w)) || ''
     );
     const $body = $item.find('.accordion-body,.accordion-collapse,.collapse').first();
     if (!$body.length) return;
