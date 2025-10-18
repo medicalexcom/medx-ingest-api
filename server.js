@@ -121,32 +121,6 @@ function abs(base, link){
   } catch(e){ return link; }
 }
 
-// Add near the top of server.js
-function shouldAutoBrowse(norm) {
-  const desc = (norm.description_raw || '').toLowerCase();
-
-  // Detect common bot‑check phrases
-  const triggers = [
-    'verify you are human',
-    'checking your browser',
-    'robot check',
-    'captcha',
-    'cloudflare'
-  ];
-  if (triggers.some((t) => desc.includes(t))) {
-    return true;
-  }
-
-  // If no features/specs and description is tiny, treat as failure
-  const hasFeatures = Array.isArray(norm.features_raw) && norm.features_raw.length > 0;
-  const hasSpecs = norm.specs && Object.keys(norm.specs).length > 0;
-  if (!hasFeatures && !hasSpecs && desc.length < 30) {
-    return true;
-  }
-
-  return false;
-}
-
 // Simple OCR helper using tesseract.js
 async function ocrImageFromUrl(imageUrl) {
   const worker = await createWorker();
@@ -789,21 +763,7 @@ app.get("/ingest", async (req, res) => {
     // accordions, and lazy-loaded elements.  Results are merged into `norm`
     // using the mergeRaw helper.  Dynamic import is used here to avoid
     // incurring Playwright overhead unless needed.
-
-
-    // Compute doBrowse from query string
-    let doBrowse = String(req.query.browse || '').toLowerCase() === 'true';
-    
-    // After you have populated `norm` with the static scrape, add this block:
-    if (!doBrowse && shouldAutoBrowse(norm)) {
-      // Trigger headless scraping automatically
-      doBrowse = true;
-      // Mark the payload so downstream consumers know why
-      norm.error_type = 'captcha_blocked';
-      norm.needs_review = true;
-    }
-    
-    // Then keep the existing Playwright invocation, but with doBrowse potentially overridden:
+    const doBrowse = String(req.query.browse || '').toLowerCase() === 'true';
     if (doBrowse) {
       try {
         const { browseProduct } = await import('./browserCrawler.js');
@@ -818,7 +778,6 @@ app.get("/ingest", async (req, res) => {
         diag.warnings.push(`browse-exception: ${e && e.message ? e.message : String(e)}`);
       }
     }
-
 
     if (wantMd) {
       const $ = cheerio.load(html);
