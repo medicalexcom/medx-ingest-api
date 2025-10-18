@@ -17,12 +17,7 @@
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import path from 'path';
-
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-
-chromium.use(StealthPlugin());
-
+import { chromium } from 'playwright';
 import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -685,19 +680,13 @@ export async function browseProduct(url, opts = {}) {
 
   let browser;
   try {
-    browser = await chromium.launch({
-      headless,
-      args: ['--disable-blink-features=AutomationControlled']
-    });
+    browser = await chromium.launch({ headless });
   } catch (err) {
     const msg = String(err || '');
     if (/Executable\s+doesn\'t\s+exist|failed\s+to\s+launch/i.test(msg)) {
       try {
         execSync('npx playwright install chromium', { stdio: 'ignore' });
-        browser = await chromium.launch({
-          headless,
-          args: ['--disable-blink-features=AutomationControlled']
-        });
+        browser = await chromium.launch({ headless });
       } catch (installErr) {
         return { ok: false, error: String(installErr) };
       }
