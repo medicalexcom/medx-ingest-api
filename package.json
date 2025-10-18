@@ -36,8 +36,8 @@
     "pdfjs-dist": "^3.10.111",
     "canvas": "^2.11.2",
     "playwright": "^1.39.0",
-    "playwright-extra": "^2.4.7",
-    "puppeteer-extra-plugin-stealth": "^3.3.0",
+    "playwright-extra": "^2.4.0",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "googleapis": "^118.0.0"
   }
 }
