@@ -1107,9 +1107,9 @@ function extractNormalized(baseUrl, html, opts) {
         '[itemprop="description"]',
         '.product-description, .long-description, .product-details, .product-detail, .description, .details, .copy, .product__description, .overview, .product-overview, .intro, .summary',
         '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
-        // generic safety net: any node with "description/details/overview/copy" in id or class
-        '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
-        // SiteOrigin Page Builder / TinyMCE widgets frequently used as the visible product intro
+        // generic safety net…
+        '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]',
+        // SiteOrigin/TinyMCE product intro blocks
         '.product-info, main .siteorigin-widget-tinymce, main .textwidget, .so-widget-sow-editor, .widget_sow_editor'
       ].join(', ');
 
@@ -4286,8 +4286,8 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
           });
           if (!panel || !titles[idx]) return;
           const title = titles[idx] || '';
-          const ph = norm(panel.html() || '');
-          const pt = norm(panel.text() || '');
+          const ph = String(panel.html() || '');
+          const pt = cleanup(panel.text() || '');
           if (!(ph || pt)) return;
           try {
             const $p = cheerio.load(ph || '');
