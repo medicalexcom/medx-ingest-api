@@ -3599,22 +3599,18 @@ function extractFeaturesFromContainer($, container){
     items.push(t);
   };
 
+  // Existing feature sources: list items and headings
   $c.find('li').each((_, li)=> pushIfGood($(li).text()));
   $c.find('h3,h4,h5').each((_, h)=> pushIfGood($(h).text()));
 
-  // Capture bold headings within paragraphs as potential features.
-  // Some pages (e.g. Unimom) structure their “What’s in the Box” or
-  // feature lists as alternating <p><b>Feature</b></p> and <p>– description</p>.
-  // Extract the bold text as a feature name.
+  // Capture bold headings within paragraphs
   $c.find('p').each((_, el) => {
     const $p = $(el);
     const btxt = cleanup($p.find('b,strong').first().text());
     if (btxt) pushIfGood(btxt);
   });
 
-  // Capture simple div-based lists used by some Shopify/GemPages sites.  When
-  // a panel contains a .text-edit element with multiple <div> children, each
-  // child div often represents a single item (e.g. “1 Minuet breast pump”).
+  // Capture simple div-based lists used by some Shopify/GemPages sites
   $c.find('.text-edit').each((_, el) => {
     const $parent = $(el);
     const divs = $parent.children('div');
@@ -3626,16 +3622,73 @@ function extractFeaturesFromContainer($, container){
     }
   });
 
+  /* ------------------------------------------------------------------
+   * New logic: harvest heading/description pairs from “feature” sections
+   *
+   * We only do this if the <details> summary or tab heading contains
+   * keywords like “feature”, “benefit” or “function”, and NOT “technical”
+   * or “spec”.  This avoids pulling specification values into features.
+   */
+  try {
+    // Find the nearest <details> wrapper and read its <summary> text
+    let heading = "";
+    const details = $c.closest('details');
+    if (details && details.length) {
+      heading = cleanup(details.find('summary').first().text());
+    }
+    const headingLower = (heading || "").toLowerCase();
+    const isFeatureSection =
+      /(feature|benefit|function)/.test(headingLower) &&
+      !/(technical|spec)/.test(headingLower);
+
+    if (isFeatureSection) {
+      $c.find('label').each((_, el) => {
+        const $lbl = $(el);
+        const lblTxt = cleanup($lbl.text());
+        // Push the label text itself if it looks like a real feature title
+        if (
+          lblTxt &&
+          /[A-Za-z]/.test(lblTxt) &&
+          lblTxt.length >= 3 &&
+          lblTxt.length <= 80 &&
+          !/(capacity|graduation|size|footprint|warranty|weight|platform|height|width|depth|dial|dimension|spec)/i.test(lblTxt)
+        ) {
+          pushIfGood(lblTxt);
+        }
+        // Look for the next <p> sibling and treat it as a description
+        const descP = $lbl.next('p');
+        if (descP && descP.length) {
+          const desc = cleanup(descP.text());
+          const hasLetters = /[A-Za-z]/.test(desc);
+          const words = desc.split(/\s+/).filter(Boolean);
+          const digitCount = desc.replace(/[\D]/g, '').length;
+          const digitRatio = desc.length ? digitCount / desc.length : 0;
+          // Skip numeric-heavy lines or spec-like terms
+          if (
+            hasLetters &&
+            words.length >= 4 &&
+            digitRatio < 0.3 &&
+            !/(capacity|graduation|size|footprint|warranty|weight|platform|height|width|depth|dial|dimension|spec|mm|cm|in|kg|lb|oz|year\s+limited)/i.test(desc)
+          ) {
+            pushIfGood(desc);
+          }
+        }
+      });
+    }
+  } catch (e) {
+    // Fail silently – we never want an exception here to break extraction
+  }
+
+  // Deduplicate and cap at 50 entries
   const seen = new Set();
   const out = [];
-  for (const t of items){
+  for (const t of items) {
     const k = t.toLowerCase();
     if (!seen.has(k)) {
       seen.add(k);
       out.push(t);
     }
-        // allow up to 50 features to avoid truncating long bullet lists
-        if (out.length >= 50) break;
+    if (out.length >= 50) break;
   }
   return out;
 }
