@@ -39,10 +39,6 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
 
-// near the top, after app setup
-app.get("/", (_, res) => res.type("text").send("ingest-api OK"));
-app.get("/healthz", (_, res) => res.json({ ok: true }));
-
 /* ================== Utilities ================== */
 function cid() { return crypto.randomBytes(6).toString("hex"); }
 function now() { return Date.now(); }
