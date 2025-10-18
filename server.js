@@ -4014,7 +4014,7 @@ function inferBrandFromName(name){
     'the','a','an','with','and','for','of','by','pro','basic',
     // common product adjectives – not brands
     'mechanical','digital','portable','heavy','duty','heavy-duty','antimicrobial',
-    'large','small','medium','xl','xxl','xs','x-large','extra-large','xlarge','sm','md','lg'
+    'large','small','medium','xl','xxl','xs','x-large','extra-large','xlarge','sm','md','lg',
     'eye','level','waist','high','chair','floor','platform','scale'
   ]);
   const tokens = String(name||'').trim().split(/\s+/);
