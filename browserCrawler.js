@@ -682,13 +682,19 @@ export async function browseProduct(url, opts = {}) {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless });
+    browser = await chromium.launch({
+      headless,
+      args: ['--disable-blink-features=AutomationControlled']
+    });
   } catch (err) {
     const msg = String(err || '');
     if (/Executable\s+doesn\'t\s+exist|failed\s+to\s+launch/i.test(msg)) {
       try {
         execSync('npx playwright install chromium', { stdio: 'ignore' });
-        browser = await chromium.launch({ headless });
+        browser = await chromium.launch({
+          headless,
+          args: ['--disable-blink-features=AutomationControlled']
+        });
       } catch (installErr) {
         return { ok: false, error: String(installErr) };
       }
@@ -784,8 +790,3 @@ export async function browseProduct(url, opts = {}) {
     await browser.close().catch(() => {});
   }
 }
-
-browser = await chromium.launch({
-  headless,
-  args: ['--disable-blink-features=AutomationControlled']
-});
