@@ -37,7 +37,7 @@
     "canvas": "^2.11.2",
     "playwright": "^1.39.0",
     "@playwright-extra/playwright-extra": "^1.0.3",
-    "@extra/stealth-plugin": "^1.0.3"
+    "@extra/stealth-plugin": "^1.0.3",
     "googleapis": "^118.0.0"
   }
 }
