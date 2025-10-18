@@ -17,7 +17,9 @@
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+chromium.use(StealthPlugin());
 import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -782,3 +784,8 @@ export async function browseProduct(url, opts = {}) {
     await browser.close().catch(() => {});
   }
 }
+
+browser = await chromium.launch({
+  headless,
+  args: ['--disable-blink-features=AutomationControlled']
+});
