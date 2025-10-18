@@ -3194,12 +3194,16 @@ function resolveAllPanes($, names) {
 const TAB_SYNONYMS = {
   overview: ['overview','description','product description','product details','details','about','info','information'],
   specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
-  features: ['features','key features','highlights','benefits','features/benefits'],
-  downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
+  features: ['features','key features','highlights','benefits','features/benefits','features & benefits','features and benefits'],
+  downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure','downloads & resources'],
 };
 
 function normTabTitle(s=''){
-  const t = String(s).toLowerCase().replace(/\s+/g,' ').trim();
+  const t = String(s)
+  .toLowerCase()
+  .replace(/\s+/g, ' ')
+  .replace(/&/g, 'and') 
+  .trim();
   const hit = (list)=> list.some(x => t.includes(x));
   if (hit(TAB_SYNONYMS.overview)) return 'overview';
   if (hit(TAB_SYNONYMS.specs))    return 'specs';
