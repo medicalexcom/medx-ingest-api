@@ -1109,6 +1109,8 @@ function extractNormalized(baseUrl, html, opts) {
         '.tab-content, .tabs-content, [role="tabpanel"], .accordion-content, .product-tabs',
         // generic safety net: any node with "description/details/overview/copy" in id or class
         '[id*="description" i], [class*="description" i], [id*="details" i], [class*="details" i], [id*="overview" i], [class*="overview" i], [id*="copy" i], [class*="copy" i]'
+        // SiteOrigin Page Builder / TinyMCE widgets frequently used as the visible product intro
+        '.product-info, main .siteorigin-widget-tinymce, main .textwidget, .so-widget-sow-editor, .widget_sow_editor'
       ].join(', ');
 
       let best = "";
@@ -1995,6 +1997,8 @@ function extractAllSpecPairs($){
     if (!t || LEGAL_MENU_RE.test(t)) return; // ADD
     const m = t.match(/^([^:–—-]{2,60})[:–—-]\s*(.{2,300})$/);
     if (m) out[canonicalizeSpecKey(m[1])] ||= m[2];
+    const mod = t.match(/\b(model|mpn|model\s*no\.?|model\s*number)\s*#?\s*([A-Za-z0-9._-]{2,40})\b/i);
+    if (mod) out['model'] ||= mod[2];
   });
 
   const norm = {};
@@ -2565,7 +2569,7 @@ function extractManuals($, baseUrl, name, rawHtml, opts) {
 function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
   const urls = new Map(); // url -> score
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:\s*sheet)?|data\s*sheet|datasheet|guide|brochure|product\s*(?:information|info|sheet|brochure)|(?:cut|sell)\s*sheet)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
 
   const push = (node, url, baseScore = 0) => {
@@ -4010,6 +4014,7 @@ function inferBrandFromName(name){
     'the','a','an','with','and','for','of','by','pro','basic',
     // common product adjectives – not brands
     'mechanical','digital','portable','heavy','duty','heavy-duty','antimicrobial',
+    'large','small','medium','xl','xxl','xs','x-large','extra-large','xlarge','sm','md','lg'
     'eye','level','waist','high','chair','floor','platform','scale'
   ]);
   const tokens = String(name||'').trim().split(/\s+/);
