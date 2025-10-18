@@ -41,3 +41,5 @@
     "googleapis": "^118.0.0"
   }
 }
+
+fix: clean package.json formatting
