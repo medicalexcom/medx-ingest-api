@@ -1658,6 +1658,7 @@ const SPEC_SYNONYMS = new Map([
   ["unit weight", "product_weight"],
   ["shipping weight", "shipping_weight"],
   ["packaged weight", "shipping_weight"],
+  ["graduation", "graduation"],
 
   // Other frequent keys
   ["sku", "sku"],
@@ -3552,6 +3553,27 @@ function extractSpecsFromContainer($, container){
     }
   });
 
+  // NEW: support <label><strong>Key</strong></label> followed by the next <p> as value
+  $c.find('label').each((_, el) => {
+    // prefer <strong>/<b> text inside the label
+    const keyRaw = cleanup($(el).find('strong, b').first().text() || $(el).text());
+    const key = canonicalizeSpecKey(keyRaw);
+    if (!key || out[key]) return;
+  
+    // Find the first paragraph that follows this label (robust to stray wrappers)
+    let $p = $(el).nextAll('p').first();
+    if (!$p.length) $p = $(el).parent().nextAll('p').first();
+    if (!$p.length) return;
+  
+    // Preserve <br>-separated inch/mm lines (e.g., "6 ½” x 4 ⅔”<br>(152 mm x 121 mm)")
+    const html = String($p.html() || '');
+    const raw = html
+      ? html.replace(/<br\s*\/?>/gi, ' | ').replace(/<\/?[^>]+>/g, '')
+      : $p.text();
+  
+    const val = cleanup(raw).replace(/\s*\|\s*/g, ' | ');
+    if (val) out[key] = val;
+  });
 
   // As a last resort, parse any remaining div/span/p elements within the container for
   // colon- or hyphen-separated key/value pairs.  Some websites place technical
@@ -3984,11 +4006,20 @@ function filterAndRankExtraPaneImages(urls, baseUrl, opts){
 
 // ---- FIX: add brand inference helper used as fallback ----
 function inferBrandFromName(name){
-  const first = (String(name||"").trim().split(/\s+/)[0] || "");
-  if (/^(the|a|an|with|and|for|of|by|pro|basic)$/i.test(first)) return "";
-  if (/^[A-Z][A-Za-z0-9\-]+$/.test(first)) return first;
-  return "";
+  const STOP = new Set([
+    'the','a','an','with','and','for','of','by','pro','basic',
+    // common product adjectives – not brands
+    'mechanical','digital','portable','heavy','duty','heavy-duty','antimicrobial',
+    'eye','level','waist','high','chair','floor','platform','scale'
+  ]);
+  const tokens = String(name||'').trim().split(/\s+/);
+  const first = (tokens[0] || '').toLowerCase();
+  if (!first || STOP.has(first)) return '';
+  // heuristic: proper-cased token with letters is OK
+  if (/^[A-Z][A-Za-z0-9\-]+$/.test(tokens[0])) return tokens[0];
+  return '';
 }
+
 // ----------------------------------------------------------
 
 function collectCodesFromUrl(url){
