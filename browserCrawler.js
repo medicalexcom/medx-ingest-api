@@ -17,9 +17,11 @@
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { chromium } from 'playwright-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { chromium } from '@playwright-extra/playwright-extra';
+import StealthPlugin from '@extra/stealth-plugin';
+
 chromium.use(StealthPlugin());
+
 import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
