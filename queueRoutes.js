@@ -1,15 +1,19 @@
-/* queueRoutes.js
+/* Modified queueRoutes.js
  *
- * This module registers endpoints for queue management on your ingest API.
- * It integrates with Google Sheets to retrieve rows awaiting ingestion.
- * To use, set the following environment variables:
- *   SHEET_ID - the ID of the Google Sheet storing your ingest queue
- *   GOOGLE_SERVICE_ACCOUNT - the service account email for Sheets access
- *   GOOGLE_PRIVATE_KEY - the private key for the service account
- *   SHEET_RANGE (optional) - the A1 notation range to read
+ * This file demonstrates how to integrate the new variantExtractor module into the
+ * ingest pipeline. The variantExtractor extracts variant options (size, color,
+ * dimensions, etc.) from the scraped product data before sending that data to GPT.
+ * The modifications include importing the variantExtractor, calling
+ * extractVariants() on the scraped page data, and populating the variants field
+ * in the result object accordingly. If any variants are detected, they are
+ * serialized to a JSON string for compatibility with the queue and Google Sheets.
  */
 
 import { google } from 'googleapis';
+// Import the variant extractor from the repository root. Adjust the path if your
+// project structure is different. This assumes variantExtractor.js is located
+// alongside this file at the project root.
+import extractVariants from './variantExtractor.js';
 
 // Helper to get an authenticated Sheets client using a service account.
 async function getSheetsClient() {
@@ -120,6 +124,16 @@ export default function setupQueueRoutes(app) {
       if (data.error) {
         return res.status(422).json({ error: data.error });
       }
+
+      // Use the variant extractor to detect variant options before any GPT call. This
+      // function scans the scraped product data and returns an array of variant
+      // objects matching the expected schema (sku, price, option_values, image_url).
+      const extractedVariants = extractVariants(data);
+      // Attach the variants array back onto the data object so it can be used
+      // later in the result or included in the GPT prompt for context. If no
+      // variants are found, it will be an empty array.
+      data.variants = extractedVariants || [];
+
       // Base fields extracted from the scraped data
       const rawDescription = data.description_raw || data.description || '';
       const descText   = String(rawDescription).replace(/\n+/g, ' ').trim();
@@ -141,7 +155,8 @@ export default function setupQueueRoutes(app) {
         metaDesc: baseMetaDesc,
         keywords: baseKeywords,
         warranty: '',
-        variants: '',
+        // Convert extractedVariants array to a JSON string for queue compatibility
+        variants: extractedVariants && extractedVariants.length > 0 ? JSON.stringify(extractedVariants) : '',
         generatedUrl: '',
         auditLog: data.warnings ? { warnings: data.warnings } : {},
         gptAttempts: 0,
@@ -151,8 +166,8 @@ export default function setupQueueRoutes(app) {
 
       // Optionally call OpenAI to generate enhanced copy
       const apiKey = process.env.OPENAI_API_KEY;
-      
-            // Determine custom GPT instructions with debug logging
+
+      // Determine custom GPT instructions with debug logging
       let customInstructions = '';
 
       console.log("🧪 GPT_INSTRUCTIONS_FILE_ID:", process.env.GPT_INSTRUCTIONS_FILE_ID);
@@ -187,6 +202,10 @@ export default function setupQueueRoutes(app) {
           promptLines.push(`Scraped Description: ${rawDescription}`);
           promptLines.push(`Scraped Specs: ${JSON.stringify(data.specs || {})}`);
           promptLines.push(`Scraped Features: ${JSON.stringify(data.features_raw || [])}`);
+          // If variants were detected, include them in the prompt to give GPT full context.
+          if (extractedVariants && extractedVariants.length > 0) {
+            promptLines.push(`Detected Variants: ${JSON.stringify(extractedVariants)}`);
+          }
           const userPrompt = promptLines.join('\n\n');
           // Record the custom instructions and the full prompt used for debugging purposes
           result.auditLog = {};
