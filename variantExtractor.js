@@ -476,4 +476,6 @@ function extractVariants(pageData) {
   return variants;
 }
 
-module.exports = { extractVariants };
+export { extractVariants };
+export default extractVariants;
+
