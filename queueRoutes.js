@@ -13,7 +13,7 @@ import { google } from 'googleapis';
 // Import the variant extractor from the repository root. Adjust the path if your
 // project structure is different. This assumes variantExtractor.js is located
 // alongside this file at the project root.
-import extractVariants from './variantExtractor.js';
+import { extractVariants } from './variantExtractor.js';
 
 // Helper to get an authenticated Sheets client using a service account.
 async function getSheetsClient() {
