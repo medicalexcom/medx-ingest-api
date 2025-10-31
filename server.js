@@ -3779,22 +3779,22 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
-
-  // Inside extractDescriptionFromContainer, when scanning a container:
-  $container.find('h2,h3,h4').each((_, heading) => {
+  // --- Inserted block: capture “Notes” or “References” sections ---
+  $c.find('h2,h3,h4').each((_, heading) => {
     const title = $(heading).text().trim().toLowerCase();
     if (title.includes('notes') || title.includes('references')) {
       $(heading).nextAll('p, li').each((__, el) => {
         const text = $(el).text().trim();
         if (text) {
-          descs.push(text);
+          push(text);
         }
       });
     }
   });
+  // --- End inserted block ---
   
-  // --- Add BD-specific handling ---
-  const seenBD = new Set();   // ✅ renamed to avoid collision
+  // --- Add BD-specific “Features & Benefits” handling ---
+  const seenBD = new Set();
   $c.find('h2,h3,h4').each((_, heading) => {
     const title = $(heading).text().trim().toLowerCase();
     if (title.includes('features') && title.includes('benefits')) {
