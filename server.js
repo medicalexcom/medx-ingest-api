@@ -2998,6 +2998,7 @@ function documentQueryById($, id){
   catch { return id ? $(`#${id}`)[0] : null; }
 }
 
+// Updated resolveTabPane() to prefer the real panel when ID is reused
 function resolveTabPane($, names) {
   const nameRe = new RegExp(`\\b(?:${names.map(n => escapeRe(n)).join('|')})\\b`, 'i');
   let pane = null;
@@ -3006,7 +3007,6 @@ function resolveTabPane($, names) {
     const label = cleanup($(el).text());
     if (!label || !nameRe.test(label)) return;
 
-    // get href: if the tab element itself has no href, check its inner anchor
     let href = $(el).attr('href') || '';
     if (!href && $(el).is('[role="tab"]')) {
       const innerA = $(el).find('a[href^="#"]').first().attr('href');
@@ -3017,32 +3017,79 @@ function resolveTabPane($, names) {
     const dataTarget = $(el).attr('data-target') || $(el).attr('data-tab') || '';
     let target       = null;
 
-    // handle href="#some-id"
+    // href="#id"
     if (href && href.startsWith('#')) {
       const id = href.slice(1);
       if (id) {
-        target = documentQueryById($, id);
+        const cand = documentQueryById($, id);
+        if (cand) {
+          const $cand = $(cand);
+          if ($cand.is('[role="tabpanel"]')) {
+            target = cand;
+          } else {
+            const byRole = $(`[id="${id}"][role="tabpanel"]`).first();
+            if (byRole.length) target = byRole[0];
+            else {
+              const tabId = $(el).attr('id');
+              if (tabId) {
+                const byLabel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`).first();
+                if (byLabel.length) target = byLabel[0];
+              }
+            }
+          }
+        }
       }
     }
 
-    // handle aria-controls (no '#')
+    // aria-controls
     if (!target && controls) {
-      target = documentQueryById($, controls);
+      const cand = documentQueryById($, controls);
+      if (cand) {
+        const $cand = $(cand);
+        if ($cand.is('[role="tabpanel"]')) {
+          target = cand;
+        } else {
+          const byRole = $(`[id="${controls}"][role="tabpanel"]`).first();
+          if (byRole.length) target = byRole[0];
+          else {
+            const tabId = $(el).attr('id');
+            if (tabId) {
+              const byLabel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`).first();
+              if (byLabel.length) target = byLabel[0];
+            }
+          }
+        }
+      }
     }
 
-    // handle data-target="#some-id" or data-tab="#some-id"
+    // data-target="#id" or data-tab="#id"
     if (!target && dataTarget && dataTarget.startsWith('#')) {
       const dtId = dataTarget.slice(1);
       if (dtId) {
-        target = documentQueryById($, dtId);
+        const cand = documentQueryById($, dtId);
+        if (cand) {
+          const $cand = $(cand);
+          if ($cand.is('[role="tabpanel"]')) {
+            target = cand;
+          } else {
+            const byRole = $(`[id="${dtId}"][role="tabpanel"]`).first();
+            if (byRole.length) target = byRole[0];
+            else {
+              const tabId = $(el).attr('id');
+              if (tabId) {
+                const byLabel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`).first();
+                if (byLabel.length) target = byLabel[0];
+              }
+            }
+          }
+        }
       }
     }
 
-    // if we found a matching pane, stop the loop
     if (target) { pane = target; return false; }
   });
 
-  // fallback: look for headings within panels
+  // fallback by heading text
   if (!pane) {
     $('[role="tabpanel"], .tab-pane, .panel, .tabs-content, .accordion-content').each((_, el) => {
       const heading = cleanup($(el).find('h2,h3,h4').first().text());
@@ -3053,7 +3100,7 @@ function resolveTabPane($, names) {
     });
   }
 
-  // fallback: look for matching class names
+  // fallback by class names
   if (!pane) {
     const classRe = new RegExp(names.map(n => escapeRe(n)).join('|'), 'i');
     $('[class]').each((_, el) => {
@@ -3240,6 +3287,7 @@ function paneRemoteHref($, panel){
 }
 
 /* ================== ADD-ONLY: Generic tab/accordion candidate collector ================== */
+// Updated collectTabCandidates() for AEM tab support
 function collectTabCandidates($, baseUrl){
   const out = [];
 
@@ -3249,45 +3297,74 @@ function collectTabCandidates($, baseUrl){
       const $tab     = $(tab);
       const title    = cleanup($tab.attr('aria-label') || $tab.attr('title') || $tab.text());
       const controls = $tab.attr('aria-controls') || '';
-      let   $panel   = controls ? $(documentQueryById($, controls)) : $();
-      if (!$panel || !$panel.length) {
-        // try labelledby reverse
-        const id = $tab.attr('id');
-        if (id) $panel = $(`[role="tabpanel"][aria-labelledby="${id}"]`).first();
+      let $panel = $();
+
+      if (controls) {
+        // initial lookup via documentQueryById
+        const el = documentQueryById($, controls);
+        if (el) {
+          const $cand = $(el);
+          if ($cand.is('[role="tabpanel"]')) {
+            $panel = $cand;
+          } else {
+            // ID may be reused for both the tab and the panel (AEM/BD case)
+            // try to locate a panel with the same id and role="tabpanel"
+            const byRole = $(`[id="${controls}"][role="tabpanel"]`).first();
+            if (byRole.length) {
+              $panel = byRole;
+            } else {
+              // fallback: locate by aria‑labelledby using the tab’s id
+              const tabId = $tab.attr('id');
+              if (tabId) {
+                const byLabel = $(`[role="tabpanel"][aria-labelledby="${tabId}"]`).first();
+                if (byLabel.length) $panel = byLabel;
+              }
+            }
+          }
+        }
       }
-      if ($panel && $panel.length) {
+
+      // original fallback if nothing found
+      if (!$panel.length) {
+        const id = $tab.attr('id');
+        if (id) {
+          const byLabel = $(`[role="tabpanel"][aria-labelledby="${id}"]`).first();
+          if (byLabel.length) $panel = byLabel;
+        }
+      }
+
+      if ($panel.length) {
         out.push({
           title,
           type: 'aria',
           el: $panel[0],
           html: $panel.html() || '',
           text: cleanup($panel.text() || ''),
-          href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
+          href: paneRemoteHref($, $panel[0])
+            ? abs(baseUrl, paneRemoteHref($, $panel[0]))
+            : ''
         });
       }
     });
   });
 
   // 2) Classic .tabs / .tab-pane / .accordion variants and AEM tabs
-  // Added AEM .cmp-tabs__tabpanel and expanded accordion selectors
   const paneSel = [
-    '.tab-pane','.tabs-panel','[role="tabpanel"]','.cmp-tabs__tabpanel', // NEW for AEM tabs
-    '.accordion-content','.accordion-item .content',
-    '.accordion-body','.accordion-collapse','.collapse', // capture bootstrap accordions
-    'details',                                            // native HTML accordions
-    '.panel','.panel-body','.product-tabs .tab-content > *','ol.bd-tablist > li',
-    '.tabs-content > *','section[data-tab]'
+    '.tab-pane', '.tabs-panel', '[role="tabpanel"]', '.cmp-tabs__tabpanel',
+    '.accordion-content', '.accordion-item .content',
+    '.accordion-body', '.accordion-collapse', '.collapse',
+    'details',
+    '.panel', '.panel-body', '.product-tabs .tab-content > *', 'ol.bd-tablist > li',
+    '.tabs-content > *', 'section[data-tab]'
   ].join(', ');
   $(paneSel).each((_, el) => {
     if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     const $el = $(el);
-    // Heading inside panel or previous sibling heading acts as the title
     const title = firstNonEmpty(
       $el.attr('data-title'),
       $el.attr('aria-label'),
       $el.prev('h1,h2,h3,h4,h5,button,a').first().text(),
       $el.find('h1,h2,h3,h4,h5').first().text(),
-      // some themes echo tab name in class (e.g., "tab-description")
       ($el.attr('class') || '')
         .replace(/[-_]/g,' ')
         .split(/\s+/)
@@ -3299,11 +3376,13 @@ function collectTabCandidates($, baseUrl){
       el,
       html: $el.html() || '',
       text: cleanup($el.text() || ''),
-      href: paneRemoteHref($, el) ? abs(baseUrl, paneRemoteHref($, el)) : ''
+      href: paneRemoteHref($, el)
+        ? abs(baseUrl, paneRemoteHref($, el))
+        : ''
     });
   });
 
-  // 2b) Additional: capture native <details> accordions
+  // 2b) Capture native <details> accordions
   $('details').each((_, el) => {
     const $details = $(el);
     const title    = cleanup($details.find('summary').first().text());
@@ -3315,14 +3394,15 @@ function collectTabCandidates($, baseUrl){
       el,
       html: $body.html() || '',
       text: cleanup($body.text() || ''),
-      href: paneRemoteHref($, el) ? abs(baseUrl, paneRemoteHref($, el)) : ''
+      href: paneRemoteHref($, el)
+        ? abs(baseUrl, paneRemoteHref($, el))
+        : ''
     });
   });
 
-  // 2c) Additional: capture Bootstrap/BD accordion items (.accordion-item)
+  // 2c) Capture Bootstrap/BD accordion items (.accordion-item)
   $('.accordion-item').each((_, item) => {
     const $item = $(item);
-    // Try to derive a title from header/button elements, including BD-specific title class
     const title = firstNonEmpty(
       $item.attr('data-title'),
       $item.attr('aria-label'),
@@ -3342,19 +3422,18 @@ function collectTabCandidates($, baseUrl){
       el: $body[0],
       html: $body.html() || '',
       text: cleanup($body.text() || ''),
-      href: paneRemoteHref($, $body[0]) ? abs(baseUrl, paneRemoteHref($, $body[0])) : ''
+      href: paneRemoteHref($, $body[0])
+        ? abs(baseUrl, paneRemoteHref($, $body[0]))
+        : ''
     });
   });
 
-  // BD tab lists may be simple ordered lists (e.g. "1. Overview", "2. Specifications").
-  // Capture each list item as a potential tab candidate.
+  // BD tab lists enumeration (unchanged)
   $('ol.bd-tablist > li').each((_, li) => {
     const text = $(li).text().trim();
-    // Match patterns like "1. Overview" or "2. Specifications"
     const match = text.match(/^\d+\.\s*(.+)$/);
     if (match) {
       const title = match[1].trim();
-      // Use aria-controls if present; otherwise derive the panel ID by lowercasing and replacing spaces.
       const panelId =
         $(li).attr('aria-controls') ||
         title.toLowerCase().replace(/\s+/g, '-');
@@ -3369,7 +3448,7 @@ function collectTabCandidates($, baseUrl){
     }
   });
 
-  // 3) Fallback: tab triggers (a/button) that point to #id panels
+  // 3) Fallback triggers
   $('a[data-target], button[data-target], a[data-tab], button[data-tab], a[href^="#tab"], a[href^="#panel"]').each((_, t) => {
     const $t     = $(t);
     const title  = cleanup($t.text() || $t.attr('aria-label') || $t.attr('title') || '');
@@ -3383,11 +3462,13 @@ function collectTabCandidates($, baseUrl){
       el: $panel[0],
       html: $panel.html() || '',
       text: cleanup($panel.text() || ''),
-      href: paneRemoteHref($, $panel[0]) ? abs(baseUrl, paneRemoteHref($, $panel[0])) : ''
+      href: paneRemoteHref($, $panel[0])
+        ? abs(baseUrl, paneRemoteHref($, $panel[0]))
+        : ''
     });
   });
 
-  // De-dupe by panel element id or index
+  // De-duplicate by panel element id or index
   const seen = new Set();
   const uniq = [];
   out.forEach((p, i) => {
