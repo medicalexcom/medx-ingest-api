@@ -3275,7 +3275,7 @@ function collectTabCandidates($, baseUrl){
     '.accordion-content','.accordion-item .content',
     '.accordion-body','.accordion-collapse','.collapse', // capture bootstrap accordions
     'details',                                            // native HTML accordions
-    '.panel','.panel-body','.product-tabs .tab-content > *',
+    '.panel','.panel-body','.product-tabs .tab-content > *','ol.bd-tablist > li',
     '.tabs-content > *','section[data-tab]'
   ].join(', ');
   $(paneSel).each((_, el) => {
@@ -3360,7 +3360,7 @@ function collectTabCandidates($, baseUrl){
         title.toLowerCase().replace(/\s+/g, '-');
       const $panel = $(`#${panelId}`);
       if ($panel.length) {
-        candidates.push({
+        out.push({
           title,
           html: $panel.html(),
           text: $panel.text(),
