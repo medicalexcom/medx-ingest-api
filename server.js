@@ -3346,6 +3346,29 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
+  // BD tab lists may be simple ordered lists (e.g. "1. Overview", "2. Specifications").
+  // Capture each list item as a potential tab candidate.
+  $('ol.bd-tablist > li').each((_, li) => {
+    const text = $(li).text().trim();
+    // Match patterns like "1. Overview" or "2. Specifications"
+    const match = text.match(/^\d+\.\s*(.+)$/);
+    if (match) {
+      const title = match[1].trim();
+      // Use aria-controls if present; otherwise derive the panel ID by lowercasing and replacing spaces.
+      const panelId =
+        $(li).attr('aria-controls') ||
+        title.toLowerCase().replace(/\s+/g, '-');
+      const $panel = $(`#${panelId}`);
+      if ($panel.length) {
+        candidates.push({
+          title,
+          html: $panel.html(),
+          text: $panel.text(),
+        });
+      }
+    }
+  });
+
   // 3) Fallback: tab triggers (a/button) that point to #id panels
   $('a[data-target], button[data-target], a[data-tab], button[data-tab], a[href^="#tab"], a[href^="#panel"]').each((_, t) => {
     const $t     = $(t);
