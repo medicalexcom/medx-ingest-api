@@ -3792,22 +3792,22 @@ function extractDescriptionFromContainer($, container){
       });
     }
   });
-
-  const seen = new Set();
-  // Existing feature extraction logic…
-  // Add BD-specific handling:
-  $container.find('h2,h3,h4').each((_, heading) => {
+  
+  // --- Add BD-specific handling ---
+  const seenBD = new Set();   // ✅ renamed to avoid collision
+  $c.find('h2,h3,h4').each((_, heading) => {
     const title = $(heading).text().trim().toLowerCase();
     if (title.includes('features') && title.includes('benefits')) {
       $(heading).nextAll('li').each((__, li) => {
         const feature = $(li).text().trim();
-        if (feature && !seen.has(feature.toLowerCase())) {
-          seen.add(feature.toLowerCase());
+        if (feature && !seenBD.has(feature.toLowerCase())) {
+          seenBD.add(feature.toLowerCase());
           features.push(feature);
         }
       });
     }
   });
+
     
   // Traverse elements in DOM order and collect text from meaningful tags.  This preserves
   // the logical flow of titles and their associated content.  Capture headings, bold
