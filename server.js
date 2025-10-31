@@ -3515,136 +3515,176 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
   };
 }
 
-/* ================== Tab/Accordion Harvester ================== */
-function extractSpecsFromContainer($, container){
-  // ADD: avoid footer/nav/reco contamination
+function extractSpecsFromContainer($, container) {
+  // Avoid contaminating specs with footer/nav/recommendation content
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
   const out = {};
   const $c = $(container);
 
-  $c.find('table').each((_, tbl)=>{
-    if (isPartsOrAccessoryTable($, tbl)) return; // ADD: skip parts/accessory tables inside containers
-    $(tbl).find('tr').each((__, tr)=>{
-      const cells=$(tr).find('th,td');
-      if (cells.length>=2){
-        const k=cleanup($(cells[0]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(cells[1]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+  // Parse tables (skip parts/accessory tables)
+  $c.find('table').each((_, tbl) => {
+    if (isPartsOrAccessoryTable($, tbl)) return;
+    $(tbl).find('tr').each((__, tr) => {
+      const cells = $(tr).find('th,td');
+      if (cells.length >= 2) {
+        const k = cleanup($(cells[0]).text())
+          .toLowerCase()
+          .replace(/\s+/g, '_')
+          .replace(/:$/, '');
+        const v = cleanup($(cells[1]).text());
+        if (k && v && k.length < 80 && v.length < 400) out[k] = v;
       }
     });
   });
 
-  $c.find('dl').each((_, dl)=>{
-    const dts=$(dl).find('dt'), dds=$(dl).find('dd');
-    if (dts.length === dds.length && dts.length){
-      for (let i=0;i<dts.length;i++){
-        const k=cleanup($(dts[i]).text()).toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
-        const v=cleanup($(dds[i]).text());
-        if (k && v && k.length<80 && v.length<400) out[k]=v;
+  // Parse definition lists
+  $c.find('dl').each((_, dl) => {
+    const dts = $(dl).find('dt');
+    const dds = $(dl).find('dd');
+    if (dts.length === dds.length && dts.length) {
+      for (let i = 0; i < dts.length; i++) {
+        const k = cleanup($(dts[i]).text())
+          .toLowerCase()
+          .replace(/\s+/g, '_')
+          .replace(/:$/, '');
+        const v = cleanup($(dds[i]).text());
+        if (k && v && k.length < 80 && v.length < 400) out[k] = v;
       }
     }
   });
 
-  $c.find('li').each((_, li)=>{
+  // Parse list items of the form "Key: Value" or "Key – Value"
+  $c.find('li').each((_, li) => {
     const t = cleanup($(li).text());
     if (!t || t.length < 3 || t.length > 250) return;
     const m = t.split(/[:\-–]\s+/);
-    if (m.length >= 2){
-      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+    if (m.length >= 2) {
+      const k = m[0].toLowerCase().replace(/\s+/g, '_').replace(/:$/, '');
       const v = m.slice(1).join(': ').trim();
-      if (k && v && !out[k]) out[k]=v;
+      if (k && v && !out[k]) out[k] = v;
     }
   });
 
-  $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r)=>{
-    const a = cleanup($(r).find('.label, .name, .title, strong, b, th').first().text());
-    const b = cleanup($(r).find('.value, .val, .data, .detail, td, span, p').last().text());
-    if (a && b) out[a.toLowerCase().replace(/\s+/g,'_').replace(/:$/,'')] = b;
+  // Parse generic “spec” grids (label/value pairs)
+  $c.find('.spec, .row, .grid, [class*="spec"]').each((_, r) => {
+    const a = cleanup($(r)
+      .find('.label, .name, .title, strong, b, th')
+      .first()
+      .text());
+    const b = cleanup($(r)
+      .find('.value, .val, .data, .detail, td, span, p')
+      .last()
+      .text());
+    if (a && b) {
+      out[a.toLowerCase().replace(/\s+/g, '_').replace(/:$/, '')] = b;
+    }
   });
 
-  // === NEW: handle BD accordion tables (bd-table__container) ===
+  // ===== BD-specific handling =====
+
+  // 1. Extract accordion tables (.bd-table__container)
   $c.find('.bd-table__container').each((_, cont) => {
     const $cont = $(cont);
     const key = cleanup($cont.find('.bd-table__heading').first().text())
-                  .toLowerCase()
-                  .replace(/\s+/g, '_')
-                  .replace(/:$/,'');
+      .toLowerCase()
+      .replace(/\s+/g, '_')
+      .replace(/:$/, '');
     const values = [];
     $cont.find('.bd-table__description').each((__, desc) => {
       const v = cleanup($(desc).text());
       if (v) values.push(v);
     });
     const val = values.join(' ').trim();
-    if (key && val && key.length < 80 && val.length < 400 && !out[key]) {
+    if (
+      key &&
+      val &&
+      key.length < 80 &&
+      val.length < 400 &&
+      !out[key]
+    ) {
       out[key] = val;
     }
   });
 
-
-  // After existing bd-table__container logic in extractSpecsFromContainer…
-  // Look for Markdown-style headings followed by spec lines.
-  $('.bd-table__container').nextAll().each((_, elem) => {
-    const $el = $(elem);
-    const heading = $el.text().trim();
-    // Match headings that start with "###"
-    if (/^###\s+/.test(heading)) {
-      let category = heading.replace(/^###\s+/, '').toLowerCase();
-      category = category.replace(/\s+/g, '_'); // normalize
-      // Collect lines until the next heading
-      const lines = [];
-      $el.nextUntil('h3,h2,h1,section,div', (i, lineElem) => {
-        const text = $(lineElem).text().trim();
-        if (text) lines.push(text);
-      });
-      // Parse each line for key-value patterns
-      for (const line of lines) {
-        const match = line.match(/^([^:–-]+)\s*[:–-]\s*(.+)$/);
-        if (match) {
-          const key = `${category}_${match[1].trim().replace(/\s+/g, '_').toLowerCase()}`;
-          const value = match[2].trim();
-          if (key && value && !specs[key]) {
-            specs[key] = value;
+  // 2. Parse BD summary sections after the last accordion container.
+  //    These are headings like "### GTIN" followed by "GTIN – Each: 00382903051984"
+  const $bdContainers = $c.find('.bd-table__container');
+  if ($bdContainers.length) {
+    $($bdContainers.last())
+      .nextAll()
+      .each((_, elem) => {
+        const $el = $(elem);
+        const heading = cleanup($el.text());
+        if (/^###\s+/.test(heading)) {
+          let category = heading.replace(/^###\s+/, '')
+            .toLowerCase()
+            .replace(/\s+/g, '_');
+          // Collect lines until the next heading of equal/higher level
+          const lines = [];
+          $el.nextUntil('h3,h2,h1,section,div', (i, lineElem) => {
+            const txt = cleanup($(lineElem).text());
+            if (txt) lines.push(txt);
+          });
+          for (const line of lines) {
+            const match = line.match(
+              /^([^:–-]+)\s*[:–-]\s*(.+)$/
+            );
+            if (match) {
+              const key = `${category}_${match[1]
+                .trim()
+                .replace(/\s+/g, '_')
+                .toLowerCase()}`;
+              const value = match[2].trim();
+              if (!out[key]) {
+                out[key] = value;
+              }
+            }
           }
         }
-      }
-    }
-  });
+      });
+  }
 
+  // ===== End BD-specific handling =====
 
-  // NEW: support <label><strong>Key</strong></label> followed by the next <p> as value
+  // Fallback: <label><strong>Key</strong></label> followed by the next <p> element.
   $c.find('label').each((_, el) => {
-    // prefer <strong>/<b> text inside the label
-    const keyRaw = cleanup($(el).find('strong, b').first().text() || $(el).text());
+    const keyRaw = cleanup(
+      $(el)
+        .find('strong, b')
+        .first()
+        .text() || $(el).text()
+    );
     const key = canonicalizeSpecKey(keyRaw);
     if (!key || out[key]) return;
-  
-    // Find the first paragraph that follows this label (robust to stray wrappers)
+
+    // Find the first paragraph that follows this label
     let $p = $(el).nextAll('p').first();
     if (!$p.length) $p = $(el).parent().nextAll('p').first();
     if (!$p.length) return;
-  
-    // Preserve <br>-separated inch/mm lines (e.g., "6 ½” x 4 ⅔”<br>(152 mm x 121 mm)")
+
+    // Preserve <br>-separated inch/mm lines
     const html = String($p.html() || '');
     const raw = html
-      ? html.replace(/<br\s*\/?>/gi, ' | ').replace(/<\/?[^>]+>/g, '')
+      ? html
+          .replace(/<br\s*\/?>/gi, ' | ')
+          .replace(/<\/?[^>]+>/g, '')
       : $p.text();
-  
+
     const val = cleanup(raw).replace(/\s*\|\s*/g, ' | ');
     if (val) out[key] = val;
   });
 
-  // As a last resort, parse any remaining div/span/p elements within the container for
-  // colon- or hyphen-separated key/value pairs.  Some websites place technical
-  // specifications in freeform grids or styled rows without using <table>, <dl> or <li>.
-  // This aggressive pass helps capture those by splitting on ':' or '-' when present.
+  // Final fallback: parse any remaining div/span/p text for colon- or dash-separated key/value pairs
   $c.find('div, span, p').each((_, el) => {
     const t = cleanup($(el).text());
     if (!t || t.length < 3 || t.length > 250) return;
-    // Skip if this element is already inside a table row, dl or li that we've processed
+    // Skip if this element is inside a table row, dl or li we already processed
     if ($(el).closest('table,tr,dl,li').length) return;
     const m = t.split(/[:\-–]\s+/);
     if (m.length >= 2) {
-      const k = m[0].toLowerCase().replace(/\s+/g,'_').replace(/:$/,'');
+      const k = m[0].toLowerCase()
+        .replace(/\s+/g, '_')
+        .replace(/:$/, '');
       const v = m.slice(1).join(': ').trim();
       if (k && v && !out[k]) out[k] = v;
     }
