@@ -3557,6 +3557,37 @@ function extractSpecsFromContainer($, container){
     }
   });
 
+
+  // After existing bd-table__container logic in extractSpecsFromContainer…
+  // Look for Markdown-style headings followed by spec lines.
+  $('.bd-table__container').nextAll().each((_, elem) => {
+    const $el = $(elem);
+    const heading = $el.text().trim();
+    // Match headings that start with "###"
+    if (/^###\s+/.test(heading)) {
+      let category = heading.replace(/^###\s+/, '').toLowerCase();
+      category = category.replace(/\s+/g, '_'); // normalize
+      // Collect lines until the next heading
+      const lines = [];
+      $el.nextUntil('h3,h2,h1,section,div', (i, lineElem) => {
+        const text = $(lineElem).text().trim();
+        if (text) lines.push(text);
+      });
+      // Parse each line for key-value patterns
+      for (const line of lines) {
+        const match = line.match(/^([^:–-]+)\s*[:–-]\s*(.+)$/);
+        if (match) {
+          const key = `${category}_${match[1].trim().replace(/\s+/g, '_').toLowerCase()}`;
+          const value = match[2].trim();
+          if (key && value && !specs[key]) {
+            specs[key] = value;
+          }
+        }
+      }
+    }
+  });
+
+
   // NEW: support <label><strong>Key</strong></label> followed by the next <p> as value
   $c.find('label').each((_, el) => {
     // prefer <strong>/<b> text inside the label
@@ -3748,6 +3779,36 @@ function extractDescriptionFromContainer($, container){
     parts.push(t);
   };
 
+
+  // Inside extractDescriptionFromContainer, when scanning a container:
+  $container.find('h2,h3,h4').each((_, heading) => {
+    const title = $(heading).text().trim().toLowerCase();
+    if (title.includes('notes') || title.includes('references')) {
+      $(heading).nextAll('p, li').each((__, el) => {
+        const text = $(el).text().trim();
+        if (text) {
+          descs.push(text);
+        }
+      });
+    }
+  });
+
+  const seen = new Set();
+  // Existing feature extraction logic…
+  // Add BD-specific handling:
+  $container.find('h2,h3,h4').each((_, heading) => {
+    const title = $(heading).text().trim().toLowerCase();
+    if (title.includes('features') && title.includes('benefits')) {
+      $(heading).nextAll('li').each((__, li) => {
+        const feature = $(li).text().trim();
+        if (feature && !seen.has(feature.toLowerCase())) {
+          seen.add(feature.toLowerCase());
+          features.push(feature);
+        }
+      });
+    }
+  });
+    
   // Traverse elements in DOM order and collect text from meaningful tags.  This preserves
   // the logical flow of titles and their associated content.  Capture headings, bold
   // labels, paragraphs, list items, and generic spans/divs.  Skip scripts/styles.
