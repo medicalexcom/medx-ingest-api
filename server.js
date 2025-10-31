@@ -3348,23 +3348,71 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
+  /* === NEW: Capture AEM cmp-tabs panels ===
+   * BD/AEM pages use <div class="cmp-tabs__tabpanel"> for each tab pane.  These
+   * panels are sometimes the only place where Overview/Specifications text lives.
+   * We derive a title from aria-labelledby, the panel id, or fall back to id-based
+   * heuristics (overview/spec/features/resources/notifications).
+   */
+  $('.cmp-tabs__tabpanel').each((_, el) => {
+    // skip if in footer/nav or recommendation area
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+
+    const $el = $(el);
+    let title = cleanup($el.attr('aria-label') || '');
+
+    // Try aria-labelledby → text of the tab
+    if (!title) {
+      const labelled = $el.attr('aria-labelledby');
+      if (labelled) {
+        const $lbl = $(`#${labelled}`);
+        const lblTxt = cleanup($lbl.text());
+        if (lblTxt) title = lblTxt;
+      }
+    }
+
+    // Derive title from id if still empty
+    if (!title) {
+      const idAttr  = $el.attr('id') || '';
+      const idLower = idAttr.toLowerCase();
+      if (idLower) {
+        if (/overview/.test(idLower))        title = 'Overview';
+        else if (/specification|specs?/.test(idLower)) title = 'Specifications';
+        else if (/feature|benefit/.test(idLower))      title = 'Features';
+        else if (/resource|download|manual|notification/.test(idLower)) title = 'Downloads';
+        else if (/faq/.test(idLower))        title = 'FAQ';
+      }
+    }
+
+    out.push({
+      title,
+      type: 'tab',
+      el,
+      html: $el.html() || '',
+      text: cleanup($el.text() || ''),
+      href: paneRemoteHref($, el)
+        ? abs(baseUrl, paneRemoteHref($, el))
+        : ''
+    });
+  });
+
   // 2) Classic .tabs / .tab-pane / .accordion variants and AEM tabs
-  // Include a broad BD-specific container selector to catch product overview sections.
   const paneSel = [
-    '.tab-pane', '.tabs-panel', '[role="tabpanel"]', '.cmp-tabs__tabpanel',
-    '.accordion-content', '.accordion-item .content',
-    '.accordion-body', '.accordion-collapse', '.collapse',
+    '.tab-pane','.tabs-panel','[role="tabpanel"]','.cmp-tabs__tabpanel', // include cmp-tabs panels
+    '.accordion-content','.accordion-item .content',
+    '.accordion-body','.accordion-collapse','.collapse',
     'details',
-    '.panel', '.panel-body', '.product-tabs .tab-content > *', 'ol.bd-tablist > li',
-    '.tabs-content > *', 'section[data-tab]',
-    // NEW: capture BD product-level sections such as product-Overview, product-Specification, etc.
-    '[id^="product-"]'
+    '.panel','.panel-body','.product-tabs .tab-content > *','ol.bd-tablist > li',
+    '.tabs-content > *','section[data-tab]',
+    '[id^="product-"]'  // BD product-specific containers
   ].join(', ');
   $(paneSel).each((_, el) => {
     if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
     const $el = $(el);
-    // Determine a panel title. Try various attributes and heading elements, then
-    // fall back to a class-based heuristic. If still empty, derive from the id.
+
+    // Skip if already captured via cmp-tabs loop
+    if ($el.is('.cmp-tabs__tabpanel')) return;
+
     let title = firstNonEmpty(
       $el.attr('data-title'),
       $el.attr('aria-label'),
@@ -3373,15 +3421,21 @@ function collectTabCandidates($, baseUrl){
       ($el.attr('class') || '')
         .replace(/[-_]/g,' ')
         .split(/\s+/)
-        .find(w => /desc|overview|spec|feature|download/i.test(w)) || ''
+        .find(w => /desc|overview|spec|feature|download|benefit|faq|resource|notification/i.test(w)) || ''
     );
-    if (!title) {
-      const idAttr = $el.attr('id') || '';
-      if (/overview/i.test(idAttr)) title = 'Overview';
-      else if (/spec(ification)?/i.test(idAttr)) title = 'Specifications';
-      else if (/feature|benefit/i.test(idAttr)) title = 'Features';
-      else if (/download|document|resource|manual/i.test(idAttr)) title = 'Downloads';
+
+    // Heuristic: derive from ID if still missing
+    const idAttr  = $el.attr('id') || '';
+    const idLower = (idAttr || '').toLowerCase();
+    if (!title && idLower) {
+      if (/overview/.test(idLower))        title = 'Overview';
+      else if (/specification|specs?/.test(idLower)) title = 'Specifications';
+      else if (/feature|benefit/.test(idLower))      title = 'Features';
+      else if (/faq/.test(idLower))        title = 'FAQ';
+      else if (/resource|download|manual/.test(idLower)) title = 'Downloads';
+      else if (/notification/.test(idLower)) title = 'Downloads';
     }
+
     out.push({
       title,
       type: 'panel',
@@ -3424,7 +3478,7 @@ function collectTabCandidates($, baseUrl){
       ($item.attr('class') || '')
         .replace(/[-_]/g,' ')
         .split(/\s+/)
-        .find(w => /packaging|gtin|spec|feature|download|overview/i.test(w)) || ''
+        .find(w => /packaging|gtin|spec|feature|download|overview|notification|faq/i.test(w)) || ''
     );
     const $body = $item.find('.accordion-body,.accordion-collapse,.collapse').first();
     if (!$body.length) return;
@@ -3451,11 +3505,11 @@ function collectTabCandidates($, baseUrl){
         title.toLowerCase().replace(/\s+/g, '-');
       const $panel = $(`#${panelId}`);
       if ($panel.length) {
-      out.push({
-        title,
-        html: $panel.html(),
-        text: $panel.text(),
-      });
+        out.push({
+          title,
+          html: $panel.html(),
+          text: $panel.text(),
+        });
       }
     }
   });
