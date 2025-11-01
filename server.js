@@ -3494,6 +3494,35 @@ function collectTabCandidates($, baseUrl){
     });
   });
 
+  // === NEW: Capture BD nested product-* cmp-containers ===
+  // Some BD pages nest the true tab content (Overview, Specifications, etc.) inside
+  // cmp-containers with ids like product-Overview or product-Specification.
+  // These must be harvested explicitly to capture full text.
+  $('.cmp-container[id^="product-"]').each((_, el) => {
+    if (isFooterOrNav($, el) || isRecoBlock($, el)) return;
+    const $el = $(el);
+    const elId = String($el.attr('id') || '');
+    // Derive title from inner headings (component-heading or h1–h5)
+    let title = cleanup($el.find('.component-heading').first().text()) ||
+                cleanup($el.find('h1,h2,h3,h4,h5').first().text());
+    // If no explicit heading, derive from the ID (after "product-")
+    if (!title && elId) {
+      let slug = elId.replace(/^product[-_]+/i, '');
+      slug = slug.replace(/[-_]+/g, ' ');
+      title = toTitleCase(slug.trim());
+    }
+    out.push({
+      title,
+      type: 'product',
+      el,
+      html: $el.html() || '',
+      text: cleanup($el.text() || ''),
+      href: paneRemoteHref($, el)
+        ? abs(baseUrl, paneRemoteHref($, el))
+        : ''
+    });
+  });
+
   // BD tab lists enumeration (unchanged)
   $('ol.bd-tablist > li').each((_, li) => {
     const text = $(li).text().trim();
