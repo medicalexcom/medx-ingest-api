@@ -3287,11 +3287,7 @@ function paneRemoteHref($, panel){
 }
 
 /* ================== ADD-ONLY: Generic tab/accordion candidate collector ================== */
-/* =============================================
- * Collect candidate panels/tabs/accordion items.
- * Returns an array of objects with title, type,
- * element, html, text and href.
- * ============================================= */
+// Updated collectTabCandidates() for AEM tab support
 function collectTabCandidates($, baseUrl){
   const out = [];
 
@@ -3369,17 +3365,7 @@ function collectTabCandidates($, baseUrl){
     if (!title) {
       const labelled = $el.attr('aria-labelledby');
       if (labelled) {
-        /*
-         * BD/AEM pages sometimes duplicate IDs across the tab and the panel
-         * (e.g. both the <li role="tab"> and the <div role="tabpanel"> share
-         * the same id). Selecting by id alone (e.g. $("#overview")) would
-         * return the panel itself as the first match, causing the title to
-         * inadvertently include the entire panel text.  To avoid this,
-         * restrict the lookup to elements with role="tab" so we pull only
-         * the tab label.  If no matching tab exists (unlikely), the filter
-         * will return an empty set and we will fall back to id-based heuristics.
-         */
-        const $lbl = $('[role="tab"]').filter((_, el) => $(el).attr('id') === labelled).first();
+        const $lbl = $(`#${labelled}`);
         const lblTxt = cleanup($lbl.text());
         if (lblTxt) title = lblTxt;
       }
@@ -3589,80 +3575,6 @@ function collectTabCandidates($, baseUrl){
   return uniq;
 }
 
-/* ================== Extract contents from tab buckets ================== */
-function extractFromBuckets($, buckets, baseUrl){
-  const add = { desc: '', specs: {}, features: [], manuals: new Set(), images: new Set() };
-
-  const collectImgs = (html) => {
-    if (!html) return;
-    const _$ = cheerio.load(html);
-    _$('.accordion-content, .tab-pane, [role="tabpanel"], section, div, article')
-      .find('img, source').each((_, n)=>{
-        const src = _$(n).attr('src') || _$(n).attr('data-src') || pickLargestFromSrcset(_$(n).attr('srcset')) || '';
-        if (src) add.images.add(abs(baseUrl, src));
-      });
-  };
-
-  // Overview/Description
-  for (const pane of buckets.overview){
-    const $p = cheerio.load(pane.html || '');
-    let d = '';
-    // Extract description using the existing container parser
-    try {
-      d = extractDescriptionFromContainer($p, $p.root());
-    } catch {
-      d = '';
-    }
-    // Fall back: capture the plain visible text of the pane if it's longer than
-    // what extractDescriptionFromContainer returned.  This helps in cases where
-    // the overview copy lives in deeply nested components (e.g. AEM cmp‑text)
-    // and the parser misses it due to aggressive filtering heuristics.
-    try {
-      const plain = cleanup($p.root().text() || '');
-      if (plain && plain.length > (d || '').length) {
-        d = plain;
-      }
-    } catch {
-      /* ignore fallback extraction errors */
-    }
-    if (d && d.length > (add.desc || '').length) {
-      add.desc = d;
-    }
-    collectImgs(pane.html);
-  }
-
-  // Specs
-  for (const pane of buckets.specs){
-    const $p = cheerio.load(pane.html || '');
-    Object.assign(add.specs, extractSpecsFromContainer($p, $p.root()));
-    try {
-      const jsonExtras = extractSpecsFromScripts($p, $p.root());
-      Object.assign(add.specs, mergeSpecsAdditive(jsonExtras, {}));
-    } catch {}
-    collectImgs(pane.html);
-  }
-
-  // Features
-  for (const pane of buckets.features){
-    const $p = cheerio.load(pane.html || '');
-    add.features.push(...extractFeaturesFromContainer($p, $p.root()));
-    collectImgs(pane.html);
-  }
-
-  // Manuals
-  for (const pane of buckets.downloads){
-    const $p = cheerio.load(pane.html || '');
-    collectManualsFromContainer($p, $p.root(), baseUrl, add.manuals);
-    $p('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
-      const href = String($p(el).attr('href')||'');
-      if (href) add.manuals.add(abs(baseUrl, href));
-    });
-    collectImgs(pane.html);
-  }
-
-  return add;
-}
-
 /* ================== ADD-ONLY: Hydrate generic remote panes ================== */
 async function hydrateRemotePanes(cands, renderApiUrl, headers = {}) {
   if (!cands || !cands.length) return cands;
@@ -3699,6 +3611,60 @@ function bucketizeTabs(cands){
     }
   }
   return buckets;
+}
+
+/* ================== ADD-ONLY: Extract from buckets using your existing parsers ================== */
+function extractFromBuckets($, buckets, baseUrl){
+  const add = { desc: '', specs: {}, features: [], manuals: new Set(), images: new Set() };
+
+  const collectImgs = (html) => {
+    if (!html) return;
+    const _$ = cheerio.load(html);
+    _$('.accordion-content, .tab-pane, [role="tabpanel"], section, div, article')
+      .find('img, source').each((_, n)=>{
+        const src = _$(n).attr('src') || _$(n).attr('data-src') || pickLargestFromSrcset(_$(n).attr('srcset')) || '';
+        if (src) add.images.add(abs(baseUrl, src));
+      });
+  };
+
+  // Overview/Description
+  for (const pane of buckets.overview){
+    const $p = cheerio.load(pane.html || '');
+    const d = extractDescriptionFromContainer($p, $p.root());
+    if (d && d.length > (add.desc || '').length) add.desc = d;
+    collectImgs(pane.html);
+  }
+
+  // Specs
+  for (const pane of buckets.specs){
+    const $p = cheerio.load(pane.html || '');
+    Object.assign(add.specs, extractSpecsFromContainer($p, $p.root()));
+    try {
+      const jsonExtras = extractSpecsFromScripts($p, $p.root());
+      Object.assign(add.specs, mergeSpecsAdditive(jsonExtras, {}));
+    } catch {}
+    collectImgs(pane.html);
+  }
+
+  // Features
+  for (const pane of buckets.features){
+    const $p = cheerio.load(pane.html || '');
+    add.features.push(...extractFeaturesFromContainer($p, $p.root()));
+    collectImgs(pane.html);
+  }
+
+  // Manuals
+  for (const pane of buckets.downloads){
+    const $p = cheerio.load(pane.html || '');
+    collectManualsFromContainer($p, $p.root(), baseUrl, add.manuals);
+    $p('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
+      const href = String($p(el).attr('href')||'');
+      if (href) add.manuals.add(abs(baseUrl, href));
+    });
+    collectImgs(pane.html);
+  }
+
+  return add;
 }
 
 /* ================== ADD-ONLY: Images from panes → filtered list ================== */
