@@ -4445,7 +4445,7 @@ function prunePartsLikeSpecs(specs = {}){
   const out = {};
   // Keys that clearly refer to parts lists, pricing, shipping or quantity controls rather than
   // product specifications.  These are removed from the specs object during pruning.
-  const BAD_KEYS = /^(no\.?|item(?:_)?description|qty(?:_?req\.?)?|quantity|price|part(?:_)?no\.?|shipping|msrp|now|increase_quantity.*|decrease_quantity.*|zoid.*|returns|review|reviews)$/i;
+  const BAD_KEYS = /^(no\.?|item(?:_)?description|price|part(?:_)?no\.?|shipping|msrp|now|increase_quantity.*|decrease_quantity.*|zoid.*|returns|review|reviews)$/i;
 
   for (const [k, v] of Object.entries(specs || {})) {
     const key = String(k || "").trim();
