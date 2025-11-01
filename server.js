@@ -3361,16 +3361,19 @@ function collectTabCandidates($, baseUrl){
     const $el = $(el);
     let title = cleanup($el.attr('aria-label') || '');
 
-    // Try aria-labelledby → text of the tab
     if (!title) {
       const labelled = $el.attr('aria-labelledby');
       if (labelled) {
-        const $lbl = $(`#${labelled}`);
-        const lblTxt = cleanup($lbl.text());
+        // AEM/BD sometimes reuses the same id for both the <li role="tab"> and
+        // the <div role="tabpanel"> (e.g., id="overview"). Prefer the *tab*
+        // node for the title to avoid pulling panel text into the label.
+        const $tabLbl = $(`[id="${labelled}"][role="tab"]`).first();
+        const $lbl    = $tabLbl.length ? $tabLbl : $(`#${labelled}`).first();
+        const lblTxt  = cleanup($lbl.text());
         if (lblTxt) title = lblTxt;
       }
     }
-
+    
     // Derive title from id if still empty
     if (!title) {
       const idAttr  = $el.attr('id') || '';
@@ -4472,6 +4475,33 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     if (tabs && tabs.length) {
       norm.tabs = tabs;
     }
+
+    // Fallback: if Overview is still missing (AEM duplicate id "overview"),
+    // harvest just the Overview pane using the unified candidate collector.
+    const hasOverview =
+      Array.isArray(norm.tabs) &&
+      norm.tabs.some(t => /overview/i.test(String(t.title || "")) && (t.html || t.text));
+    if (!hasOverview) {
+      try {
+        const cands = collectTabCandidates($, baseUrl);
+        const overviewOnly = cands.filter(
+          c => normTabTitle(c.title) === "overview" && (c.html || c.text)
+        );
+        if (overviewOnly.length) {
+          const mapped = overviewOnly.map(c => ({
+            title:  c.title || "Overview",
+            html:   c.html  || "",
+            text:   c.text  || "",
+            href:   c.href  || "",
+            source: c.type  || "tab"
+          }));
+          norm.tabs = (norm.tabs || []).concat(mapped);
+        }
+      } catch {
+        /* non-fatal: leave tabs as-is */
+      }
+    }
+    
     if (includedItems && includedItems.length) {
       norm.includedItems = includedItems;
       // also output structured version
