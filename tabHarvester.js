@@ -455,46 +455,45 @@ function normalizeIncluded(lines = []) {
   return Object.entries(counts).map(([name, count]) => `${count} × ${name}`);
 }
 
-/**
- * Harvest tabs and lists from a full HTML document.  This is the main
- * exported function of this module.  It orchestrates the local
- * extraction of tabs and remote fetches, then post‑processes the
- * results to produce specialised arrays for “What’s in the Box”
- * (includedItems) and “Products Include” (productsInclude).  All
- * returned arrays are de‑duplicated and normalised for quantity.
- *
- * @param {string} html The full HTML document to parse
- * @param {string} baseUrl The base URL of the document (unused but kept for API parity)
- * @returns {Promise<{tabs: {title: string, html: string, rawHtml: string, text: string, source: string}[], includedItems: string[], productsInclude: string[]}>}
- */
+function extractAccordionTables($panel) {
+  const accItems = [];
+  $panel.find('.accordion-item').each((_, el) => {
+    const $item = cheerioLoad(el);
+    const title = norm($item('.cmp-accordion__title').text());
+    const rows = [];
+    $item('.bd-table__container').each((__, row) => {
+      const heading = norm($item(row).find('.bd-table__heading').text());
+      const descs = $item(row).find('.bd-table__description').map((___, d) => norm($item(d).text())).get();
+      if (heading || descs.length) rows.push({ heading, values: descs });
+    });
+    if (title && rows.length) accItems.push({ section: title, rows });
+  });
+  return accItems;
+}
+
 export async function harvestTabsFromHtml(html, baseUrl) {
   const $ = loadHtmlSafe(html);
-  // Remove navigation and other common noise elements before extracting tabs.
   $('body > nav, body > header, body > footer, [role="navigation"], .navigation, .site-nav, .nav-bar, .navbar, .breadcrumb, .breadcrumbs, .pagination').remove();
-  // Extract all tab content in the current document
   const inDoc = extractTabsFromDoc($);
-  // Fetch remote tab content if any
   const remote = await maybeFetchRemoteTabs($);
   const tabs = [...inDoc, ...remote];
-  // Parse lists from tabs
+  for (const tab of tabs) {
+    const $panel = loadHtmlSafe(tab.rawHtml || tab.html);
+    const accordions = extractAccordionTables($panel);
+    if (accordions.length) tab.accordions = accordions;
+  }
   const includedItems = [];
   const productsInclude = [];
   for (const t of tabs) {
     const htmlSrc = t.rawHtml || t.html;
-    if (/what'?s?\s+in\s+the\s+box/i.test(t.title)) {
-      includedItems.push(...listItemsFromHtml(htmlSrc));
-    }
-    if (/products?\s+include/i.test(t.title)) {
-      productsInclude.push(...listItemsFromHtml(htmlSrc));
-    }
+    if (/what'?s?\s+in\s+the\s+box/i.test(t.title)) includedItems.push(...listItemsFromHtml(htmlSrc));
+    if (/products?\s+include/i.test(t.title)) productsInclude.push(...listItemsFromHtml(htmlSrc));
   }
-  // Deduplicate and normalise
   const uniq = a => Array.from(new Set((a || []).filter(Boolean)));
-  const normIncluded = normalizeIncluded(uniq(includedItems));
-  const normProducts = normalizeIncluded(uniq(productsInclude));
   return {
     tabs,
-    includedItems: normIncluded,
-    productsInclude: normProducts
+    includedItems: normalizeIncluded(uniq(includedItems)),
+    productsInclude: normalizeIncluded(uniq(productsInclude))
   };
 }
+
