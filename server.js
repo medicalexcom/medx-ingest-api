@@ -3273,7 +3273,7 @@ const TAB_SYNONYMS = {
 function normTabTitle(s=''){
   const t = String(s)
   .toLowerCase()
-  .replace(/\s+/g, ' ')no 
+  .replace(/\s+/g, ' ') 
   .replace(/&/g, 'and') 
   .trim();
   const hit = (list)=> list.some(x => t.includes(x));
