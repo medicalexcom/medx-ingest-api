@@ -298,32 +298,7 @@ function dedupeImageObjs(cands, limit = 12) {
     out.push({ url: c.url });
     if (out.length >= limit) break;
   }
-  
-  // Parse hidden fallback download tables (e.g., <div id="spec-download">) with 3-column kit component layout
-  try {
-    $c.find('#spec-download table').each((_, tbl) => {
-      const $tbl = $(tbl);
-      const firstRow = $tbl.find('tr').first();
-      const headers = firstRow.find('th,td').toArray().map(td => cleanup($(td).text()).toLowerCase());
-      const isKitTable = headers.length >= 3 && /description/.test(headers[0]) && /set\s*quantity/.test(headers[2]);
-      if (!isKitTable) return;
-      $tbl.find('tr').slice(1).each((__, tr) => {
-        const cells = $(tr).find('th,td');
-        if (cells.length >= 1) {
-          const desc = cleanup($(cells[0]).text());
-          const sku  = cells.length >= 2 ? cleanup($(cells[1]).text()) : '';
-          const qty  = cells.length >= 3 ? cleanup($(cells[2]).text()) : '';
-          if (!desc) return;
-          const k = desc.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]+/g, '');
-          const v = qty || (sku && /^\d+$/.test(sku) ? sku : '1'); // prefer Set Quantity; default to 1
-          if (k && v && !isNonSpecKey(k)) {
-            out[k] = v;
-          }
-        }
-      });
-    });
-  } catch {}
-return out;
+  return out;
 }
 
 function dedupeManualUrls(urls) {
@@ -3719,22 +3694,6 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
   };
 }
 
-// Skip obvious non-spec keys that shouldn’t appear in the specs object.
-function isNonSpecKey(k = "") {
-  const key = String(k).toLowerCase().trim();
-  return (
-    !key ||
-    /^(:|_+)?$/.test(key) ||
-    key.length < 2 ||
-    // Generic or structural labels, not real specs
-    /\b(description|details?|specifications?|features?|benefits?|downloads?|resources?|overview|manuals?|documents?|contents?|product_kit_components?|product_kit|kit_components?)\b/i.test(key) ||
-    // Table or header noise
-    /\b(header|column|row|title|label|heading|subheading)\b/i.test(key) ||
-    // Marketing or UI fragments
-    /\b(add_to_cart|login|register|share|review|customer|rating|price|availability|stock|sku|model|mpn)\b/i.test(key)
-  );
-}
-
 function extractSpecsFromContainer($, container) {
   // Avoid contaminating specs with footer/nav/recommendation content
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
@@ -3803,32 +3762,29 @@ function extractSpecsFromContainer($, container) {
   // ===== BD-specific handling =====
 
   // 1. Extract accordion tables (.bd-table__container)
-  
   $c.find('.bd-table__container').each((_, cont) => {
     const $cont = $(cont);
-    const headingTxt = cleanup($cont.find('.bd-table__heading').first().text());
-    const key = headingTxt.toLowerCase().replace(/\s+/g, '_').replace(/:$/, '');
-    // Collect descriptions (typically SKU and Set Quantity for these blocks)
+    const key = cleanup($cont.find('.bd-table__heading').first().text())
+      .toLowerCase()
+      .replace(/\s+/g, '_')
+      .replace(/:$/, '');
     const values = [];
     $cont.find('.bd-table__description').each((__, desc) => {
       const v = cleanup($(desc).text());
       if (v) values.push(v);
     });
-    // Skip the header row that just lists column labels
-    if (/^description$/i.test(headingTxt) && values.join(' ').toLowerCase() === 'sku set quantity') {
-      return;
-    }
-    // If values are present, join; otherwise default to "1" for present items in kit-components style blocks
-    let val = values.join(' ').trim();
-    if (!val && headingTxt) {
-      // Default quantity to 1 when an item appears without an explicit quantity
-      val = '1';
-    }
-    if (headingTxt && val && !isNonSpecKey(key)) {
+    const val = values.join(' ').trim();
+    if (
+      key &&
+      val &&
+      key.length < 80 &&
+      val.length < 400 &&
+      !out[key]
+    ) {
       out[key] = val;
     }
   });
-  
+
   // 2. Parse BD summary sections after the last accordion container.
   //    These are headings like "### GTIN" followed by "GTIN – Each: 00382903051984"
   const $bdContainers = $c.find('.bd-table__container');
