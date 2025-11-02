@@ -3813,18 +3813,6 @@ function extractSpecsFromContainer($, container) {
     }
   });
   
-    const val = values.join(' ').trim();
-    if (
-      key &&
-      val &&
-      key.length < 80 &&
-      val.length < 400 &&
-      !out[key]
-    ) {
-      out[key] = val;
-    }
-  });
-
   // 2. Parse BD summary sections after the last accordion container.
   //    These are headings like "### GTIN" followed by "GTIN – Each: 00382903051984"
   const $bdContainers = $c.find('.bd-table__container');
