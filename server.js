@@ -3719,6 +3719,22 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
   };
 }
 
+// Skip obvious non-spec keys that shouldn’t appear in the specs object.
+function isNonSpecKey(k = "") {
+  const key = String(k).toLowerCase().trim();
+  return (
+    !key ||
+    /^(:|_+)?$/.test(key) ||
+    key.length < 2 ||
+    // Generic or structural labels, not real specs
+    /\b(description|details?|specifications?|features?|benefits?|downloads?|resources?|overview|manuals?|documents?|contents?|product_kit_components?|product_kit|kit_components?)\b/i.test(key) ||
+    // Table or header noise
+    /\b(header|column|row|title|label|heading|subheading)\b/i.test(key) ||
+    // Marketing or UI fragments
+    /\b(add_to_cart|login|register|share|review|customer|rating|price|availability|stock|sku|model|mpn)\b/i.test(key)
+  );
+}
+
 function extractSpecsFromContainer($, container) {
   // Avoid contaminating specs with footer/nav/recommendation content
   if (isFooterOrNav($, container) || isRecoBlock($, container)) return {};
