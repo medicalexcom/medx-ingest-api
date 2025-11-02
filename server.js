@@ -3244,36 +3244,16 @@ function resolveAllPanes($, names) {
 
 /* ================== ADD-ONLY: Tab title normalization ================== */
 const TAB_SYNONYMS = {
-  overview: [
-    'overview', 'description', 'product description', 'product details',
-    'details', 'about', 'info', 'information', 'general information',
-    'summary', 'what is this?', 'product overview', 'usage overview'
-  ],
-  specs: [
-    'specifications', 'specification', 'technical specifications', 'tech specs',
-    'technical', 'size & weight', 'size and weight', 'dimensions', 'sizing',
-    'product kit components', 'kit contents', 'kit components', 'product contents',
-    'component list', 'included items', 'package contents', 'product configuration',
-    'item details', 'item specs', 'contents of kit'
-  ],
-  features: [
-    'features', 'key features', 'highlights', 'benefits', 'features/benefits',
-    'features & benefits', 'features and benefits', 'why choose us', 'advantages',
-    'top features', 'main features', 'selling points', 'why buy'
-  ],
-  downloads: [
-    'downloads', 'documents', 'resources', 'manuals', 'documentation',
-    'technical resources', 'sds', 'msds', 'spec sheet', 'datasheet',
-    'brochure', 'downloads & resources', 'support files', 'files',
-    'product literature', 'instruction manual', 'user guide',
-    'guides and manuals', 'ifu', 'eifu', 'pamphlet', 'pdf downloads'
-  ]
+  overview: ['overview','description','product description','product details','details','about','info','information'],
+  specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
+  features: ['features','key features','highlights','benefits','features/benefits','features & benefits','features and benefits'],
+  downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure','downloads & resources'],
 };
 
 function normTabTitle(s=''){
   const t = String(s)
   .toLowerCase()
-  .replace(/\s+/g, ' ') 
+  .replace(/\s+/g, ' ')
   .replace(/&/g, 'and') 
   .trim();
   const hit = (list)=> list.some(x => t.includes(x));
@@ -3784,23 +3764,38 @@ function extractSpecsFromContainer($, container) {
   // 1. Extract accordion tables (.bd-table__container)
   $c.find('.bd-table__container').each((_, cont) => {
     const $cont = $(cont);
-    const key = cleanup($cont.find('.bd-table__heading').first().text())
+    const headingRaw = cleanup($cont.find('.bd-table__heading').first().text());
+    const key = headingRaw
       .toLowerCase()
       .replace(/\s+/g, '_')
       .replace(/:$/, '');
+    // Gather values from each description cell.  Even blank entries are
+    // collected to preserve the number of columns.
     const values = [];
     $cont.find('.bd-table__description').each((__, desc) => {
       const v = cleanup($(desc).text());
-      if (v) values.push(v);
+      // Push empty string to preserve column position if necessary
+      values.push(v);
     });
-    const val = values.join(' ').trim();
-    if (
-      key &&
-      val &&
-      key.length < 80 &&
-      val.length < 400 &&
-      !out[key]
-    ) {
+    // The BD spec tables often have a header row with key "description" and values
+    // like "SKU" and "Set Quantity".  Skip this header row entirely.
+    const lowerKey = String(key || '').toLowerCase();
+    const joined = values.join(' ').trim();
+    if (lowerKey === 'description' && /\bsku\b/i.test(joined)) {
+      return; // skip header
+    }
+    if (!key || key.length >= 80 || out[key]) return;
+    // If no non-empty value is present, default to quantity 1.  This
+    // ensures that components without specified quantities (e.g. syringes)
+    // are still captured.  Otherwise join non-empty values with space.
+    let val;
+    const nonEmpty = values.filter(v => v);
+    if (nonEmpty.length) {
+      val = nonEmpty.join(' ').trim();
+    } else {
+      val = '1';
+    }
+    if (val && val.length < 400) {
       out[key] = val;
     }
   });
@@ -4563,9 +4558,20 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     // already deduplicated.
     if (tabs && tabs.length) {
       for (const tab of tabs) {
+        // Skip empty tabs
         if (!tab || !(tab.html || tab.text)) continue;
         try {
-          const $p = cheerio.load(tab.html || '');
+          /*
+           * When extracting structured data from each tab, prefer the raw HTML over the
+           * sanitised HTML.  Many tab panels (e.g. BD product pages) embed
+           * specification tables and accordions with classes that are lost when
+           * sanitised via stripTags.  Without raw markup, BD‑specific logic in
+           * extractSpecsFromContainer cannot recognise .bd-table__container rows.
+           * Fallback to the sanitised html if rawHtml is missing.
+           */
+          const htmlForParsing = tab.rawHtml || tab.html || '';
+          const $p = cheerio.load(htmlForParsing);
+
           // Extract specs from this tab and merge
           const extraSpecs = extractSpecsFromContainer($p, $p.root());
           if (extraSpecs && Object.keys(extraSpecs).length) {
@@ -4603,7 +4609,7 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
             }
           }
         } catch (err) {
-          // ignore parse errors for individual tab
+          /* ignore parse errors for individual tab */
         }
       }
     }
