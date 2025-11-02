@@ -3244,16 +3244,36 @@ function resolveAllPanes($, names) {
 
 /* ================== ADD-ONLY: Tab title normalization ================== */
 const TAB_SYNONYMS = {
-  overview: ['overview','description','product description','product details','details','about','info','information'],
-  specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
-  features: ['features','key features','highlights','benefits','features/benefits','features & benefits','features and benefits'],
-  downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure','downloads & resources'],
+  overview: [
+    'overview', 'description', 'product description', 'product details',
+    'details', 'about', 'info', 'information', 'general information',
+    'summary', 'what is this?', 'product overview', 'usage overview'
+  ],
+  specs: [
+    'specifications', 'specification', 'technical specifications', 'tech specs',
+    'technical', 'size & weight', 'size and weight', 'dimensions', 'sizing',
+    'product kit components', 'kit contents', 'kit components', 'product contents',
+    'component list', 'included items', 'package contents', 'product configuration',
+    'item details', 'item specs', 'contents of kit'
+  ],
+  features: [
+    'features', 'key features', 'highlights', 'benefits', 'features/benefits',
+    'features & benefits', 'features and benefits', 'why choose us', 'advantages',
+    'top features', 'main features', 'selling points', 'why buy'
+  ],
+  downloads: [
+    'downloads', 'documents', 'resources', 'manuals', 'documentation',
+    'technical resources', 'sds', 'msds', 'spec sheet', 'datasheet',
+    'brochure', 'downloads & resources', 'support files', 'files',
+    'product literature', 'instruction manual', 'user guide',
+    'guides and manuals', 'ifu', 'eifu', 'pamphlet', 'pdf downloads'
+  ]
 };
 
 function normTabTitle(s=''){
   const t = String(s)
   .toLowerCase()
-  .replace(/\s+/g, ' ')
+  .replace(/\s+/g, ' ')no 
   .replace(/&/g, 'and') 
   .trim();
   const hit = (list)=> list.some(x => t.includes(x));
