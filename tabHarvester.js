@@ -306,6 +306,51 @@ function extractTabsFromDoc($) {
   // 2a) Salesforce/forceCommunity tabsets (added)
   // Append any tabs extracted from Lightning-based tab components.
   results.push(...extractSalesforceTabs($));
+
+  // 2.5 Adobe AEM Core Components tabs (cmp-tabs)
+  // Panels are <div class="cmp-tabs__tabpanel" id="..."> with a label in <li role="tab" aria-controls="...">
+  $('.cmp-tabs__tabpanel').each((_, p) => {
+    const $p = $(p);
+    const id = $p.attr('id') || '';
+    const labelledBy = $p.attr('aria-labelledby') || '';
+    let title = '';
+    if (labelledBy) {
+      const $label = $('#' + labelledBy.replace(/^#/, ''));
+      if ($label.length) title = norm($label.text());
+    }
+    if (!title) {
+      title = norm(
+        $p.attr('aria-label') ||
+        $p.find('.component-heading, .cmp-accordion__title, h2,h3,h4').first().text() ||
+        id.replace(/[-_]+/g, ' ')
+      );
+    }
+    const { rawHtml, html, text } = extractHtmlAndText($, p);
+    if (html || text) results.push({ title, html, rawHtml, text, source: 'aem-cmp' });
+  });
+
+  // 2.6 Generic ARIA tablists where tabs are <li role="tab"> and not anchors
+  $('[role="tablist"]').each((_, tablist) => {
+    const $tablist = $(tablist);
+    // Only consider cases where direct <a href> was not already handled
+    if ($tablist.find('a[href]').length) return;
+    $tablist.find('[role="tab"]').each((__, el) => {
+      const $el = $(el);
+      const id = ($el.attr('aria-controls') || '').replace(/^#/, '');
+      if (!id) return;
+      const title = norm(
+        $el.attr('title') ||
+        $el.find('.title, .cmp-tabs__tab').text() ||
+        $el.text()
+      );
+      const pane = $('#' + id).get(0);
+      if (pane) {
+        const { rawHtml, html, text } = extractHtmlAndText($, pane);
+        if (html || text) results.push({ title, html, rawHtml, text, source: 'aria' });
+      }
+    });
+  });
+
   // 3) Generic tab/accordion fallback: heading followed by content until next heading
   const genericContainers = findTabCandidates($);
   genericContainers.forEach(cont => {
