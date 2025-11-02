@@ -3812,7 +3812,7 @@ function extractSpecsFromContainer($, container) {
       out[key] = val;
     }
   });
-;
+  
     const val = values.join(' ').trim();
     if (
       key &&
