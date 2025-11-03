@@ -303,9 +303,27 @@ function extractTabsFromDoc($) {
     const { rawHtml, html, text } = extractHtmlAndText($, pane);
     if (html || text) results.push({ title, html, rawHtml, text, source: 'bootstrap' });
   });
+
   // 2a) Salesforce/forceCommunity tabsets (added)
-  // Append any tabs extracted from Lightning-based tab components.
   results.push(...extractSalesforceTabs($));
+  // 2b) Adobe AEM Core Components tabs (.cmp-tabs)
+  $('.cmp-tabs').each((_, cont) => {
+    const $cont = $(cont);
+    const titles = {};
+    $cont.find('.cmp-tabs__tablist [role="tab"]').each((__, el) => {
+      const id = ($(el).attr('aria-controls') || $(el).attr('id') || '').trim();
+      if (!id) return;
+      const label = norm($(el).attr('title') || $(el).find('.cmp-tabs__tab').text() || $(el).text() || '');
+      if (label) titles[id] = label;
+    });
+    $cont.find('.cmp-tabs__tabpanel').each((__, p) => {
+      const id = ($(p).attr('id') || $(p).attr('aria-labelledby') || '').trim();
+      const title = titles[id] || norm($(p).attr('aria-labelledby') || $(p).find('h1,h2,h3,h4').first().text());
+      const { rawHtml, html, text } = extractHtmlAndText($, p);
+      if (html || text) results.push({ title, html, rawHtml, text, source: 'aem' });
+    });
+  });
+  
   // 3) Generic tab/accordion fallback: heading followed by content until next heading
   const genericContainers = findTabCandidates($);
   genericContainers.forEach(cont => {
