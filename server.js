@@ -3759,32 +3759,27 @@ function extractSpecsFromContainer($, container) {
     }
   });
 
-  // ===== BD-specific handling =====
-
   // 1. Extract accordion tables (.bd-table__container)
+  //    Keep rows even when value cells are empty; assign default ("1").
+  const DEFAULT_ACCORDION_VALUE = '1';
   $c.find('.bd-table__container').each((_, cont) => {
     const $cont = $(cont);
-    const key = cleanup($cont.find('.bd-table__heading').first().text())
-      .toLowerCase()
-      .replace(/\s+/g, '_')
-      .replace(/:$/, '');
+    const rawHeading = cleanup($cont.find('.bd-table__heading').first().text());
+    const key = rawHeading.toLowerCase().replace(/\s+/g, '_').replace(/:$/, '');
+    // Skip header row "Description / SKU / Set Quantity"
+    const headerText = ($cont.text() || '').toLowerCase();
+    const isHeaderRow = /^description$/i.test(rawHeading) && /sku/.test(headerText) && /set\s+quantity/.test(headerText);
+    if (isHeaderRow) return;
     const values = [];
     $cont.find('.bd-table__description').each((__, desc) => {
       const v = cleanup($(desc).text());
       if (v) values.push(v);
     });
-    const val = values.join(' ').trim();
-    if (
-      key &&
-      val &&
-      key.length < 80 &&
-      val.length < 400 &&
-      !out[key]
-    ) {
-      out[key] = val;
-    }
+    let val = values.join(' ').trim();
+    if (!val) val = DEFAULT_ACCORDION_VALUE;
+    if (key && key.length < 80 && val.length < 400 && !out[key]) out[key] = val;
   });
-
+  
   // 2. Parse BD summary sections after the last accordion container.
   //    These are headings like "### GTIN" followed by "GTIN – Each: 00382903051984"
   const $bdContainers = $c.find('.bd-table__container');
