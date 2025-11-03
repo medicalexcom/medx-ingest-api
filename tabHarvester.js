@@ -19,8 +19,8 @@ import { load as cheerioLoad } from 'cheerio';
 //
 // Cheerio uses the css-select parser, which does not support jQuery-only
 // pseudo-classes like :eq(n) or bare numeric pseudo-classes like :0. When
-// such selectors are encountered, it throws errors like “Unknown pseudo-class :0”.
-// To preserve existing behaviour while avoiding these errors, we
+// such selectors are encountered, it throws errors like “Unknown pseudo-class
+// :0”.  To preserve existing behaviour while avoiding these errors, we
 // normalise any jQuery-style index pseudo-classes into the standard CSS
 // :nth-child() syntax.  These helpers are additive and do not remove or
 // otherwise alter existing logic.
@@ -447,11 +447,10 @@ function normalizeIncluded(lines = []) {
     } else {
       item = s;
     }
-    if (!item) item = 'Unlabeled item';
-    if (!qty || isNaN(qty)) qty = 1;
-    
+    // Only remove bullet characters or dashes; preserve numeric prefixes (e.g. “24mm”)
     item = item.replace(/^[\s•\-–—]+/, '').replace(/\s{2,}/g, ' ').trim();
-    counts[item] = (counts[item] || 0) + qty;
+    if (!item) continue;
+    counts[item] = (counts[item] || 0) + (isNaN(qty) ? 1 : qty);
   }
   return Object.entries(counts).map(([name, count]) => `${count} × ${name}`);
 }
