@@ -4961,10 +4961,10 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     }
   }
 
-  if (uni.variant_matrix && uni.variant_matrix.length) {
+  if (typeof uni !== "undefined" && uni && Array.isArray(uni.variant_matrix) && uni.variant_matrix.length) {
     mergeVariantMatrix(norm, uni.variant_matrix); // ADD-ONLY
   }
-  
+
   return norm;
 }
 
