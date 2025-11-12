@@ -3745,7 +3745,6 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
     images
   };
 
-  const images = finalizePaneImages(add.images, baseUrl, opts);
   const out = {
     desc: add.desc,
     specs: prunePartsLikeSpecs(add.specs || {}),
