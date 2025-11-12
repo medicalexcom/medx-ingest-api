@@ -11,6 +11,7 @@ import { harvestTabsFromHtml } from './tabHarvester.js';
 import { createWorker } from 'tesseract.js';
 import { removeNoise } from './mergeRaw.js';
 import setupQueueRoutes from './queueRoutes.js';
+import { extractVariants } from './variantExtractor.js';
 
 
 // Removed GPT-ready helper: no longer needed
@@ -514,6 +515,33 @@ app.get("/ingest", async (req, res) => {
 
     const t1 = now();
     let norm = extractNormalized(targetUrl, html, { minImgPx, excludePng, aggressive, diag, mainOnly }); // ADD-ONLY pass mainOnly
+    
+    // -- BEGIN variant + family augmentation (ADD-ONLY) --
+    try {
+      // derive slug parts specifically for BD-style pages like:
+      // https://www.bd.com/.../product-page.305198  → slug_full = "305198", family_id = "" (or stripped)
+      // or product-page.abc-12345 → slug_root = "abc-"
+      const match = targetUrl.match(/product-page\.([a-z0-9-]+)/i);
+      if (match && match[1]) {
+        const slugFull = match[1];
+        const slugRoot = slugFull.replace(/[\d-]+$/, ''); // strip trailing digits/hyphens
+        if (!norm.slug_full) norm.slug_full = slugFull;
+        if (slugRoot && !norm.family_id) norm.family_id = slugRoot;
+      }
+    
+      // optional: extract variants if your extractor returns any
+      if (typeof extractVariants === 'function') {
+        const variants = await extractVariants(html, targetUrl);
+        if (Array.isArray(variants) && variants.length && !norm.variant_matrix) {
+          norm.variant_matrix = variants; // e.g. [{option:"Size", values:["10 mL","20 mL"]}, ...]
+        }
+      }
+    } catch (e) {
+      // never block ingestion; just log a friendly warning payload-side
+      (diag.warnings ||= []).push('family/variants: ' + (e?.message || String(e)));
+    }
+    // -- END variant + family augmentation (ADD-ONLY) --
+ 
     diag.timings.extractMs = now() - t1;
 
     if (!norm.name_raw && (!norm.description_raw || norm.description_raw.length < 10)) {
