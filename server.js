@@ -3698,6 +3698,30 @@ function extractFromBuckets($, buckets, baseUrl){
   return add;
 }
 
+/** Scan tab result + page html for extra variant hints and merge (add-only). */
+function augmentTabHarvestWithVariants(result, { html, norm }) {
+  try {
+    if (typeof extractVariants !== 'function') return result;
+    const pageData = buildVariantPageData(html, norm);
+    const fromPage = extractVariants(pageData);
+    if (Array.isArray(fromPage) && fromPage.length) {
+      result.variant_matrix = Array.isArray(result.variant_matrix) ? result.variant_matrix : [];
+      // merge add-only
+      const seen = new Set(
+        result.variant_matrix.map(v => (String(v.sku || '') + '|' + JSON.stringify(v.option_values || [])))
+      );
+      for (const v of fromPage) {
+        const key = String(v.sku || '') + '|' + JSON.stringify(v.option_values || []);
+        if (!seen.has(key)) {
+          result.variant_matrix.push(v);
+          seen.add(key);
+        }
+      }
+    }
+  } catch {}
+  return result;
+}
+
 /* ================== ADD-ONLY: Images from panes → filtered list ================== */
 function finalizePaneImages(paneImgSet, baseUrl, opts){
   const arr = Array.from(paneImgSet || []);
@@ -3720,6 +3744,18 @@ async function unifiedTabHarvest($, baseUrl, renderApiUrl, headers, opts){
     manuals: dedupeManualUrls(Array.from(add.manuals || [])),
     images
   };
+
+  const images = finalizePaneImages(add.images, baseUrl, opts);
+  const out = {
+    desc: add.desc,
+    specs: prunePartsLikeSpecs(add.specs || {}),
+    features: dedupeList(add.features || []).slice(),
+    manuals: dedupeManualUrls(Array.from(add.manuals || [])),
+    images
+  };
+  // augment here (no-op if extractor not present)
+  try { augmentTabHarvestWithVariants(out, { html: $.root().html() || '', norm: {} }); } catch {}
+  return out;
 }
 
 function extractSpecsFromContainer($, container) {
@@ -3891,7 +3927,11 @@ function extractSpecsFromContainer($, container) {
       if (k && v && !out[k]) out[k] = v;
     }
   });
-
+  try {
+    const skuStem = String(out.model || out.mpn || out.sku || '').replace(/[-_]/g,'').slice(0,5);
+    if (skuStem && skuStem.length >= 4) out.variant_hint = out.variant_hint || skuStem + '*';
+  } catch {}
+  
   return out;
 }
 
@@ -4385,6 +4425,54 @@ function deepFindImagesFromJson(obj, out = []){
   return out;
 }
 
+/* === VARIANTS & FAMILY — AUGMENT-ONLY HELPERS === */
+
+/** Compute family_id/slug_full from a BD-style product URL. Safe no-op for others. */
+function computeFamilyFromUrl(url) {
+  try {
+    const m = String(url || '').match(/product-page\.([a-z0-9-]+)/i);
+    if (!m || !m[1]) return { family_id: '', slug_full: '' };
+    const slug_full = m[1];
+    const slug_root = slug_full.replace(/[\d-]+$/, ''); // strip trailing digits/hyphens
+    return { family_id: slug_root || '', slug_full };
+  } catch { return { family_id: '', slug_full: '' }; }
+}
+
+/** Normalize raw inputs into the shape your variantExtractor expects. */
+function buildVariantPageData(html, norm) {
+  const pageData = {
+    html: String(html || ''),
+    specs: norm && norm.specs ? norm.specs : {},
+    features: Array.isArray(norm && norm.features_raw) ? norm.features_raw : [],
+    description: String(norm && norm.description_raw || ''),
+    jsonldJson: null,
+    sku: String(norm && norm.sku || ''),
+    price: null
+  };
+  return pageData;
+}
+
+/** Merge a variant_matrix array into norm (add-only). */
+function mergeVariantMatrix(norm, variantMatrix) {
+  if (!Array.isArray(variantMatrix) || !variantMatrix.length) return norm;
+  if (!norm.variant_matrix || !Array.isArray(norm.variant_matrix) || !norm.variant_matrix.length) {
+    norm.variant_matrix = variantMatrix;
+    return norm;
+  }
+  // Additive union by SKU+option_values
+  const seen = new Set(
+    norm.variant_matrix.map(v => (String(v.sku || '') + '|' + JSON.stringify(v.option_values || [])).toLowerCase())
+  );
+  for (const v of variantMatrix) {
+    const key = (String(v.sku || '') + '|' + JSON.stringify(v.option_values || [])).toLowerCase();
+    if (!seen.has(key)) {
+      norm.variant_matrix.push(v);
+      seen.add(key);
+    }
+  }
+  return norm;
+}
+
 function deepFindPdfsFromJson(obj, out = []){
   if (!obj) return out;
   if (typeof obj === 'string') {
@@ -4491,7 +4579,14 @@ function prunePartsLikeSpecs(specs = {}){
 /* ================== Tab harvest orchestrator ================== */
 async function augmentFromTabs(norm, baseUrl, html, opts){
   const $ = cheerio.load(html);
-
+  try {
+    if (!norm.family_id || !norm.slug_full) {
+      const fam = computeFamilyFromUrl(baseUrl);
+      if (fam.slug_full && !norm.slug_full) norm.slug_full = fam.slug_full;
+      if (fam.family_id && !norm.family_id) norm.family_id = fam.family_id;
+    }
+  } catch {}
+  
   // === START: static tab harvest via tabHarvester.js ===
   try {
     const { tabs, includedItems, productsInclude } = await harvestTabsFromHtml(html, baseUrl);
@@ -4866,6 +4961,11 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       }
     }
   }
+
+  if (uni.variant_matrix && uni.variant_matrix.length) {
+    mergeVariantMatrix(norm, uni.variant_matrix); // ADD-ONLY
+  }
+  
   return norm;
 }
 
