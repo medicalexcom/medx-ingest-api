@@ -562,7 +562,16 @@ app.get("/ingest", async (req, res) => {
       // returned object. This ensures that tab-harvested specs stay separate.
       const siteSpecsSnapshot = { ...(norm.specs || {}) };
       try {
-        norm = await enrichFromManuals(norm, { maxManuals: 5, maxCharsText: 49750 });
+
+        // Reduce PDF extraction load for Simport (multiple Technical Data Sheets)
+        const isSimport = /(^|\.)simport\.com$/i.test(safeHostname(targetUrl));
+        const manualLimit = isSimport ? 1 : 5;
+        
+        norm = await enrichFromManuals(norm, {
+          maxManuals: manualLimit,
+          maxCharsText: 49750   // safe, reduces processing time
+        });
+        
       } catch (e) {
         const msg = e && e.message ? e.message : String(e);
         diag.warnings.push(`pdf-enrich: ${msg}`);
