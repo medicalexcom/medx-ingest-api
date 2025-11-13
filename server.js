@@ -4148,6 +4148,18 @@ function extractDescriptionFromContainer($, container){
 }
 /* ====== Markdown builders ====== */
 function extractDescriptionMarkdown($){
+
+  // Simport.com: if #description exists, take it directly
+  try {
+    const canon = $('link[rel="canonical"]').attr('href')
+              || $('meta[property="og:url"]').attr('content')
+              || '';
+    if (/simport\.com/i.test(canon) && $('#description').length) {
+      const raw = extractDescriptionFromContainer($, $('#description')[0]);
+      if (raw) return containerTextToMarkdown(raw);
+    }
+  } catch {}
+
   const candidates = [
     // Standard semantic description attribute
     '[itemprop="description"]',
@@ -4926,6 +4938,23 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
     if (d && d.length > addDesc.length) addDesc = d;
   }
 
+  // --- Simport.com override: prefer #description paragraphs over long tab panes ---
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    if (/(^|\.)simport\.com$/.test(host)) {
+      // Pull only <p> text inside #description (keeps Cat. No. table out of overview)
+      const simportParas = $('#description').find('p')
+        .map((_, p) => $(p).text().trim())
+        .get()
+        .filter(Boolean);
+  
+      const simportDesc = simportParas.join('\n').trim();
+      if (simportDesc && simportDesc.length > (addDesc || '').length) {
+        addDesc = simportDesc;
+      }
+    }
+  } catch {}
+  
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
   if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
 
