@@ -2597,11 +2597,9 @@ function extractManuals($, baseUrl, name, rawHtml, opts) {
 function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
   const mainOnly = !!(opts && (opts.mainOnly || opts.mainonly));
   const urls = new Map(); // url -> score
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|setup|quick[- ]?start|spec(?:\s*sheet)?|data\s*sheet|datasheet|brochure)/i;
-  // Treat common “document proxy” routes as document-like, including PrestaShop/WordPress attachments.
-  const proxyRe = /\b(document|view|download|asset|file|attachments?|controller=attachment|attachment_id|id_attachment)\b/i;
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:\s*sheet)?|data\s*sheet|datasheet|guide|brochure|product\s*(?:information|info|sheet|brochure)|(?:cut|sell)\s*sheet)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-  
+
   const push = (node, url, baseScore = 0) => {
     if (!url) return;
     const u = decodeHtml(abs(baseUrl, url));
@@ -2617,8 +2615,7 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
         // ultimately link to PDFs, without polluting results with unrelated
         // pages. Existing behaviour for direct PDF or known proxy URLs is
         // preserved.
-        // For non-.pdf URLs, allow known doc proxies (incl. controller=attachment, attachment_id, etc.)
-        if (!/\.pdf(?:[?#].*)?$/i.test(u) && !proxyRe.test(L)) {
+        if (!/\.pdf(?:[?#].*)?$/i.test(u) && !/document|view|download|asset|file/i.test(L)) {
           if (baseScore < 4) return;
         }
     if (blockRe.test(L)) return;
@@ -2628,18 +2625,18 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
 
   const scope = findMainProductScope($);
 
-  // 1) Direct anchors (and buttons that navigate)
-  scope.find('a,button').each((_, el) => {
+  // 1) Direct anchors with wider attribute coverage
+  scope.find('a').each((_, el) => {
     const $el = $(el);
-    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file') || $el.attr('formaction');
+    const href = $el.attr('href') || $el.attr('data-href') || $el.attr('data-url') || $el.attr('data-file');
     const t = ($el.text() || $el.attr('aria-label') || '').toLowerCase();
     // If the anchor text strongly suggests a manual (matches allowRe), assign a higher
     // base score (5) so that the link passes the subsequent filtering threshold even
     // if the URL itself does not look like a PDF or known proxy. Otherwise use the
     // default score of 4 for direct PDFs or known proxy URLs. This is additive and
     // preserves existing behaviour for other links.
-    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href) || proxyRe.test(href))) {
-      const base = allowRe.test(t) ? 5 : 4; // proxies get 4 so they pass push()’s threshold
+    if (href && (allowRe.test(t) || /\.pdf(?:[?#].*)?$/i.test(href))) {
+      const base = allowRe.test(t) ? 5 : 4;
       push(el, href, base);
     }
   });
@@ -3278,7 +3275,7 @@ const TAB_SYNONYMS = {
   overview: ['overview','description','product description','product details','details','about','info','information'],
   specs: ['specifications','specification','technical specifications','tech specs','technical','size & weight','size and weight','dimensions','sizing'],
   features: ['features','key features','highlights','benefits','features/benefits','features & benefits','features and benefits'],
-  downloads: ['downloads','documents','resources','manuals','docs','support','download center','spec sheet','data sheet','datasheet','technical data sheet','technical datasheet','tds','brochure','downloads & resources','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure'],
+  downloads: ['downloads','documents','resources','manuals','documentation','technical resources','sds','msds','spec sheet','datasheet','brochure','downloads & resources'],
 };
 
 function normTabTitle(s=''){
@@ -3938,15 +3935,14 @@ function extractSpecsFromContainer($, container) {
 }
 
 function collectManualsFromContainer($, container, baseUrl, sinkSet){
-  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|setup|quick[- ]?start|spec(?:sheet)?|data\s*sheet|datasheet|guide|brochure)/i;
+  const allowRe = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|spec(?:sheet)?|datasheet|guide|brochure)/i;
   const blockRe = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
-  const proxyRe = /\b(controller=attachment|attachment_id|id_attachment|\/attachment\/|document|view|download|asset|file)\b/i;
-  $(container).find('a[href$=".pdf"], a[href*=".pdf"], a[href*="controller=attachment"], a[href*="attachment_id"], a[href*="id_attachment"], a[href*="/attachment/"]').each((_, el)=>{  
+  $(container).find('a[href$=".pdf"], a[href*=".pdf"]').each((_, el)=>{
     const href = String($(el).attr('href') || "");
     const full = abs(baseUrl, href);
     if (!full) return;
     const L = full.toLowerCase();
-    if ((/\.pdf(?:[?#].*)?$/i.test(L) || proxyRe.test(L)) && !blockRe.test(L)) sinkSet.add(full);
+    if (allowRe.test(L) && !blockRe.test(L)) sinkSet.add(full);
   });
 }
 
@@ -4609,28 +4605,6 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       norm.tabs = tabs;
     }
 
- // BELT & SUSPENDERS (global): scan TDS/Downloads tab HTML for attachment-style document links
-  try {
-     const tdsTab = (norm.tabs || []).find(t =>
-       /technical\s*data\s*sheet|data\s*sheet|datasheet|downloads|documents/i
-         .test(String(t.title || ''))
-     );
-     if (tdsTab && tdsTab.html) {
-       const _$ = cheerio.load(tdsTab.html);
-       _$('.tab_content a[href], a[href][download]').each((_, a) => {
-         const href = _$(a).attr('href') || '';
-         // Broaden to common “document proxy” routes, not just PrestaShop ones.
-         if (/\b(controller=attachment|attachment_id|id_attachment|\/attachment\/|document|view|download|asset|file)\b/i.test(href)) {
-           const full = abs(baseUrl, href);
-           if (full) (norm.manuals ||= []).push(full);
-         }
-       });
-       if (Array.isArray(norm.manuals) && norm.manuals.length) {
-         norm.manuals = dedupeManualUrls(norm.manuals);
-       }
-     }
-   } catch { /* best-effort; do not fail ingestion */ }
-    
     // Fallback: if Overview is still missing (AEM duplicate id "overview"),
     // harvest just the Overview pane using the unified candidate collector.
     const hasOverview =
@@ -4980,7 +4954,52 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       }
     }
   } catch {}
+
+  // --- Simport.com override: harvest Technical Data Sheet manuals ---
+  try {
+    const host2 = new URL(baseUrl).hostname.toLowerCase();
+    if (/(^|\.)simport\.com$/.test(host2)) {
   
+      const techTab = $('#tab_technical_data_sheet');
+  
+      if (techTab && techTab.length) {
+        const manuals = [];
+  
+        techTab.find('a').each((i, el) => {
+          const href = $(el).attr('href') || '';
+          const label = $(el).text().trim();
+  
+          if (href.includes('controller=attachment')) {
+            manuals.push({
+              url: new URL(href, baseUrl).href,
+              label: label || 'Download'
+            });
+          }
+        });
+  
+        if (manuals.length > 0) {
+          // Initialize manuals if missing
+          norm.manuals = Array.isArray(norm.manuals) ? norm.manuals : [];
+  
+          const seen = new Set(norm.manuals);
+          for (const m of manuals) {
+            if (!seen.has(m.url)) {
+              norm.manuals.push(m.url);
+              seen.add(m.url);
+            }
+          }
+  
+          // Also expose PDF list for your PDF enrichment processor
+          norm.pdf_manual_urls = manuals.map(m => m.url);
+  
+          (diag.warnings ||= []).push(`simport: harvested ${manuals.length} manuals`);
+        }
+      }
+    }
+  } catch (err) {
+    (diag.warnings ||= []).push('simport-manuals-extract failed: ' + err.message);
+  }
+
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
   if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
 
@@ -5043,7 +5062,7 @@ function sanitizeIngestPayload(p) {
   }
   out.features_raw = features.slice();
 
-  const allowManual = /(manual|ifu|instruction|instructions|user[- ]?guide|setup|quick[- ]?start|data\s*sheet|datasheet|spec(?:\s*sheet)?|brochure|controller=attachment|attachment_id|id_attachment|\/attachment\/)/i;
+  const allowManual = /(manual|ifu|instruction|instructions|user[- ]?guide|owner[- ]?manual|assembly|install|installation|setup|quick[- ]?start|datasheet|spec(?:sheet)?|guide|brochure)/i;
   const blockManual = /(iso|mdsap|ce(?:[-\s])?cert|certificate|quality\s+management|annex|audit|policy|regulatory|warranty)/i;
   out.manuals = (out.manuals || []).filter((u) => allowManual.test(u) && !blockManual.test(u));
 
