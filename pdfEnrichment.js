@@ -15,20 +15,34 @@ export async function enrichFromManuals(
   norm,
   { maxManuals = Infinity, maxCharsText = 49750 } = {}
 ) {
-  // Slice to respect maxManuals if provided
-  const manuals = Array.isArray(norm.manuals)
-    ? norm.manuals.slice(0, maxManuals)
+  // ============================================================
+  // AUGMENTATION:
+  // 1) Preserve ALL manuals exactly as discovered.
+  // 2) Parse only the first N manuals (for performance).
+  // ============================================================
+
+  const allManuals = Array.isArray(norm.manuals)
+    ? Array.from(new Set(norm.manuals.map(String)))
     : [];
-  // Always record the list of manual URLs
-  norm.pdf_manual_urls = manuals.slice();
+
+  // Preserve ALL manuals (critical)
+  norm.pdf_manual_urls = allManuals.slice();
+
+  // Respect parsing limit (this controls CPU cost)
+  const manuals = allManuals.slice(0, maxManuals);
+
   // Initialise failure log
   norm.manuals_failed = [];
 
-  // If there are no manuals, make that explicit and return
-  if (!manuals.length) {
+  // If absolutely no manuals exist
+  if (!allManuals.length) {
     norm.pdf_text = 'No documents available';
     return norm;
   }
+
+  // ============================================================
+  // END OF AUGMENTATION – everything below remains EXACTLY the same
+  // ============================================================
 
   const pdf_text_all = [];
   const pdf_tables_all = [];
@@ -96,7 +110,7 @@ export async function enrichFromManuals(
         pdf_text_all.push(parsed.text);
       }
 
-      // capture tables and convert two‑column rows into specs
+      // capture tables and convert two-column rows into specs
       if (Array.isArray(parsed.tables) && parsed.tables.length) {
         pdf_tables_all.push(...parsed.tables);
         for (const tbl of parsed.tables) {
@@ -115,7 +129,6 @@ export async function enrichFromManuals(
         }
       }
     } catch (err) {
-      // log failure; do not abort remaining manuals
       norm.manuals_failed.push(url);
     }
   }
@@ -124,7 +137,6 @@ export async function enrichFromManuals(
   if (pdf_text_all.length) {
     norm.pdf_text = pdf_text_all.join('\n\n');
   } else {
-    // If no text but manuals exist, set pdf_text to empty to indicate presence
     norm.pdf_text = '';
   }
   if (pdf_kv_all.length) norm.pdf_kv = pdf_kv_all;
