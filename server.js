@@ -4978,7 +4978,6 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
         });
   
         if (manuals.length > 0) {
-          // Initialize manuals if missing
           norm.manuals = Array.isArray(norm.manuals) ? norm.manuals : [];
   
           const seen = new Set(norm.manuals);
@@ -4989,17 +4988,25 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
             }
           }
   
-          // Also expose PDF list for your PDF enrichment processor
           norm.pdf_manual_urls = manuals.map(m => m.url);
   
-          (diag.warnings ||= []).push(`simport: harvested ${manuals.length} manuals`);
+          // SAFE warning push
+          if (opts && opts.diag) {
+            (opts.diag.warnings ||= []).push(
+              `simport: harvested ${manuals.length} manuals`
+            );
+          }
         }
       }
     }
   } catch (err) {
-    (diag.warnings ||= []).push('simport-manuals-extract failed: ' + err.message);
+    if (opts && opts.diag) {
+      (opts.diag.warnings ||= []).push(
+        'simport-manuals-extract failed: ' + err.message
+      );
+    }
   }
-
+  
   if (addDesc) norm.description_raw = mergeDescriptions(norm.description_raw || "", addDesc);
   if (Object.keys(addSpecs).length) norm.specs = { ...(norm.specs || {}), ...prunePartsLikeSpecs(addSpecs) };
 
