@@ -752,7 +752,7 @@ function removeNoise(record) {
               .map(s => String(s).trim())
               .filter(Boolean)
               // only keep short, product-focused bullets
-              .filter(s => s.length <= 240)
+              .filter(s => s.length <= 500)
               .map(s => s.replace(/\s+/g, ' '))
           , 0.85);
           if (featuresSanitized.length) {
