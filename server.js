@@ -4609,6 +4609,28 @@ async function augmentFromTabs(norm, baseUrl, html, opts){
       norm.tabs = tabs;
     }
 
+ // BELT & SUSPENDERS (global): scan TDS/Downloads tab HTML for attachment-style document links
+  try {
+     const tdsTab = (norm.tabs || []).find(t =>
+       /technical\s*data\s*sheet|data\s*sheet|datasheet|downloads|documents/i
+         .test(String(t.title || ''))
+     );
+     if (tdsTab && tdsTab.html) {
+       const _$ = cheerio.load(tdsTab.html);
+       _$('.tab_content a[href], a[href][download]').each((_, a) => {
+         const href = _$(a).attr('href') || '';
+         // Broaden to common “document proxy” routes, not just PrestaShop ones.
+         if (/\b(controller=attachment|attachment_id|id_attachment|\/attachment\/|document|view|download|asset|file)\b/i.test(href)) {
+           const full = abs(baseUrl, href);
+           if (full) (norm.manuals ||= []).push(full);
+         }
+       });
+       if (Array.isArray(norm.manuals) && norm.manuals.length) {
+         norm.manuals = dedupeManualUrls(norm.manuals);
+       }
+     }
+   } catch { /* best-effort; do not fail ingestion */ }
+    
     // Fallback: if Overview is still missing (AEM duplicate id "overview"),
     // harvest just the Overview pane using the unified candidate collector.
     const hasOverview =
