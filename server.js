@@ -2885,7 +2885,7 @@ function extractFeaturesSmart($){
     const t = cleanup(txt);
     if (!t) return;
     // Skip very short or very long fragments
-    if (t.length < 7 || t.length > 220) return;
+    if (t.length < 7 || t.length > 500) return;
     // Skip texts that appear to be breadcrumbs or navigational arrows
     if (/>|›|»/.test(t)) return;
     // Skip generic footer/legal copy
@@ -3953,7 +3953,7 @@ function extractFeaturesFromContainer($, container){
   const pushIfGood = (txt) => {
     const t = cleanup(txt);
     if (!t) return;
-    if (t.length < 7 || t.length > 220) return;
+    if (t.length < 7 || t.length > 500) return;
     if (/>|›|»/.test(t)) return;
     if (/\b(privacy|terms|trademark|copyright|newsletter|subscribe)\b/i.test(t)) return;
     if (/(https?:\/\/|www\.)/i.test(t)) return;
