@@ -43,29 +43,6 @@ export function mergeRaw({ raw_existing = {}, raw_browse = {} }) {
 function removeNoise(record) {
   const rec = record;
 
-  // Simport.com: extract sentences from the description into features_raw
-  // Do this before any filtering/dedup so the new sentences are included
-  // in features_html and the category classification.
-  try {
-    const domain = domainFromSource(rec);
-    if (domain && /(^|\.)simport\.com$/i.test(domain)) {
-      // Use description from the browser sections or fall back to description_raw
-      const desc = rec._browse?.sections?.description || rec.description_raw || '';
-      // Break on period+space to get sentences
-      const sentences = desc.split(/\. +/).map(s => s.trim()).filter(Boolean);
-      // Initialise features_raw if necessary
-      rec.features_raw = Array.isArray(rec.features_raw) ? rec.features_raw : [];
-      const seen = new Set(rec.features_raw.map(f => f.toLowerCase()));
-      for (const s of sentences) {
-        // Skip very long sentences; they’ll be filtered later anyway
-        if (!seen.has(s.toLowerCase())) {
-          rec.features_raw.push(s);
-          seen.add(s.toLowerCase());
-        }
-      }
-    }
-  } catch {} 
-
   // Clean features_raw: remove blank, price, add-to-cart, phone/fax, generic headings, part numbers
   if (Array.isArray(rec.features_raw)) {
     rec.features_raw = rec.features_raw.filter((line) => {
@@ -775,7 +752,7 @@ function removeNoise(record) {
               .map(s => String(s).trim())
               .filter(Boolean)
               // only keep short, product-focused bullets
-              .filter(s => s.length <= 140 && !/[.:]$/.test(s.replace(/\s+/g, ' ').trim().slice(-1)))
+              .filter(s => s.length <= 240)
               .map(s => s.replace(/\s+/g, ' '))
           , 0.85);
           if (featuresSanitized.length) {
