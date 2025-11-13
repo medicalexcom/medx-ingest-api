@@ -793,6 +793,26 @@ function removeNoise(record) {
             rec.latex_free = specsCanonical.latex_free;
           }
         }
+        // Simport.com: extract sentences from the description into features_raw
+        if (domain && /(^|\.)simport\.com$/i.test(domain)) {
+          // rec._browse.sections.description holds the text from <div id="description">
+          const desc = rec._browse?.sections?.description || '';
+          // Split on newlines to get individual paragraphs/sentences
+          const parts = desc.split(/\n+/).map(p => p.trim()).filter(Boolean);
+          // Ensure features_raw is an array
+          rec.features_raw = Array.isArray(rec.features_raw) ? rec.features_raw : [];
+          const seen = new Set(rec.features_raw.map(f => f.toLowerCase()));
+          for (const p of parts) {
+            // Further split any very long line at “. ” followed by capital letter
+            const subparts = p.length > 150 ? p.split(/\. (?=[A-Z])/).map(s => s.trim()).filter(Boolean) : [p];
+            for (const s of subparts) {
+              if (!seen.has(s.toLowerCase())) {
+                rec.features_raw.push(s);
+                seen.add(s.toLowerCase());
+              }
+            }
+          }
+        }       
       } catch (_e) {
         // Never throw from removeNoise; ignore domain-specific errors silently.
       }
