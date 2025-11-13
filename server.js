@@ -4974,7 +4974,7 @@ function sanitizeIngestPayload(p) {
 
   const legalRe = /\b(privacy|terms|cookies?|trademark|copyright|©|™|®|newsletter|subscribe|sitemap|back\s*to\s*top|about|careers|press|blog|faq|support|returns?|shipping|track\s*order|store\s*locator|contact|account|login|facebook|instagram|twitter|linkedin)\b/i;
   const urlish  = /(https?:\/\/|www\.|@[a-z0-9_.-]+)/i;
-  const cleanFeature = (t) => t && t.length >= 7 && t.length <= 220 && !legalRe.test(t) && !urlish.test(t) && !/[›»>]/.test(t);
+  const cleanFeature = (t) => t && t.length >= 7 && t.length <= 500 && !legalRe.test(t) && !urlish.test(t) && !/[›»>]/.test(t);
 
   let features = Array.isArray(out.features_raw) ? out.features_raw.filter(cleanFeature) : [];
   features = dedupeList(features);
