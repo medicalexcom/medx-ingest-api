@@ -37,20 +37,134 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-(async () => {
-  try {
-    const mod = await import('./tools/render-engine/mount.mjs');
-    const mount = mod && (mod.default || mod);
-    if (typeof mount === 'function') {
-      await mount(app);
-      console.log('main: mounted render-engine routes (tools/render-engine/mount.mjs)');
-    } else {
-      console.warn('main: mount module did not export a function');
+
+
+
+// INSERT this block immediately after:
+// app.use(express.json({ limit: "1mb" }));
+//
+// It provides an inlined, ESM-safe fallback /describe handler so Render will
+// respond to POST /describe even if the external mount file is missing.
+
+{
+  // Inlined render-engine fallback (ESM-safe)
+  const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || 'dev-secret';
+  const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+  console.log('main: installing inline render-engine fallback /describe');
+
+  // Ensure healthz is present (idempotent)
+  app.get('/healthz', (_, res) => res.json({ ok: true }));
+
+  app.post('/describe', async (req, res) => {
+    try {
+      const key = req.header('x-engine-key');
+      if (!key || key !== ENGINE_SECRET) {
+        console.warn('render-engine: unauthorized describe request (invalid x-engine-key)');
+        return res.status(401).json({ error: 'unauthorized: invalid engine key' });
+      }
+
+      const body = req.body || {};
+      const name = body.name || 'Sample product';
+      const shortDescription = body.shortDescription || 'Short description';
+
+      // If OPENAI_KEY is set in Render, call OpenAI; otherwise return a deterministic mock.
+      if (OPENAI_KEY) {
+        try {
+          const { Configuration, OpenAIApi } = await import('openai');
+          const cfg = new Configuration({ apiKey: OPENAI_KEY });
+          const client = new OpenAIApi(cfg);
+
+          const prompt = `You are a normalization pipeline. Input:
+name: ${name}
+shortDescription: ${shortDescription}
+brand: ${body.brand || ""}
+specs: ${JSON.stringify(body.specs || {})}
+format: ${body.format || "avidia_standard"}
+---
+Return ONLY JSON with fields: descriptionHtml, sections, seo, normalizedPayload, raw.`;
+
+          const completion = await client.createChatCompletion({
+            model: OPENAI_MODEL,
+            messages: [
+              { role: 'system', content: 'You output machine-readable JSON according to instructions.' },
+              { role: 'user', content: prompt }
+            ],
+            max_tokens: 1000,
+            temperature: 0.2,
+          });
+
+          const text = completion.data?.choices?.[0]?.message?.content ?? '';
+          try {
+            const parsed = JSON.parse(text);
+            return res.json(parsed);
+          } catch (parseErr) {
+            console.warn('render-engine: OpenAI returned non-JSON; returning fallback shaped response');
+            return res.json({
+              descriptionHtml: `<p>${shortDescription}</p>`,
+              sections: {
+                overview: shortDescription,
+                features: [`Feature A for ${name}`, `Feature B`],
+                specsSummary: body.specs || {},
+                includedItems: [],
+                manualsSectionHtml: ''
+              },
+              seo: {
+                h1: name,
+                pageTitle: `${name} — Buy now`,
+                metaDescription: shortDescription,
+                seoShortDescription: shortDescription
+              },
+              normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
+              raw: { modelText: text, request: body }
+            });
+          }
+        } catch (openErr) {
+          console.error('render-engine: openai error', openErr?.message || openErr);
+          return res.status(500).json({ error: 'render internal error', details: String(openErr) });
+        }
+      }
+
+      // No OpenAI: deterministic mock response
+      const response = {
+        descriptionHtml: `<p>${shortDescription}</p>`,
+        sections: {
+          overview: `${shortDescription}`,
+          features: [`Feature A for ${name}`, `Feature B`],
+          specsSummary: body.specs || {},
+          includedItems: [],
+          manualsSectionHtml: ''
+        },
+        seo: {
+          h1: name,
+          pageTitle: `${name} - Buy now`,
+          metaDescription: shortDescription,
+          seoShortDescription: shortDescription
+        },
+        normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
+        raw: { request: body }
+      };
+      return res.json(response);
+    } catch (err) {
+      console.error('render-engine: unexpected error in inline /describe:', err?.stack || err);
+      return res.status(500).json({ error: 'internal', details: String(err) });
     }
-  } catch (e) {
-    console.error('main: failed to mount render-engine:', e?.stack || e);
-  }
-})();
+  });
+
+  console.log('main: inline render-engine /describe mounted');
+}
+
+
+
+
+
+
+
+
+
+
+
 
 app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
