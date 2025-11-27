@@ -1,45 +1,69 @@
-// Mountable Render engine routes for embedding into the main Express app.
-// Usage from main server.js: require('./tools/render-engine/mount')(app);
-const { Configuration, OpenAIApi } = (() => {
-  try { return require('openai'); } catch (e) { return {}; }
-})();
+// ESM-compatible mount for the render engine routes.
+// Usage: dynamic import from your main server.js and call default(app).
+//
+// This file tries to import request-logger / describe-handler / describe-proxy
+// (handling both ESM and CommonJS exports) and falls back to a safe internal
+// /describe implementation that validates x-engine-key and returns the normalized shape.
 
-module.exports = function mountRenderEngine(app) {
+const log = (...args) => console.log('[render-engine]', ...args);
+const warn = (...args) => console.warn('[render-engine]', ...args);
+const errlog = (...args) => console.error('[render-engine]', ...args);
+
+export default async function mountRenderEngine(app) {
+  log('mountRenderEngine starting');
+
   const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || 'dev-secret';
   const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-  // If a describe-handler.js exists that exports a function(app), prefer it.
+  // Helper to normalize import (handles CJS default export or ESM default)
+  const normalizeImport = (m) => (m && (m.default || m));
+
+  // Try request-logger
   try {
-    /* eslint-disable global-require */
-    const handler = require('./describe-handler');
-    if (typeof handler === 'function') {
-      handler(app);
-      console.log('render-engine: mounted external describe-handler');
+    const mod = normalizeImport(await import('./request-logger.js')).default ? normalizeImport(await import('./request-logger.js')) : normalizeImport(await import('./request-logger.js'));
+    if (typeof mod === 'function') {
+      mod(app);
+      log('request-logger loaded');
+    }
+  } catch (e) {
+    log('no request-logger or failed to load:', e?.message || e);
+  }
+
+  // Try describe-handler (prefer)
+  try {
+    const mod = normalizeImport(await import('./describe-handler.js'));
+    if (typeof mod === 'function') {
+      mod(app);
+      log('describe-handler loaded (external)');
       return;
     }
   } catch (e) {
-    console.log('render-engine: no external describe-handler');
+    log('describe-handler not found or failed to load:', e?.message || e);
   }
 
-  // If a describe-proxy.js exists that exports function(app, opts), prefer it.
+  // Try describe-proxy
   try {
-    const proxy = require('./describe-proxy');
-    if (typeof proxy === 'function') {
-      proxy(app, { targetPath: '/api/v1/describe' });
-      console.log('render-engine: mounted describe-proxy');
+    const mod = normalizeImport(await import('./describe-proxy.js'));
+    if (typeof mod === 'function') {
+      mod(app, { targetPath: '/api/v1/describe' });
+      log('describe-proxy loaded (external)');
       return;
     }
   } catch (e) {
-    console.log('render-engine: no describe-proxy found');
+    log('describe-proxy not found or failed to load:', e?.message || e);
   }
 
-  // Fallback: mount /healthz (idempotent) and /describe (will call OpenAI if key present, else return deterministic mock)
+  // Fallback: mount /healthz and /describe directly on the main app
+  log('mounting fallback /describe (OpenAI if OPENAI_API_KEY set, else deterministic mock)');
+
   app.get('/healthz', (_, res) => res.json({ ok: true }));
 
   app.post('/describe', async (req, res) => {
     try {
       const key = req.header('x-engine-key');
       if (!key || key !== ENGINE_SECRET) {
+        warn('unauthorized describe request (missing or incorrect x-engine-key)');
         return res.status(401).json({ error: 'unauthorized: invalid engine key' });
       }
 
@@ -47,35 +71,39 @@ module.exports = function mountRenderEngine(app) {
       const name = body.name || 'Sample product';
       const shortDescription = body.shortDescription || 'Short description';
 
-      // If OpenAI key present, call it; otherwise return deterministic mock
-      if (OPENAI_KEY && typeof Configuration !== 'undefined') {
+      if (OPENAI_KEY) {
         try {
-          const client = new OpenAIApi(new Configuration({ apiKey: OPENAI_KEY }));
-          const prompt = `You are a render engine that returns JSON only. Input:
+          const { Configuration, OpenAIApi } = await import('openai');
+          const cfg = new Configuration({ apiKey: OPENAI_KEY });
+          const client = new OpenAIApi(cfg);
+
+          const prompt = `You are a normalization pipeline. Input:
 name: ${name}
 shortDescription: ${shortDescription}
 brand: ${body.brand || ""}
 specs: ${JSON.stringify(body.specs || {})}
 format: ${body.format || "avidia_standard"}
-Return only valid JSON with keys: descriptionHtml, sections, seo, normalizedPayload, raw.`;
+---
+Return ONLY JSON with fields: descriptionHtml, sections, seo, normalizedPayload, raw.`;
+
           const completion = await client.createChatCompletion({
-            model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-            messages: [{ role: 'system', content: 'Return only valid JSON.' }, { role: 'user', content: prompt }],
+            model: OPENAI_MODEL,
+            messages: [{ role: 'system', content: 'You output machine-readable JSON according to instructions.' }, { role: 'user', content: prompt }],
             max_tokens: 1000,
             temperature: 0.2,
           });
+
           const text = completion.data?.choices?.[0]?.message?.content ?? '';
           try {
             const parsed = JSON.parse(text);
             return res.json(parsed);
-          } catch (e) {
-            // parse failed -> fall back to mock shaped response including model text
-            console.warn('render-engine: OpenAI returned non-JSON; returning fallback');
+          } catch (parseErr) {
+            warn('openai returned non-json, returning fallback shaped response');
             return res.json({
               descriptionHtml: `<p>${shortDescription}</p>`,
               sections: {
                 overview: shortDescription,
-                features: [`Feature A for ${name}`, 'Feature B'],
+                features: [`Feature A for ${name}`, `Feature B`],
                 specsSummary: body.specs || {},
                 includedItems: [],
                 manualsSectionHtml: '',
@@ -90,13 +118,13 @@ Return only valid JSON with keys: descriptionHtml, sections, seo, normalizedPayl
               raw: { modelText: text, request: body },
             });
           }
-        } catch (err) {
-          console.error('render-engine: openai error', err);
-          return res.status(500).json({ error: 'render internal error', details: String(err) });
+        } catch (openErr) {
+          errlog('OpenAI call failed:', openErr?.message || openErr);
+          return res.status(500).json({ error: 'render internal error', details: String(openErr) });
         }
       }
 
-      // No OpenAI key -> deterministic mock response
+      // No OpenAI: deterministic mock
       const response = {
         descriptionHtml: `<p>${shortDescription}</p>`,
         sections: {
@@ -116,12 +144,13 @@ Return only valid JSON with keys: descriptionHtml, sections, seo, normalizedPayl
         raw: { request: body },
       };
       return res.json(response);
-    } catch (err) {
-      console.error('render-engine: unexpected error', err);
-      return res.status(500).json({ error: 'internal', details: String(err) });
+    } catch (ex) {
+      errlog('fallback /describe unexpected error:', ex?.stack || ex);
+      return res.status(500).json({ error: 'internal', details: String(ex) });
     }
   });
 
-  // Optional GET /describe for debug
   app.get('/describe', (_, res) => res.status(200).send('POST /describe with x-engine-key required'));
-};
+
+  log('fallback /describe mounted');
+}
