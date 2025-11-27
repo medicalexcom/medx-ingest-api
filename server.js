@@ -43,150 +43,288 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
-
-
-
-
-// INSERT this block immediately after:
-// app.use(express.json({ limit: "1mb" }));
-//
-// It provides an inlined, ESM-safe fallback /describe handler so Render will
-// respond to POST /describe even if the external mount file is missing.
-
 {
-  // Inlined render-engine fallback (ESM-safe)
-  const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || 'dev-secret';
-  const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
-  const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  // Inlined render-engine fallback (ESM-safe) — upgraded to use master prompts (if available),
+  // tolerant JSON extraction, and an automated revise+repair loop (up to 3 attempts) that
+  // asks the model to rework output to satisfy the audit score target when possible.
+  //
+  // Insert this block immediately after:
+  //   app.use(express.json({ limit: "1mb" }));
 
-  console.log('main: installing inline render-engine fallback /describe');
+  const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || "dev-secret";
+  const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const TARGET_AUDIT_SCORE = 9.8; // desired ideal score; loop will attempt up to 3 times
+
+  console.log("main: installing inline render-engine fallback /describe (with prompt loader)");
 
   // Ensure healthz is present (idempotent)
-  app.get('/healthz', (_, res) => res.json({ ok: true }));
+  app.get("/healthz", (_, res) => res.json({ ok: true }));
 
-  app.post('/describe', async (req, res) => {
+  app.post("/describe", async (req, res) => {
     try {
       // Accept either x-engine-key or Authorization: Bearer <token>
-      const rawHeader = (req.header('x-engine-key') || req.header('authorization') || '').toString();
-      const key = rawHeader.toLowerCase().startsWith('bearer ')
-        ? rawHeader.replace(/^Bearer\s+/i, '')
+      const rawHeader = (req.header("x-engine-key") || req.header("authorization") || "").toString();
+      const key = rawHeader.toLowerCase().startsWith("bearer ")
+        ? rawHeader.replace(/^Bearer\s+/i, "")
         : rawHeader;
 
       if (!key || key !== ENGINE_SECRET) {
-        console.warn('render-engine: unauthorized describe request (invalid engine key)');
-        return res.status(401).json({ error: 'unauthorized: invalid engine key' });
+        console.warn("render-engine: unauthorized describe request (invalid engine key)");
+        return res.status(401).json({ error: "unauthorized: invalid engine key" });
       }
 
       const body = req.body || {};
-      const name = body.name || 'Sample product';
-      const shortDescription = body.shortDescription || 'Short description';
+      const name = body.name || "Sample product";
+      const shortDescription = body.shortDescription || "Short description";
 
-      // If OPENAI_KEY is set in Render, call OpenAI; otherwise return a deterministic mock.
-      if (OPENAI_KEY) {
-        try {
-          // Use OpenAI v4 SDK (default export)
-          const OpenAI = (await import('openai')).default;
-          const client = new OpenAI({ apiKey: OPENAI_KEY });
+      // Build finalPrompt using buildPrompt if available (tools/render-engine)
+      let finalPrompt = null;
+      let promptEngineInfo = { usedBuildPrompt: false, buildError: null };
 
-          const prompt = `You are a normalization pipeline. Input:
+      try {
+        // dynamic import is ESM-safe and won't break server when missing
+        const mod = await import("./tools/render-engine/utils/buildPrompt.mjs").catch(() => null);
+        if (mod && typeof mod.buildPrompt === "function") {
+          promptEngineInfo.usedBuildPrompt = true;
+          const vars = {
+            PRODUCT_NAME: name,
+            SHORT_DESCRIPTION: shortDescription,
+            BRAND: body.brand || "",
+            SCRAPED_OVERVIEW: body.scrapedOverview || "",
+            FEATURES: Array.isArray(body.features) ? body.features.join("\n") : (body.features || ""),
+            SPECS: JSON.stringify(body.specs || {}),
+            MANUALS: (body.manuals || []).join("\n"),
+            FORMAT: body.format || "avidia_standard",
+            CATEGORY: body.category || "",
+            SOURCE_URL: body.sourceUrl || "",
+            VARIANTS: JSON.stringify(body.variants || []),
+            SPEC_TABLE: JSON.stringify(body.spec_table || {})
+          };
+          finalPrompt = mod.buildPrompt("describe", vars);
+        } else {
+          promptEngineInfo.buildError = "buildPrompt not found";
+        }
+      } catch (e) {
+        promptEngineInfo.buildError = String(e && e.message ? e.message : e);
+        console.warn("render-engine: buildPrompt load failed:", promptEngineInfo.buildError);
+      }
+
+      // Fallback final prompt (minimal) if buildPrompt isn't available
+      if (!finalPrompt) {
+        finalPrompt = `MASTER-FALLBACK: You are a normalization pipeline that MUST RETURN RAW JSON ONLY with keys: descriptionHtml, sections, seo, normalizedPayload, raw.
+Input:
 name: ${name}
 shortDescription: ${shortDescription}
 brand: ${body.brand || ""}
 specs: ${JSON.stringify(body.specs || {})}
 format: ${body.format || "avidia_standard"}
 ---
-Return ONLY JSON with fields: descriptionHtml, sections, seo, normalizedPayload, raw.`;
-
-          const completion = await client.chat.completions.create({
-            model: OPENAI_MODEL || "gpt-4o-mini",
-            messages: [
-              { role: "system", content: "You output machine-readable JSON according to instructions." },
-              { role: "user", content: prompt }
-            ],
-            max_tokens: 1000,
-            temperature: 0.2,
-          });
-
-          const text = completion?.choices?.[0]?.message?.content ?? "";
-
-          try {
-            const parsed = JSON.parse(text);
-            return res.json(parsed);
-          } catch (parseErr) {
-            console.warn('render-engine: OpenAI returned non-JSON; returning fallback shaped response', parseErr?.message || parseErr);
-            const fallback = {
-              descriptionHtml: `<p>${shortDescription}</p>`,
-              sections: {
-                overview: shortDescription,
-                features: [`Feature A for ${name}`, `Feature B`],
-                specsSummary: body.specs || {},
-                includedItems: [],
-                manualsSectionHtml: ''
-              },
-              seo: {
-                h1: name,
-                pageTitle: `${name} — Buy now`,
-                metaDescription: shortDescription,
-                seoShortDescription: shortDescription
-              },
-              normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
-              raw: { modelText: text, request: body }
-            };
-            return res.json(fallback);
-          }
-        } catch (openErr) {
-          // Log and FALL BACK (do not return 500) so callers/Nexjs won't get 502
-          console.error('render-engine: openai error (falling back):', openErr?.message || openErr);
-          const fallback = {
-            descriptionHtml: `<p>${shortDescription}</p>`,
-            sections: {
-              overview: shortDescription,
-              features: [`Feature A for ${name}`, `Feature B`],
-              specsSummary: body.specs || {},
-              includedItems: [],
-              manualsSectionHtml: ''
-            },
-            seo: {
-              h1: name,
-              pageTitle: `${name} - Buy now`,
-              metaDescription: shortDescription,
-              seoShortDescription: shortDescription
-            },
-            normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
-            raw: { request: body, openaiError: String(openErr) }
-          };
-          return res.json(fallback);
-        }
+Return valid JSON only. If parsing fails, the system will re-prompt you to repair.`;
       }
 
-      // No OpenAI: deterministic mock response
-      const response = {
-        descriptionHtml: `<p>${shortDescription}</p>`,
-        sections: {
-          overview: `${shortDescription}`,
-          features: [`Feature A for ${name}`, `Feature B`],
-          specsSummary: body.specs || {},
-          includedItems: [],
-          manualsSectionHtml: ''
-        },
-        seo: {
-          h1: name,
-          pageTitle: `${name} - Buy now`,
-          metaDescription: shortDescription,
-          seoShortDescription: shortDescription
-        },
-        normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
-        raw: { request: body }
-      };
-      return res.json(response);
+      // If OpenAI key not set, return deterministic mock immediately
+      if (!OPENAI_KEY) {
+        const response = {
+          descriptionHtml: `<p>${shortDescription}</p>`,
+          sections: {
+            overview: `${shortDescription}`,
+            features: [`Feature A for ${name}`, `Feature B`],
+            specsSummary: body.specs || {},
+            includedItems: [],
+            manualsSectionHtml: ""
+          },
+          seo: {
+            h1: name,
+            pageTitle: `${name} - Buy now`,
+            metaDescription: shortDescription,
+            seoShortDescription: shortDescription
+          },
+          normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? "avidia_standard" },
+          raw: { request: body, promptEngineInfo }
+        };
+        return res.json(response);
+      }
+
+      // OpenAI v4 usage + tolerant parsing + revise loop (up to 3 attempts)
+      const OpenAI = (await import("openai")).default;
+      const client = new OpenAI({ apiKey: OPENAI_KEY });
+
+      // tolerant JSON extractor helpers
+      const stripFences = (s) => (s || "").replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+      function extractJsonCandidate(rawText) {
+        if (!rawText || typeof rawText !== "string") return null;
+        let t = rawText.trim();
+        t = stripFences(t);
+        t = t.replace(/```(?:json)?/gi, "").replace(/```/g, "");
+        // find first {...} block
+        const firstBrace = t.indexOf("{");
+        const lastBrace = t.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          const candidate = t.slice(firstBrace, lastBrace + 1);
+          try { return JSON.parse(candidate); } catch (_) {}
+        }
+        try { return JSON.parse(t); } catch (_) {}
+        return null;
+      }
+
+      async function askModel(promptSystem, userInstructions = "Produce the JSON that conforms to the schema.") {
+        const completion = await client.chat.completions.create({
+          model: OPENAI_MODEL || "gpt-4o-mini",
+          messages: [
+            { role: "system", content: promptSystem },
+            { role: "user", content: userInstructions }
+          ],
+          temperature: 0.0,
+          max_tokens: 1600
+        });
+        return completion?.choices?.[0]?.message?.content ?? "";
+      }
+
+      let attempt = 0;
+      let lastModelText = "";
+      let lastRepairText = "";
+      let parsedResult = null;
+      let auditScore = null;
+      let passed = false;
+
+      while (attempt < 3 && !passed) {
+        attempt++;
+        // 1) ask model
+        try {
+          lastModelText = await askModel(finalPrompt, "Produce only valid JSON matching the Avidia schema. Return JSON only.");
+        } catch (e) {
+          console.error("render-engine: openai call failed on attempt", attempt, e?.message || e);
+          lastModelText = "";
+        }
+
+        // 2) try parse
+        parsedResult = (() => {
+          try { return JSON.parse(lastModelText); } catch (_) { return extractJsonCandidate(lastModelText); }
+        })();
+
+        // 3) if parsed and contains desc_audit.score, evaluate
+        if (parsedResult && parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number") {
+          auditScore = Number(parsedResult.desc_audit.score);
+          // Passed conditions:
+          //     - auditScore >= TARGET_AUDIT_SCORE OR
+          //     - desc_audit.passed === true (and only data_gaps/variant warnings remain)
+          if (auditScore >= TARGET_AUDIT_SCORE || parsedResult.desc_audit.passed === true) {
+            passed = true;
+            break;
+          }
+        }
+
+        // 4) If parsed but score low, ask for a revision (repair loop)
+        if (parsedResult && attempt < 3) {
+          const repairInstruction = [
+            "The previous JSON output did not meet the audit target. You will now REVISE the JSON to improve the desc_audit.score toward the target.",
+            `Target desc_audit.score: ${TARGET_AUDIT_SCORE}.`,
+            "Do not change name_best. Apply targeted fixes only (formatting, metadata lengths, add missing sections if grounded, synonym rotations, remove placeholders).",
+            "Return ONLY the revised JSON object (no commentary)."
+          ].join("\n\n");
+
+          try {
+            lastRepairText = await askModel(finalPrompt, repairInstruction + "\n\nPreviousOutput:\n" + lastModelText);
+          } catch (e) {
+            console.error("render-engine: repair call failed", e?.message || e);
+            lastRepairText = "";
+          }
+
+          const parsedRepair = (() => {
+            try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
+          })();
+
+          if (parsedRepair) {
+            parsedResult = parsedRepair;
+            if (parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number") {
+              auditScore = Number(parsedResult.desc_audit.score);
+              if (auditScore >= TARGET_AUDIT_SCORE || parsedResult.desc_audit.passed === true) {
+                passed = true;
+                break;
+              }
+            }
+          }
+        } else if (!parsedResult) {
+          // 5) If parsing failed entirely, attempt a forced JSON repair prompt with the raw text
+          if (attempt < 3) {
+            const repairPrompt = [
+              "The model's previous output could not be parsed as JSON. Here is the original output:",
+              lastModelText,
+              "Please return the same information but ONLY as valid JSON matching the schema. Do not include code fences or extra text."
+            ].join("\n\n");
+            try {
+              lastRepairText = await askModel(finalPrompt, repairPrompt);
+            } catch (e) {
+              console.error("render-engine: forced-repair call failed", e?.message || e);
+              lastRepairText = "";
+            }
+            const parsedRepair = (() => {
+              try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
+            })();
+            if (parsedRepair) {
+              parsedResult = parsedRepair;
+              if (parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number") {
+                auditScore = Number(parsedResult.desc_audit.score);
+                if (auditScore >= TARGET_AUDIT_SCORE || parsedResult.desc_audit.passed === true) {
+                  passed = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // If this was the last attempt and we didn't pass, we will break and return best effort below.
+      } // end attempts
+
+      // If we have a parsedResult return it; else return fallback shaped JSON including model text and repair attempts for debugging
+      if (parsedResult) {
+        // Attach promptEngineInfo for observability (which loader was used)
+        parsedResult._debug ||= {};
+        parsedResult._debug.promptEngine = promptEngineInfo;
+        parsedResult._debug.attempts = attempt;
+        parsedResult._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
+        return res.json(parsedResult);
+      } else {
+        // fallback shaped response with model traces
+        const fallback = {
+          descriptionHtml: `<p>${shortDescription}</p>`,
+          sections: {
+            overview: shortDescription,
+            features: [`Feature A for ${name}`, `Feature B`],
+            specsSummary: body.specs || {},
+            includedItems: [],
+            manualsSectionHtml: ""
+          },
+          seo: {
+            h1: name,
+            pageTitle: `${name} - Buy now`,
+            metaDescription: shortDescription,
+            seoShortDescription: shortDescription
+          },
+          normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? {}, format: body.format ?? "avidia_standard" },
+          raw: {
+            request: body,
+            promptEngineInfo,
+            modelText: lastModelText,
+            repairText: lastRepairText,
+            note: "fallback returned after attempts"
+          }
+        };
+        return res.json(fallback);
+      }
     } catch (err) {
-      console.error('render-engine: unexpected error in inline /describe:', err?.stack || err);
-      return res.status(500).json({ error: 'internal', details: String(err) });
+      console.error("render-engine: unexpected error in inline /describe:", err?.stack || err);
+      return res.status(500).json({ error: "internal", details: String(err) });
     }
   });
 
-  console.log('main: inline render-engine /describe mounted');
+  console.log("main: inline render-engine /describe mounted (enhanced)");
 }
+
+
+
 
 
 
