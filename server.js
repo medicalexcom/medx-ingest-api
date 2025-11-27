@@ -40,6 +40,13 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
+
+
+
+
+
+
+
 // INSERT this block immediately after:
 // app.use(express.json({ limit: "1mb" }));
 //
@@ -59,9 +66,14 @@ app.use(express.json({ limit: "1mb" }));
 
   app.post('/describe', async (req, res) => {
     try {
-      const key = req.header('x-engine-key');
+      // Accept either x-engine-key or Authorization: Bearer <token>
+      const rawHeader = (req.header('x-engine-key') || req.header('authorization') || '').toString();
+      const key = rawHeader.toLowerCase().startsWith('bearer ')
+        ? rawHeader.replace(/^Bearer\s+/i, '')
+        : rawHeader;
+
       if (!key || key !== ENGINE_SECRET) {
-        console.warn('render-engine: unauthorized describe request (invalid x-engine-key)');
+        console.warn('render-engine: unauthorized describe request (invalid engine key)');
         return res.status(401).json({ error: 'unauthorized: invalid engine key' });
       }
 
@@ -72,9 +84,9 @@ app.use(express.json({ limit: "1mb" }));
       // If OPENAI_KEY is set in Render, call OpenAI; otherwise return a deterministic mock.
       if (OPENAI_KEY) {
         try {
-          const { Configuration, OpenAIApi } = await import('openai');
-          const cfg = new Configuration({ apiKey: OPENAI_KEY });
-          const client = new OpenAIApi(cfg);
+          // Use OpenAI v4 SDK (default export)
+          const OpenAI = (await import('openai')).default;
+          const client = new OpenAI({ apiKey: OPENAI_KEY });
 
           const prompt = `You are a normalization pipeline. Input:
 name: ${name}
@@ -85,23 +97,24 @@ format: ${body.format || "avidia_standard"}
 ---
 Return ONLY JSON with fields: descriptionHtml, sections, seo, normalizedPayload, raw.`;
 
-          const completion = await client.createChatCompletion({
-            model: OPENAI_MODEL,
+          const completion = await client.chat.completions.create({
+            model: OPENAI_MODEL || "gpt-4o-mini",
             messages: [
-              { role: 'system', content: 'You output machine-readable JSON according to instructions.' },
-              { role: 'user', content: prompt }
+              { role: "system", content: "You output machine-readable JSON according to instructions." },
+              { role: "user", content: prompt }
             ],
             max_tokens: 1000,
             temperature: 0.2,
           });
 
-          const text = completion.data?.choices?.[0]?.message?.content ?? '';
+          const text = completion?.choices?.[0]?.message?.content ?? "";
+
           try {
             const parsed = JSON.parse(text);
             return res.json(parsed);
           } catch (parseErr) {
-            console.warn('render-engine: OpenAI returned non-JSON; returning fallback shaped response');
-            return res.json({
+            console.warn('render-engine: OpenAI returned non-JSON; returning fallback shaped response', parseErr?.message || parseErr);
+            const fallback = {
               descriptionHtml: `<p>${shortDescription}</p>`,
               sections: {
                 overview: shortDescription,
@@ -118,11 +131,31 @@ Return ONLY JSON with fields: descriptionHtml, sections, seo, normalizedPayload,
               },
               normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
               raw: { modelText: text, request: body }
-            });
+            };
+            return res.json(fallback);
           }
         } catch (openErr) {
-          console.error('render-engine: openai error', openErr?.message || openErr);
-          return res.status(500).json({ error: 'render internal error', details: String(openErr) });
+          // Log and FALL BACK (do not return 500) so callers/Nexjs won't get 502
+          console.error('render-engine: openai error (falling back):', openErr?.message || openErr);
+          const fallback = {
+            descriptionHtml: `<p>${shortDescription}</p>`,
+            sections: {
+              overview: shortDescription,
+              features: [`Feature A for ${name}`, `Feature B`],
+              specsSummary: body.specs || {},
+              includedItems: [],
+              manualsSectionHtml: ''
+            },
+            seo: {
+              h1: name,
+              pageTitle: `${name} - Buy now`,
+              metaDescription: shortDescription,
+              seoShortDescription: shortDescription
+            },
+            normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? 'avidia_standard' },
+            raw: { request: body, openaiError: String(openErr) }
+          };
+          return res.json(fallback);
         }
       }
 
