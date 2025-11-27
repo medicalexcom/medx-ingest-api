@@ -1,9 +1,7 @@
-// ESM-compatible mount for the render engine routes.
-// Usage: dynamic import from your main server.js and call default(app).
-//
-// This file tries to import request-logger / describe-handler / describe-proxy
-// (handling both ESM and CommonJS exports) and falls back to a safe internal
-// /describe implementation that validates x-engine-key and returns the normalized shape.
+// tools/render-engine/mount.mjs
+// ESM mount for render engine routes. Export default async function(app).
+// This file mounts existing describe-handler/describe-proxy if present,
+// otherwise falls back to a safe /describe implementation.
 
 const log = (...args) => console.log('[render-engine]', ...args);
 const warn = (...args) => console.warn('[render-engine]', ...args);
@@ -16,47 +14,56 @@ export default async function mountRenderEngine(app) {
   const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
   const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-  // Helper to normalize import (handles CJS default export or ESM default)
-  const normalizeImport = (m) => (m && (m.default || m));
-
-  // Try request-logger
-  try {
-    const mod = normalizeImport(await import('./request-logger.js')).default ? normalizeImport(await import('./request-logger.js')) : normalizeImport(await import('./request-logger.js'));
-    if (typeof mod === 'function') {
-      mod(app);
-      log('request-logger loaded');
+  // Helper to safe-import a module path (returns module or null)
+  async function tryImport(path) {
+    try {
+      const m = await import(path);
+      return m && (m.default || m);
+    } catch (e) {
+      return null;
     }
-  } catch (e) {
-    log('no request-logger or failed to load:', e?.message || e);
   }
 
-  // Try describe-handler (prefer)
-  try {
-    const mod = normalizeImport(await import('./describe-handler.js'));
-    if (typeof mod === 'function') {
-      mod(app);
+  // Try request-logger (optional)
+  const requestLogger = await tryImport('./request-logger.js');
+  if (typeof requestLogger === 'function') {
+    try { requestLogger(app); log('request-logger loaded'); } catch (e) { warn('request-logger invocation failed', e?.message || e); }
+  } else {
+    log('no request-logger found');
+  }
+
+  // Try external describe-handler
+  const describeHandler = await tryImport('./describe-handler.js');
+  if (typeof describeHandler === 'function') {
+    try {
+      describeHandler(app);
       log('describe-handler loaded (external)');
       return;
+    } catch (e) {
+      warn('external describe-handler invocation failed:', e?.message || e);
     }
-  } catch (e) {
-    log('describe-handler not found or failed to load:', e?.message || e);
+  } else {
+    log('no external describe-handler found');
   }
 
   // Try describe-proxy
-  try {
-    const mod = normalizeImport(await import('./describe-proxy.js'));
-    if (typeof mod === 'function') {
-      mod(app, { targetPath: '/api/v1/describe' });
+  const describeProxy = await tryImport('./describe-proxy.js');
+  if (typeof describeProxy === 'function') {
+    try {
+      describeProxy(app, { targetPath: '/api/v1/describe' });
       log('describe-proxy loaded (external)');
       return;
+    } catch (e) {
+      warn('describe-proxy invocation failed:', e?.message || e);
     }
-  } catch (e) {
-    log('describe-proxy not found or failed to load:', e?.message || e);
+  } else {
+    log('no describe-proxy found');
   }
 
-  // Fallback: mount /healthz and /describe directly on the main app
+  // Fallback: mount /describe (validates x-engine-key, calls OpenAI if key present)
   log('mounting fallback /describe (OpenAI if OPENAI_API_KEY set, else deterministic mock)');
 
+  // ensure health exists
   app.get('/healthz', (_, res) => res.json({ ok: true }));
 
   app.post('/describe', async (req, res) => {
@@ -88,7 +95,10 @@ Return ONLY JSON with fields: descriptionHtml, sections, seo, normalizedPayload,
 
           const completion = await client.createChatCompletion({
             model: OPENAI_MODEL,
-            messages: [{ role: 'system', content: 'You output machine-readable JSON according to instructions.' }, { role: 'user', content: prompt }],
+            messages: [
+              { role: 'system', content: 'You output machine-readable JSON according to instructions.' },
+              { role: 'user', content: prompt },
+            ],
             max_tokens: 1000,
             temperature: 0.2,
           });
