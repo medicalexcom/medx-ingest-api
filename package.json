@@ -38,6 +38,7 @@
     "playwright": "^1.39.0",
     "playwright-extra": "^4.3.0",
     "puppeteer-extra-plugin-stealth": "^2.11.1",
-    "googleapis": "^118.0.0"
+    "googleapis": "^118.0.0",
+    "openai": "^4.7.0"
   }
 }
