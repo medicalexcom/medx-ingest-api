@@ -37,13 +37,20 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-// Mount render-engine routes (tools/render-engine)
-try {
-  require('./tools/render-engine/mount')(app);
-  console.log('main: mounted render-engine routes');
-} catch (e) {
-  console.warn('main: failed to mount render-engine routes:', e?.message || e);
-}
+(async () => {
+  try {
+    const mod = await import('./tools/render-engine/mount.mjs');
+    const mount = mod && (mod.default || mod);
+    if (typeof mount === 'function') {
+      await mount(app);
+      console.log('main: mounted render-engine routes (tools/render-engine/mount.mjs)');
+    } else {
+      console.warn('main: mount module did not export a function');
+    }
+  } catch (e) {
+    console.error('main: failed to mount render-engine:', e?.stack || e);
+  }
+})();
 
 app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
