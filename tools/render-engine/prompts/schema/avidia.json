@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AvidiaDescribe Output Schema",
+  "type": "object",
+  "required": ["descriptionHtml","sections","seo","normalizedPayload","raw"],
+  "properties": {
+    "descriptionHtml": { "type": "string" },
+    "sections": {
+      "type": "object",
+      "required": ["overview","features","specsSummary","includedItems","manualsSectionHtml"],
+      "properties": {
+        "overview": { "type": "string" },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "specsSummary": { "type": "object" },
+        "includedItems": { "type": "array", "items": { "type": "string" } },
+        "manualsSectionHtml": { "type": "string" }
+      }
+    },
+    "seo": {
+      "type": "object",
+      "required": ["h1","pageTitle","metaDescription","seoShortDescription"],
+      "properties": {
+        "h1": { "type": "string" },
+        "pageTitle": { "type": "string" },
+        "metaDescription": { "type": "string" },
+        "seoShortDescription": { "type": "string" }
+      }
+    },
+    "normalizedPayload": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "brand": { "type": ["string","null"] },
+        "specs": { "type": "object" },
+        "format": { "type": "string" }
+      }
+    },
+    "raw": { "type": "object" }
+  }
+}
