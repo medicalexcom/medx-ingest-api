@@ -65,6 +65,24 @@ app.use(express.json({ limit: "1mb" }));
     try {
       // Accept either x-engine-key or Authorization: Bearer <token>
       const rawHeader = (req.header("x-engine-key") || req.header("authorization") || "").toString();
+
+
+
+
+      
+      // DEBUG: masked header logging (temporary)
+      const receivedRaw = rawHeader || "";
+      function maskKey(s) {
+        if (!s) return "";
+        return s.length > 8 ? `${s.slice(0,4)}...${s.slice(-4)}` : s;
+      }
+      console.log("render-engine: received-key-len=", receivedRaw.length, "startsWithBearer=", receivedRaw.toLowerCase().startsWith("bearer "), "masked=", maskKey(receivedRaw));
+
+
+
+
+      
+      
       const key = rawHeader.toLowerCase().startsWith("bearer ")
         ? rawHeader.replace(/^Bearer\s+/i, "")
         : rawHeader;
