@@ -411,6 +411,30 @@ Return valid JSON only.`;
         return await callOpenAI(OPENAI_KEY, messages, OPENAI_MODEL, DEFAULTS.TEMPERATURE, DEFAULTS.MAX_TOKENS);
       }
 
+      // Stronger primary instruction: require exact skeleton + min length
+      const primaryInstruction = [
+        "RETURN ONLY valid JSON. DO NOT output any text outside the JSON object.",
+        "JSON must include keys: name_candidates, name_best, short_name_60, desc_audit (you may include a draft score but server will compute authoritative audit), product_name, generated_product_url, description_html, meta_title, meta_description, search_keywords, internal_links (array) and final_description.",
+        "",
+        "description_html MUST contain these H2 headings in EXACT order and include content for each:",
+        "1) <h2>Hook and Bullets</h2>   -- Hook: 2–3 sentence intro with one empathy clause and one outcome clause; Bold the short_name_60 once in the first sentence using <strong>…</strong>. Then 3–6 bullets in <ul> with each <li><strong>Label</strong> – Explanation.</li>",
+        "2) <h2>Main Description</h2>   -- 4–6 sentence intro, at least one buyer-outcome sentence, include at least two semantic variants of the primary concept.",
+        "3) <h2>Features and Benefits</h2> -- 2–4 H3 groups, each with 1–6 bullets in <li><strong>Feature</strong> – Benefit.</li>",
+        "4) <h2>Product Specifications</h2> -- 2–4 H3 groups, bullets in <li><strong>Spec Name</strong>: imperial (metric)</li>",
+        "5) <h2>Internal Links</h2> -- (For Avidia format, DO NOT render this section unless pdf_manual_urls or internal_link evidence exists) ",
+        "6) <h2>Why Choose</h2> -- 1 short lead paragraph + 3–6 bullets; one bullet must be a measurable differentiator if grounded inputs support it.",
+        "7) <h2>Frequently Asked Questions</h2> -- include 5–7 Q&A pairs; questions use <h3> and answers are <p>.",
+        "",
+        "MINIMUM LENGTH: When stripped of HTML tags, the description text MUST be >= 1200 characters. If you cannot reach 1200 characters using ONLY the provided input fields (features, specs, pdf_text, pdf_docs, browsed_text), do NOT invent facts — instead, populate desc_audit.data_gaps with the missing fields and still return the required HTML skeleton (you may leave sections empty but must include headings and required numbers of bullets where you have grounded content).",
+        "",
+        "USE ONLY the grounding INPUT provided in the 'INPUT:' JSON. DO NOT GUESS numeric specs, warranty terms, weights, or capacities. If a value is missing, omit it from the body and add it to desc_audit.data_gaps.",
+        "",
+        "Formatting rules: use en-dash (–) between <strong>Label</strong> and Explanation in bullets, no Markdown, no code fences, correct HTML tags only.",
+        "",
+        "INPUT (grounding) follows below. Use it only.",
+        ""
+      ].join("\n\n");
+
       // Attempt + repair loop
       let attempt = 0;
       let lastModelText = "";
@@ -423,7 +447,7 @@ Return valid JSON only.`;
       while (attempt < MAX_ATTEMPTS && !passed) {
         attempt++;
         try {
-          lastModelText = await callModel("Produce ONLY valid JSON matching the Avidia schema. RETURN JSON ONLY.");
+          lastModelText = await callModel(primaryInstruction);
         } catch (e) {
           lastModelText = "";
         }
@@ -432,30 +456,86 @@ Return valid JSON only.`;
           try { return JSON.parse(lastModelText); } catch (_) { return extractJsonCandidate(lastModelText); }
         })();
 
-        // If parsed includes desc_audit.score, check early accept
+        // If we parsed something, attempt immediate expansion if too short BEFORE validation
+        if (parsedResult && parsedResult.description_html) {
+          try {
+            const strippedLen = extractTextLength(parsedResult.description_html || parsedResult.descriptionHtml || "");
+            if (strippedLen < 1200) {
+              // Build grounding list for the model to use
+              const groundedList = [];
+              if (Array.isArray(modelInput.features) && modelInput.features.length) groundedList.push(`features: ${JSON.stringify(modelInput.features.slice(0,10))}`);
+              if (modelInput.specs && Object.keys(modelInput.specs || {}).length) groundedList.push(`specs: ${JSON.stringify(modelInput.specs)}`);
+              if (Array.isArray(modelInput.pdf_manual_urls) && modelInput.pdf_manual_urls.length) groundedList.push(`pdf_manual_urls: ${JSON.stringify(modelInput.pdf_manual_urls)}`);
+              const reasons = groundedList.length ? `Use these grounded facts: ${groundedList.join("; ")}` : "No grounded facts available.";
+
+              const expandRepair = [
+                "The previous JSON is too short when HTML tags are removed. You must expand the description to reach at least 1200 characters (text only).",
+                "Do NOT invent facts. Use ONLY the grounding inputs listed below. If a needed fact is missing, add it to desc_audit.data_gaps and leave that line out of the body.",
+                reasons,
+                "",
+                "Expand each required section fully (Hook, Main Description, Features and Benefits, Product Specifications, Why Choose, FAQ) using only grounded facts. Maintain required bullet counts. Keep bullets concise; ensure each bullet ends with a period.",
+                "",
+                "Return ONLY the corrected JSON object (no commentary)."
+              ].join("\n\n");
+
+              try {
+                lastRepairText = await callModel(expandRepair);
+              } catch (e) {
+                lastRepairText = "";
+              }
+
+              const parsedExpanded = (() => {
+                try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
+              })();
+
+              if (parsedExpanded) {
+                parsedResult = parsedExpanded;
+                // let flow continue to validation below
+              } else {
+                // If model cannot expand, set server-side data_gaps so validation fails with explicit guidance
+                parsedResult.desc_audit = parsedResult.desc_audit || {};
+                parsedResult.desc_audit.data_gaps = parsedResult.desc_audit.data_gaps || [];
+                if (!Array.isArray(modelInput.features) || !modelInput.features.length) parsedResult.desc_audit.data_gaps.push("features");
+                if (!modelInput.specs || !Object.keys(modelInput.specs || {}).length) parsedResult.desc_audit.data_gaps.push("specs");
+                if (!Array.isArray(modelInput.pdf_manual_urls) || !modelInput.pdf_manual_urls.length) parsedResult.desc_audit.data_gaps.push("pdf_manual_urls");
+                // continue to validation which will pick up violations and trigger repairs or final 422
+              }
+            }
+          } catch (e) {
+            // non-fatal
+          }
+        }
+
+        // If parsed includes desc_audit.score, check early accept (but server will still validate)
         if (parsedResult && parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number") {
           const sc = Number(parsedResult.desc_audit.score);
           if (sc >= TARGET_AUDIT_SCORE || parsedResult.desc_audit.passed === true) {
-            // run programmatic validation and return
+            // run programmatic validation and return if OK
             const { normalized, violations, warnings } = validateAndNormalize(parsedResult, modelInput);
             parsedResult = normalized;
             lastViolations = violations;
             lastWarnings = warnings;
-            // Before accepting, apply Avidia-specific post-processing:
+
+            // Avidia-specific post-processing before final acceptance
             const isAvidia = String((modelInput && modelInput.format) || "").toLowerCase() === "avidia_standard";
             if (isAvidia) {
-              // Strip Internal Links and Manuals sections from descriptionHtml for AvidiaDescribe
               parsedResult.descriptionHtml = stripSectionsFromHtml(parsedResult.descriptionHtml || "", ["Internal Links", "Manuals and Troubleshooting Guides"]);
               parsedResult.description_html = parsedResult.descriptionHtml;
-              // Remove internal_links array if present
               if (parsedResult.internal_links) delete parsedResult.internal_links;
-              // Replace extra short_name occurrences beyond 2 with neutral phrase
               const shortName = parsedResult.short_name_60 || pickShortNameFromH1(parsedResult.name_best || modelInput.name || "");
               parsedResult.descriptionHtml = replaceExtraShortNameOccurrences(parsedResult.descriptionHtml || "", shortName, 2);
               parsedResult.description_html = parsedResult.descriptionHtml;
+              const reVal = validateAndNormalize(parsedResult, modelInput);
+              parsedResult = reVal.normalized;
+              lastViolations = reVal.violations;
+              lastWarnings = reVal.warnings;
             }
-            passed = true;
-            break;
+
+            if (!lastViolations.length) {
+              passed = true;
+              break;
+            }
+            // else fall through to repair logic
           }
         }
 
