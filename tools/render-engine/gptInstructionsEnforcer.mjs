@@ -1,19 +1,14 @@
 // tools/render-engine/gptInstructionsEnforcer.mjs
-// GPT Instructions Enforcer (STRICT): mounts /describe on an Express app and enforces
-// the full "Avidia Standard" behavior: no guessing, no fallback, no deterministic mocks.
-// This file is intentionally strict: when the model does not produce Avidia-compliant JSON
-// within the allowed repair attempts, the route returns a 422 error with debug info.
-// If OPENAI_API_KEY is missing the service returns 503 — strict mode cannot operate without
-// a model key.
+// GPT Instructions Enforcer (STRICT + server-side audit authoritative).
+// - Server computes desc_audit; model cannot claim a pass.
+// - Deterministic, grounded H1 auto-expansion (no guessing).
+// - Explicit HTML skeleton repair prompts to enforce Avidia structure.
+// - If model fails to produce fully compliant JSON after attempts → 422 (no fallback).
 //
-// Usage: import { mountDescribeRoute } from "./tools/render-engine/gptInstructionsEnforcer.mjs";
-//        await mountDescribeRoute(app);
-//
-// Notes:
-// - Reads OPENAI_API_KEY and RENDER_ENGINE_SECRET and optional ENFORCE_AVIDIA_STANDARD env.
-// - ENFORCE_AVIDIA_STANDARD defaults to "1" in this file (strict by default per request).
-// - Attempts to load tools/render-engine/utils/buildPrompt.mjs (if present).
-// - Attempts up to MAX_ATTEMPTS (default 3) repair loops. No fallback content ever returned.
+// Deploy notes:
+// - Requires OPENAI_API_KEY and RENDER_ENGINE_SECRET in env.
+// - You can set ENFORCE_AVIDIA_STANDARD="0" to disable strict enforcement (not recommended).
+// - Test in staging first.
 
 import OpenAI from "openai";
 import path from "node:path";
@@ -36,7 +31,6 @@ function stripFences(s = "") {
     .replace(/```(?:json)?/gi, "")
     .replace(/```/g, "");
 }
-
 function extractJsonCandidate(rawText) {
   if (!rawText || typeof rawText !== "string") return null;
   let t = rawText.trim();
@@ -50,15 +44,10 @@ function extractJsonCandidate(rawText) {
   try { return JSON.parse(t); } catch (_) {}
   return null;
 }
-
 function enforceEnDashAndFixEm(text = "") {
   return (text || "").replace(/\u2014/g, "–").replace(/---+/g, "–");
 }
-
-function escapeRegExp(s = "") {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
+function escapeRegExp(s = "") { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function slugifyName(name = "") {
   if (!name) return "";
   let s = String(name).toLowerCase();
@@ -69,30 +58,25 @@ function slugifyName(name = "") {
   s = s.replace(/-+/g, "-");
   return s;
 }
-
 function trimSlugByRules(slug, maxChars = 60, maxTokens = 7) {
   if (!slug) return slug;
   slug = slug.slice(0, maxChars);
   const parts = slug.split("-").filter(Boolean);
-  while (parts.join("-").length > maxChars || parts.length > maxTokens) {
-    parts.pop();
-  }
+  while (parts.join("-").length > maxChars || parts.length > maxTokens) parts.pop();
   return parts.join("-");
 }
-
 function pickShortNameFromH1(h1) {
   if (!h1) return "";
   const parts = String(h1).split("–").map(p => p.trim());
   if (parts.length > 0 && parts[0]) {
     const candidate = parts[0].slice(0, 60);
-    const trimmed = candidate.replace(/\s+\S*$/, "");
-    return trimmed || candidate;
+    return candidate.replace(/\s+\S*$/, "") || candidate;
   }
   const fallback = String(h1).slice(0, 60);
   return fallback.replace(/\s+\S*$/, "") || fallback;
 }
 
-/* -------------------------- HTML normalization ------------------------- */
+/* -------------------------- HTML normalization helpers ------------------------- */
 
 function fixBulletFormattingInHtml(html = "") {
   if (!html) return html;
@@ -116,12 +100,10 @@ function fixBulletFormattingInHtml(html = "") {
     return `<li><strong>${label}</strong> – ${rest}</li>`;
   });
 }
-
 function extractTextLength(html = "") {
   if (!html) return 0;
   return String(html).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().length;
 }
-
 function countHtmlListItems(html = "") {
   if (!html) return 0;
   const m = html.match(/<li>/gi);
@@ -156,20 +138,12 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
   // Description length
   const dlen = extractTextLength(descHtml);
   if (dlen < 1200) {
-    violations.push({
-      section: "Description",
-      issue: `Description too short (${dlen} chars)`,
-      fix_hint: "Add grounded content from inputs until description reaches minimum length"
-    });
+    violations.push({ section: "Description", issue: `Description too short (${dlen} chars)`, fix_hint: "Add grounded content from inputs until description reaches minimum length" });
   } else if (dlen > 32000) {
-    violations.push({
-      section: "Description",
-      issue: `Description too long (${dlen} chars)`,
-      fix_hint: "Trim non-essential content while preserving required sections"
-    });
+    violations.push({ section: "Description", issue: `Description too long (${dlen} chars)`, fix_hint: "Trim non-essential content while preserving required sections" });
   }
 
-  // Required H2 headings presence and order (presence checks)
+  // Required H2 headings presence and order
   const requiredH2 = [
     "Hook and Bullets",
     "Main Description",
@@ -217,7 +191,7 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     }
   } catch (e) {}
 
-  // Apply formatting fixes (en-dash, bullet normalization)
+  // Apply minor fixes
   if (descHtml) {
     let fixed = descHtml;
     fixed = enforceEnDashAndFixEm(fixed);
@@ -226,13 +200,39 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     normalized.description_html = fixed;
   }
 
-  // Manuals section presence when input has manuals
+  // Manuals presence when pdf manual urls are present
   const manualsPresentInInput = Array.isArray(modelInput.pdf_manual_urls) && modelInput.pdf_manual_urls.length > 0;
   if (/\<h2\>Manuals and Troubleshooting Guides\<\/h2\>/i.test(normalized.descriptionHtml || "") && !manualsPresentInInput) {
     violations.push({ section: "Manuals", issue: "Manuals section rendered but no pdf_manual_urls provided", fix_hint: "Remove manuals section or provide valid PDF URLs" });
   }
 
   return { normalized, violations, warnings };
+}
+
+/* -------------------- Server-side desc_audit computation -------------------- */
+
+function computeDescAudit(normalized, modelInput) {
+  // simple deterministic scoring based on violations and presence of required features.
+  const out = { score: 10.0, passed: false, violations: [], warnings: [], data_gaps: [], conflicts: [] };
+
+  const { violations, warnings } = (() => {
+    try { return validateAndNormalize(normalized, modelInput); } catch (e) { return { normalized, violations: [{ section: "System", issue: "validation-failed", fix_hint: String(e) }], warnings: [] }; }
+  })();
+
+  out.violations = violations;
+  out.warnings = warnings || [];
+
+  // Deduct per violation
+  const base = 10.0;
+  let deduction = 0;
+  deduction += Math.min(violations.length * 0.9, 9.5); // heavy penalty per violation
+  let score = Math.max(0, base - deduction);
+
+  // If no violations and description length ok → pass
+  if (!violations.length) out.passed = true;
+
+  out.score = Math.round(score * 100) / 100;
+  return out;
 }
 
 /* -------------------- OpenAI call wrapper -------------------- */
@@ -260,7 +260,126 @@ function loadBuildPromptIfAvailable() {
   return null;
 }
 
-/* -------------------- Main mount function (STRICT) -------------------- */
+/* -------------------- Deterministic H1 auto-expansion (grounded only) -------------------- */
+
+function expandNameDeterministically(nameBest, modelInput, targetMin = 90) {
+  if (!nameBest) return nameBest;
+  if (String(nameBest).length >= targetMin) return nameBest;
+  const pieces = [];
+
+  // Extract grounded candidates from specs (prefer high-value keys)
+  const specPriority = ["capacity", "weight_capacity", "product_weight", "overall_dimensions", "material", "model", "color"];
+  try {
+    const specs = modelInput.specs || {};
+    for (const k of specPriority) {
+      if (specs[k] && !pieces.includes(String(specs[k]).trim())) pieces.push(String(specs[k]).trim());
+      if (pieces.length >= 4) break;
+    }
+  } catch {}
+
+  // Also use first two features if present
+  try {
+    if (Array.isArray(modelInput.variants) && modelInput.variants.length && pieces.length < 4) {
+      // skip - variants are structured
+    }
+    if (Array.isArray(modelInput.features) && modelInput.features.length) {
+      for (const f of modelInput.features) {
+        const t = String(f || "").trim();
+        if (t && !pieces.includes(t)) {
+          pieces.push(t);
+          if (pieces.length >= 4) break;
+        }
+      }
+    }
+  } catch {}
+
+  // Use shortDescription if available
+  if (modelInput.shortDescription && pieces.length < 4) {
+    const s = String(modelInput.shortDescription).trim();
+    if (s && !pieces.includes(s)) pieces.push(s);
+  }
+
+  // Build appended string progressively until reaches targetMin or no candidates
+  let cur = String(nameBest);
+  let i = 0;
+  while (cur.length < targetMin && i < pieces.length) {
+    const add = pieces[i++];
+    // sanitize: remove trailing punctuation
+    const clean = String(add).replace(/^[\s\-\–\:]+|[\s\-\–\:]+$/g, "");
+    if (!clean) continue;
+    cur = `${cur}, ${clean}`;
+    if (cur.length >= targetMin) break;
+  }
+
+  // Final trim to max 110 if needed by removing trailing tokens
+  if (cur.length > 110) cur = cur.slice(0, 110).replace(/\s+\S*$/, "").trim();
+  return cur;
+}
+
+/* -------------------- Repair prompt skeleton -------------------- */
+
+function buildRepairSkeletonPrompt(violations, modelInput, previousOutput) {
+  const requiredSkeleton = [
+    "<!-- REQUIRED: Return valid JSON only. No extra text. -->",
+    "JSON keys required: name_candidates (array), name_best (string), name_best_seo_score (number), short_name_60 (string), desc_audit (object), product_name, generated_product_url, description_html (string), meta_title, meta_description, search_keywords, internal_links (array), final_description (string)",
+    "",
+    "description_html MUST contain the following H2 headings in this exact order:",
+    "1) <h2>Hook and Bullets</h2>",
+    "2) <h2>Main Description</h2>",
+    "3) <h2>Features and Benefits</h2>",
+    "4) <h2>Product Specifications</h2>",
+    "5) <h2>Internal Links</h2>",
+    "6) <h2>Why Choose</h2>",
+    "7) <h2>Frequently Asked Questions</h2>",
+    "",
+    "HOOK requirements:",
+    "- First paragraph: 2–3 sentences including one empathy clause and one outcome clause.",
+    "- Bold the short_name_60 once in the first sentence using <strong>short_name</strong>.",
+    "- Provide 3–6 bullets (<ul><li>...) following bullet format: <li><strong>Label</strong> – Explanation.</li>",
+    "",
+    "MAIN DESCRIPTION requirements:",
+    "- H2 title: use a short keyword variation (not the full long name).",
+    "- 4–6 sentence intro paragraph including one buyer-outcome sentence and at least two semantic variants of the primary concept.",
+    "",
+    "FEATURES & BENEFITS requirements:",
+    "- H2 exactly 'Features and Benefits'.",
+    "- 2–4 H3 groups with title and bullets in the <li><strong>Label</strong> – Explanation.</li> format.",
+    "",
+    "PRODUCT SPECIFICATIONS requirements:",
+    "- H2 exactly 'Product Specifications'.",
+    "- 2–4 H3 groups, bullets follow <li><strong>Spec Name</strong>: imperial (metric)</li>",
+    "",
+    "INTERNAL LINKS:",
+    "- Place exactly two site-relative internal_links after Product Specifications and before Why Choose. Provide internal_links array in JSON with type, anchor, url, confidence.",
+    "",
+    "WHY CHOOSE:",
+    "- H2 and 3–6 bullets. Include at least one differentiator bullet (measurable if present in inputs).",
+    "",
+    "FAQ:",
+    "- 5–7 Q&A pairs. Questions use <h3> and answers are <p> paragraphs.",
+    "",
+    "GROUNDING rules:",
+    "- Use ONLY the input JSON for facts (modelInput). Do NOT invent numbers, warranty terms, weights, capacities, or specs.",
+    "- If a value is missing, OMIT it from customer-facing HTML and list it in desc_audit.data_gaps.",
+    "",
+    "AUDIT:",
+    "- Do not set desc_audit.passed = true yourself. The server will compute the audit after your JSON. Return desc_audit with score field only if you include a draft; the server will override.",
+    "",
+    "PREVIOUS OUTPUT (for context):",
+    JSON.stringify(previousOutput || {}, null, 2),
+    "",
+    "INPUT (grounding):",
+    JSON.stringify(modelInput || {}, null, 2),
+    "",
+    "Return only JSON. Strictly follow skeleton and formatting rules above."
+  ].join("\n");
+
+  // Add readable violations list
+  const vlist = (violations || []).map((v, i) => `${i+1}. ${v.section} — ${v.issue} (${v.fix_hint || "no hint"})`).join("\n");
+  return `The previous output failed validation for these issues:\n\n${vlist}\n\nPlease apply the exact fixes and return only JSON matching the skeleton below.\n\n${requiredSkeleton}`;
+}
+
+/* -------------------- Main mount function -------------------- */
 
 export async function mountDescribeRoute(app, opts = {}) {
   const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || opts.engineSecret || "dev-secret";
@@ -269,36 +388,32 @@ export async function mountDescribeRoute(app, opts = {}) {
   const TARGET_AUDIT_SCORE = Number(process.env.TARGET_AUDIT_SCORE || opts.targetAuditScore || DEFAULTS.TARGET_AUDIT_SCORE);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || opts.maxAttempts || DEFAULTS.MAX_ATTEMPTS);
 
-  // Strict enforcement is ON by default per request: no fallback, no guessing.
   const ENFORCE_AVIDIA = process.env.ENFORCE_AVIDIA_STANDARD !== "0"; // default true
 
   console.log("gptEnforcer (STRICT): mounting /describe route enforceAvidia=", ENFORCE_AVIDIA);
 
-  // health
   app.get("/healthz", (_, res) => res.json({ ok: true }));
-
-  // Helper: returns true only when Avidia audit shows passed true or score >= target
-  function isAvidiaCompliant(obj) {
-    if (!obj || typeof obj !== "object") return false;
-    if (!obj.desc_audit || typeof obj.desc_audit !== "object") return false;
-    if (obj.desc_audit.passed === true) return true;
-    if (typeof obj.desc_audit.score === "number" && Number(obj.desc_audit.score) >= TARGET_AUDIT_SCORE) return true;
-    return false;
-  }
 
   app.post("/describe", async (req, res) => {
     try {
       const rawHeader = (req.header("x-engine-key") || req.header("authorization") || "").toString();
       const key = rawHeader.toLowerCase().startsWith("bearer ") ? rawHeader.replace(/^Bearer\s+/i, "") : rawHeader;
-      if (!key || key !== ENGINE_SECRET) {
-        return res.status(401).json({ error: "unauthorized: invalid engine key" });
+      if (!key || key !== ENGINE_SECRET) return res.status(401).json({ error: "unauthorized: invalid engine key" });
+
+      if (!ENFORCE_AVIDIA) {
+        return res.status(400).json({ error: "ENFORCE_AVIDIA_STANDARD must be enabled for this service" });
+      }
+
+      if (!OPENAI_KEY) {
+        console.error("gptEnforcer: OPENAI_API_KEY missing; cannot run strict enforcer");
+        return res.status(503).json({ error: "render engine unavailable", message: "OPENAI_API_KEY missing; Avidia standard cannot run without model access" });
       }
 
       const body = req.body || {};
       const name = body.name || "Sample product";
       const shortDescription = body.shortDescription || "Short description";
 
-      // Load prompt (prefer buildPrompt, else fallback to describePrompt.md if present)
+      // Build finalPrompt: prefer buildPrompt, else use canonical describePrompt.md; fatal if missing
       let finalPrompt = null;
       let promptEngineInfo = { usedBuildPrompt: false, usedDescribeMd: false, buildError: null };
 
@@ -308,32 +423,24 @@ export async function mountDescribeRoute(app, opts = {}) {
           const mod = await modImport;
           if (mod && typeof mod.buildPrompt === "function") {
             promptEngineInfo.usedBuildPrompt = true;
-            const vars = {
+            finalPrompt = mod.buildPrompt("describe", {
               PRODUCT_NAME: name,
               SHORT_DESCRIPTION: shortDescription,
               BRAND: body.brand || "",
-              SCRAPED_OVERVIEW: body.scrapedOverview || "",
               FEATURES: Array.isArray(body.features) ? body.features.join("\n") : (body.features || ""),
               SPECS: JSON.stringify(body.specs || {}),
               MANUALS: (body.manuals || []).join("\n"),
               FORMAT: body.format || "avidia_standard",
               CATEGORY: body.category || "",
-              SOURCE_URL: body.sourceUrl || "",
-              VARIANTS: JSON.stringify(body.variants || []),
-              SPEC_TABLE: JSON.stringify(body.spec_table || {})
-            };
-            finalPrompt = mod.buildPrompt("describe", vars);
-          } else {
-            promptEngineInfo.buildError = "buildPrompt not found in module";
+              SOURCE_URL: body.sourceUrl || ""
+            });
           }
         }
       } catch (e) {
         promptEngineInfo.buildError = String(e && e.message ? e.message : e);
-        console.warn("gptEnforcer: buildPrompt load failed:", promptEngineInfo.buildError);
       }
 
       if (!finalPrompt) {
-        // Try to read canonical describePrompt.md in repo
         try {
           const dp = path.resolve(process.cwd(), "tools/render-engine/prompts/describePrompt.md");
           if (fs.existsSync(dp)) {
@@ -345,19 +452,11 @@ export async function mountDescribeRoute(app, opts = {}) {
         }
       }
 
-      // If still no prompt, this is a fatal config error in strict mode.
       if (!finalPrompt) {
-        console.error("gptEnforcer: no prompt available (buildPrompt nor describePrompt.md). Cannot proceed in strict mode.");
+        console.error("gptEnforcer: no describe prompt available (buildPrompt or describePrompt.md).");
         return res.status(500).json({ error: "server_misconfiguration", message: "No describe prompt available for strict enforcer", details: promptEngineInfo });
       }
 
-      // Enforce presence of OpenAI key when strict
-      if (!OPENAI_KEY) {
-        console.error("gptEnforcer: OPENAI_API_KEY missing. Strict mode requires a valid key.");
-        return res.status(503).json({ error: "render engine unavailable", message: "OPENAI_API_KEY missing; Avidia standard cannot run without model access" });
-      }
-
-      // Build structured model input for grounding
       const modelInput = {
         tenant_id: ((req.header("x-tenant-id") || null) || body.tenant_id || null),
         user_id: ((req.header("x-user-id") || null) || body.user_id || null),
@@ -367,16 +466,16 @@ export async function mountDescribeRoute(app, opts = {}) {
         specs: body.specs || {},
         format: body.format || "avidia_standard",
         variants: body.variants || [],
+        features: Array.isArray(body.features) ? body.features : (body.features ? [body.features] : []),
         pdf_manual_urls: body.pdf_manual_urls || body.manuals || []
       };
 
-      // grounding instruction (strict)
       const groundingInstruction = [
         "READ THESE INSTRUCTIONS CAREFULLY:",
         "1) INPUT JSON follows in the next message. Use ONLY the input data to produce customer-facing content.",
         "2) DO NOT INVENT product names, specs, weights, warranty terms, capacities, or other factual values.",
-        "3) If a value is missing or ambiguous, OMIT the corresponding line/bullet from the customer-facing HTML and list the gap under desc_audit.data_gaps.",
-        "4) RETURN ONLY valid JSON matching the schema requested by the system prompt. No commentary, no code fences, no extra text."
+        "3) If a value is missing, OMIT it from the customer-facing HTML and list the gap under desc_audit.data_gaps.",
+        "4) RETURN ONLY valid JSON matching the required schema. No commentary, no code fences, no extra text."
       ].join(" ");
 
       async function callModel(userInstructions) {
@@ -389,7 +488,7 @@ export async function mountDescribeRoute(app, opts = {}) {
         return await callOpenAI(OPENAI_KEY, messages, OPENAI_MODEL, DEFAULTS.TEMPERATURE, DEFAULTS.MAX_TOKENS);
       }
 
-      // Repair loop: attempts to get parseable + Avidia-compliant JSON
+      // First request: ask model to produce Avidia-format JSON (no desc_audit passed claims necessary)
       let attempt = 0;
       let lastModelText = "";
       let lastRepairText = "";
@@ -397,13 +496,20 @@ export async function mountDescribeRoute(app, opts = {}) {
       let collectedViolations = [];
       let collectedWarnings = [];
 
+      // Primary initial instruction: produce JSON following schema; do NOT mark passed=true (server will compute)
+      const primaryInstruction = [
+        "Produce ONLY valid JSON matching the Avidia schema. RETURN JSON ONLY.",
+        "Do NOT set desc_audit.passed = true yourself; include desc_audit.score only if you produce a draft. The server will compute the authoritative desc_audit after receiving your JSON.",
+        "Ensure description_html contains all required H2 headings and the structure in the repository's describePrompt.md.",
+        "If you lack facts, omit them and list them in desc_audit.data_gaps."
+      ].join("\n\n");
+
       while (attempt < MAX_ATTEMPTS) {
         attempt++;
         try {
-          lastModelText = await callModel("Produce ONLY valid JSON matching the Avidia schema. RETURN JSON ONLY.");
+          lastModelText = await callModel(primaryInstruction);
         } catch (e) {
           lastModelText = "";
-          console.warn("gptEnforcer: model call error on attempt", attempt, String(e).slice(0, 400));
         }
 
         parsedResult = (() => {
@@ -411,88 +517,81 @@ export async function mountDescribeRoute(app, opts = {}) {
         })();
 
         if (parsedResult) {
-          // Programmatic validation
+          // Programmatic normalization + validation
           const { normalized, violations, warnings } = validateAndNormalize(parsedResult, modelInput);
           parsedResult = normalized;
           collectedViolations = violations;
           collectedWarnings = warnings;
 
-          // If parsed includes desc_audit score/passed, prefer that; else require validation to be clean
-          if (isAvidiaCompliant(parsedResult) && collectedViolations.length === 0) {
-            // Successful: return normalized, with debug
+          // Deterministic H1 auto-expansion when too short (grounded only)
+          try {
+            const h = parsedResult.name_best || parsedResult.product_name || modelInput.name || "";
+            if (h && String(h).length < 90) {
+              const expanded = expandNameDeterministically(h, modelInput, 90);
+              if (expanded && expanded.length >= 90 && expanded.length <= 110) {
+                parsedResult.name_best = expanded;
+                parsedResult.short_name_60 = pickShortNameFromH1(expanded);
+                // refresh slug
+                const rawSlug = slugifyName(expanded);
+                parsedResult.generated_product_url = `/${trimSlugByRules(rawSlug, 60, 7)}`;
+                // Re-run validation
+                const reVal = validateAndNormalize(parsedResult, modelInput);
+                parsedResult = reVal.normalized;
+                collectedViolations = reVal.violations;
+                collectedWarnings = reVal.warnings;
+              }
+            }
+          } catch (e) {
+            // non-fatal
+          }
+
+          // compute server authoritative audit
+          const descAudit = computeDescAudit(parsedResult, modelInput);
+          parsedResult.desc_audit = parsedResult.desc_audit || {};
+          parsedResult.desc_audit.score = descAudit.score;
+          parsedResult.desc_audit.passed = descAudit.passed;
+          parsedResult.desc_audit.violations = descAudit.violations;
+          parsedResult.desc_audit.warnings = descAudit.warnings;
+
+          // Accept only when passed true and no programmatic violations
+          if (descAudit.passed && (!descAudit.violations || descAudit.violations.length === 0)) {
+            // attach debug and return
             parsedResult._debug = {
               promptEngineInfo,
               attempts: attempt,
-              lastModelTextPreview: String(lastModelText || "").slice(0, 1200),
-              input_preview: { name: modelInput.name, brand: modelInput.brand, specs_keys: Object.keys(modelInput.specs || {}) }
+              lastModelTextPreview: String(lastModelText || "").slice(0, 1200)
             };
-
-            // Enforce slug rules
-            try {
-              const finalName = parsedResult.name_best || parsedResult.product_name || modelInput.name || "";
-              let rawSlug = slugifyName(finalName);
-              let finalSlug = trimSlugByRules(rawSlug, 60, 7);
-              parsedResult.generated_product_url = finalSlug ? `/${finalSlug}` : `/${slugifyName(modelInput.name || "product")}`;
-              if (finalSlug !== rawSlug) {
-                parsedResult.desc_audit = parsedResult.desc_audit || {};
-                parsedResult.desc_audit.slug_resolution = `trimmed from ${rawSlug} to ${finalSlug}`;
-                parsedResult.desc_audit.warnings = parsedResult.desc_audit.warnings || [];
-                parsedResult.desc_audit.warnings.push({ code: "SLUG_TRIMMED", section: "Slug", message: `Slug trimmed to meet limits`, fix_hint: "Adjust name_best" });
-              }
-            } catch (e) { /* non-fatal */ }
-
             return res.json(parsedResult);
           }
 
-          // If not compliant and attempts remain, create a repair instruction using exact violations
+          // Not passed: if attempts remain, send repair prompt with exact violations and skeleton
           if (attempt < MAX_ATTEMPTS) {
-            const repairInstruction = [
-              "The previous JSON output failed validation or audit thresholds. Apply the exact fixes below and RETURN ONLY the corrected JSON object. Do NOT add commentary.",
-              "Validation/Audit issues:",
-              ...collectedViolations.map((v, i) => `${i + 1}. ${v.section} — ${v.issue} (${v.fix_hint || "no hint"})`),
-              "",
-              "Repair rules (apply programmatically):",
-              "- Do not invent missing facts. Omit missing items and record gaps under desc_audit.data_gaps.",
-              "- Ensure required H2 headings (Hook and Bullets, Main Description, Features and Benefits, Product Specifications, Internal Links, Why Choose, Frequently Asked Questions) are present in that order.",
-              "- Hook bullets: 3–6. Why Choose bullets: 3–6. FAQs: 5–7 Q&A pairs.",
-              "- H1 (name_best) must be 90–110 chars. Do not change name_best unless explicitly allowed by higher-level workflow.",
-              "- Use en-dash (–) between <strong>label</strong> and explanation in bullets.",
-              "",
-              "INPUT (grounding):",
-              JSON.stringify(modelInput, null, 2),
-              "",
-              "PreviousOutput:",
-              JSON.stringify(parsedResult, null, 2),
-              "",
-              "Return only JSON."
-            ].join("\n\n");
+            const repairPrompt = buildRepairSkeletonPrompt(collectedViolations, modelInput, parsedResult);
             try {
-              lastRepairText = await callModel(repairInstruction);
+              lastRepairText = await callModel(repairPrompt);
             } catch (e) {
               lastRepairText = "";
             }
-            // parse the repair result and continue loop
             const parsedRepair = (() => {
               try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
             })();
             if (parsedRepair) {
-              const resVal = validateAndNormalize(parsedRepair, modelInput);
-              parsedResult = resVal.normalized;
-              collectedViolations = resVal.violations;
-              collectedWarnings = resVal.warnings;
-              // loop continues
+              // loop will validate parsedRepair next iteration
+              parsedResult = parsedRepair;
+              continue;
             } else {
-              // if repair could not be parsed, continue to next attempt to re-request repair
+              // loop continues, will re-issue primaryInstruction or next repair
+              continue;
             }
-          } // end attempt < MAX_ATTEMPTS
+          }
         } else {
-          // Could not parse model response. If attempts remain, ask for strict JSON repair.
+          // not parseable, if attempts remain, ask for JSON-only repair
           if (attempt < MAX_ATTEMPTS) {
             const repairPrompt = [
               "The model's previous output could not be parsed as JSON. Here is the original output:",
               lastModelText,
               "",
-              "Please return the same information but ONLY as valid JSON matching the schema. Do not include code fences or extra text.",
+              "Please return the same information but ONLY as valid JSON matching the Avidia schema. Do not include code fences or extra text.",
               "INPUT:",
               JSON.stringify(modelInput, null, 2)
             ].join("\n\n");
@@ -505,34 +604,31 @@ export async function mountDescribeRoute(app, opts = {}) {
               try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
             })();
             if (parsedRepair) {
-              const resVal = validateAndNormalize(parsedRepair, modelInput);
-              parsedResult = resVal.normalized;
-              collectedViolations = resVal.violations;
-              collectedWarnings = resVal.warnings;
-              // loop continues
+              parsedResult = parsedRepair;
+              continue;
+            } else {
+              continue;
             }
           }
         }
-      } // end repair attempts loop
+      } // end attempts
 
-      // If we reach here, the model failed to produce Avidia-compliant output within attempts.
+      // If we get here, model failed to produce Avidia-compliant JSON
       console.error("gptEnforcer: model failed to produce Avidia-compliant JSON after attempts", {
         attempts: MAX_ATTEMPTS,
-        lastModelText: String(lastModelText || "").slice(0, 8000),
-        lastRepairText: String(lastRepairText || "").slice(0, 8000),
-        violations: collectedViolations,
-        warnings: collectedWarnings
+        lastModelText: String(lastModelText || "").slice(0, 16000),
+        lastRepairText: String(lastRepairText || "").slice(0, 16000),
+        violations: collectedViolations
       });
 
-      // Per strict requirement: do NOT return fallback or mock. Return error with debug for operator.
       return res.status(422).json({
         error: "model_noncompliant",
         message: "Model did not produce Avidia Standard compliant JSON within allowed repair attempts. No fallback returned.",
         attempts: MAX_ATTEMPTS,
         _debug: {
           promptEngineInfo,
-          lastModelText: String(lastModelText || "").slice(0, 8000),
-          lastRepairText: String(lastRepairText || "").slice(0, 8000),
+          lastModelText: String(lastModelText || "").slice(0, 16000),
+          lastRepairText: String(lastRepairText || "").slice(0, 16000),
           violations: collectedViolations,
           warnings: collectedWarnings,
           input_preview: { name: modelInput.name, brand: modelInput.brand, specs_keys: Object.keys(modelInput.specs || {}) }
