@@ -1,265 +1,4 @@
-// tools/render-engine/gptInstructionsEnforcer.mjs
-// GPT Instructions Enforcer: mounts /describe on an Express app and enforces
-// the custom GPT instructions (validation, normalization, grounding, repair loop).
-//
-// Usage: import { mountDescribeRoute } from "./tools/render-engine/gptInstructionsEnforcer.mjs";
-//        mountDescribeRoute(app);
-//
-// Notes:
-// - Reads OPENAI_API_KEY and RENDER_ENGINE_SECRET from env when available.
-// - Attempts to load tools/render-engine/utils/buildPrompt.mjs (if present).
-// - Returns JSON with desc_audit, normalized product payload, and _debug info.
-
-import OpenAI from "openai";
-import path from "node:path";
-import fs from "node:fs";
-
-const DEFAULTS = {
-  TARGET_AUDIT_SCORE: 9.8,
-  MAX_ATTEMPTS: 3,
-  MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
-  TEMPERATURE: 0.0,
-  MAX_TOKENS: 3200
-};
-
-/* ------------------------------ Utilities ------------------------------ */
-
-function stripFences(s = "") {
-  return (s || "")
-    .replace(/^\s*```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/i, "")
-    .replace(/```(?:json)?/gi, "")
-    .replace(/```/g, "");
-}
-
-function extractJsonCandidate(rawText) {
-  if (!rawText || typeof rawText !== "string") return null;
-  let t = rawText.trim();
-  t = stripFences(t);
-  const first = t.indexOf("{");
-  const last = t.lastIndexOf("}");
-  if (first !== -1 && last !== -1 && last > first) {
-    const cand = t.slice(first, last + 1);
-    try { return JSON.parse(cand); } catch (_) {}
-  }
-  try { return JSON.parse(t); } catch (_) {}
-  return null;
-}
-
-function enforceEnDashAndFixEm(text = "") {
-  return (text || "").replace(/\u2014/g, "–").replace(/---+/g, "–");
-}
-
-function escapeRegExp(s = "") {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function slugifyName(name = "") {
-  // Deterministic slugify aligned with instruction rules (ASCII-folding omitted for brevity)
-  // Lowercase, & -> and, non-alnum -> single hyphen, trim hyphens
-  if (!name) return "";
-  let s = String(name).toLowerCase();
-  s = s.replace(/&/g, " and ");
-  // Replace non-ascii chars with ascii approximations if possible (basic)
-  s = s.normalize("NFKD").replace(/[\u0300-\u036F]/g, "");
-  s = s.replace(/[^a-z0-9]+/g, "-");
-  s = s.replace(/^-+|-+$/g, "");
-  s = s.replace(/-+/g, "-");
-  return s;
-}
-
-function trimSlugByRules(slug, maxChars = 60, maxTokens = 7) {
-  if (!slug) return slug;
-  slug = slug.slice(0, maxChars);
-  const parts = slug.split("-").filter(Boolean);
-  while (parts.join("-").length > maxChars || parts.length > maxTokens) {
-    // drop the weakest trailing token (prefer descriptors)
-    parts.pop();
-  }
-  return parts.join("-");
-}
-
-function pickShortNameFromH1(h1) {
-  if (!h1) return "";
-  const parts = String(h1).split("–").map(p => p.trim()); // split on en-dash
-  if (parts.length > 0 && parts[0]) {
-    const candidate = parts[0].slice(0, 60);
-    // trim to last whole word
-    const trimmed = candidate.replace(/\s+\S*$/, "");
-    return trimmed || candidate;
-  }
-  const fallback = String(h1).slice(0, 60);
-  return fallback.replace(/\s+\S*$/, "") || fallback;
-}
-
-/* -------------------------- HTML normalization ------------------------- */
-
-function fixBulletFormattingInHtml(html = "") {
-  if (!html) return html;
-  // Ensure bullets follow: <li><strong>Label</strong> – Explanation.</li>
-  return html.replace(/<li>([\s\S]*?)<\/li>/gi, (m, inner) => {
-    let s = (inner || "").trim();
-    s = enforceEnDashAndFixEm(s);
-    if (/<strong>.*?<\/strong>/.test(s) && /–/.test(s)) {
-      return `<li>${s.replace(/\s*–\s*/g, " – ")}</li>`;
-    }
-    let parts = null;
-    if (s.indexOf(" – ") !== -1) parts = s.split(" – ");
-    else if (s.indexOf(" - ") !== -1) parts = s.split(" - ");
-    else {
-      const p = s.split(/[\.\,]\s+/);
-      parts = [p[0], s.slice(p[0].length).replace(/^[\.,\s]+/, "")];
-    }
-    const label = (parts[0] || "").replace(/<\/?strong>/gi, "").trim();
-    let rest = (parts[1] || "").trim();
-    if (rest) rest = rest[0].toUpperCase() + rest.slice(1);
-    if (rest && !/[\.!?]$/.test(rest)) rest += ".";
-    return `<li><strong>${label}</strong> – ${rest}</li>`;
-  });
-}
-
-function extractTextLength(html = "") {
-  if (!html) return 0;
-  return String(html).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().length;
-}
-
-function countHtmlListItems(html = "") {
-  if (!html) return 0;
-  const m = html.match(/<li>/gi);
-  return m ? m.length : 0;
-}
-
-/* ------------------------ Validation & Normalization ------------------------ */
-
-function validateAndNormalize(parsed = {}, modelInput = {}) {
-  const violations = [];
-  const warnings = [];
-  const normalized = JSON.parse(JSON.stringify(parsed || {}));
-
-  const descHtml = normalized.descriptionHtml || normalized.description_html || "";
-  const nameBest = normalized.name_best || normalized.product_name || modelInput.name || "";
-  const shortName = normalized.short_name_60 || pickShortNameFromH1(nameBest);
-
-  // H1 length enforcement (90-110) if present
-  if (normalized.name_best) {
-    const nlen = String(normalized.name_best).length;
-    if (nlen < 90 || nlen > 110) {
-      violations.push({
-        section: "Name",
-        issue: `H1 length ${nlen} not in 90–110 characters`,
-        fix_hint: "Append grounded feature descriptors or specs to reach 90–110 chars"
-      });
-    }
-  }
-
-  // Description length
-  const dlen = extractTextLength(descHtml);
-  if (dlen < 1200) {
-    violations.push({
-      section: "Description",
-      issue: `Description too short (${dlen} chars)`,
-      fix_hint: "Add grounded content from inputs until description reaches minimum length"
-    });
-  } else if (dlen > 32000) {
-    violations.push({
-      section: "Description",
-      issue: `Description too long (${dlen} chars)`,
-      fix_hint: "Trim non-essential content while preserving required sections"
-    });
-  }
-
-  // Required H2 headings presence and order (simple presence checks here)
-  const requiredH2 = [
-    "Hook and Bullets",
-    "Main Description",
-    "Features and Benefits",
-    "Product Specifications",
-    "Internal Links",
-    "Why Choose",
-    "Frequently Asked Questions"
-  ];
-  requiredH2.forEach((h) => {
-    if (!descHtml.includes(`<h2>${h}</h2>`)) {
-      violations.push({ section: "Structure", issue: `Missing heading: ${h}`, fix_hint: `Insert <h2>${h}</h2> in the correct order` });
-    }
-  });
-
-  // Hook bullets count
-  const hookMatch = descHtml.match(/<h2>Hook and Bullets<\/h2>[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i);
-  const hookListHtml = hookMatch ? hookMatch[1] : "";
-  const hookCount = countHtmlListItems(hookListHtml);
-  if (hookCount < 3) {
-    violations.push({ section: "Hook", issue: `Hook bullets count ${hookCount}; expected 3–6`, fix_hint: "Add grounded bullets to reach 3–6" });
-  }
-
-  // Why Choose bullets count
-  const whyMatch = descHtml.match(/<h2>Why Choose<\/h2>[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i);
-  const whyListHtml = whyMatch ? whyMatch[1] : "";
-  const whyCount = countHtmlListItems(whyListHtml);
-  if (whyCount < 3 || whyCount > 6) {
-    violations.push({ section: "Why Choose", issue: `Why Choose bullets ${whyCount}; expected 3–6`, fix_hint: "Adjust bullets count to be within 3–6" });
-  }
-
-  // FAQ count 5-7
-  const faqSectionMatch = descHtml.match(/<h2>Frequently Asked Questions<\/h2>[\s\S]*$/i);
-  const faqSection = faqSectionMatch ? faqSectionMatch[0] : "";
-  const faqCount = (faqSection.match(/<h3>/gi) || []).length;
-  if (faqCount < 5 || faqCount > 7) {
-    violations.push({ section: "FAQ", issue: `FAQ count ${faqCount}; expected 5–7`, fix_hint: "Add or remove Q&A pairs to reach 5–7" });
-  }
-
-  // short_name usage <=2
-  try {
-    const occ = shortName ? (String(descHtml).match(new RegExp(escapeRegExp(shortName), "gi")) || []).length : 0;
-    if (occ > 2) {
-      violations.push({ section: "ShortName", issue: `short_name appears ${occ} times; max 2`, fix_hint: "Replace extra occurrences with synonyms or pronouns" });
-    }
-  } catch (e) {}
-
-  // Remove or normalize trivial formatting issues
-  if (descHtml) {
-    let fixed = descHtml;
-    fixed = enforceEnDashAndFixEm(fixed);
-    fixed = fixBulletFormattingInHtml(fixed);
-    normalized.descriptionHtml = fixed;
-    normalized.description_html = fixed;
-  }
-
-  // Manuals section presence when input has manuals
-  const manualsPresentInInput = Array.isArray(modelInput.pdf_manual_urls) && modelInput.pdf_manual_urls.length > 0;
-  if (/\<h2\>Manuals and Troubleshooting Guides\<\/h2\>/i.test(descHtml) && !manualsPresentInInput) {
-    violations.push({ section: "Manuals", issue: "Manuals section rendered but no pdf_manual_urls provided", fix_hint: "Remove manuals section or provide valid PDF URLs" });
-  }
-
-  return { normalized, violations, warnings };
-}
-
-/* -------------------- OpenAI call wrapper -------------------- */
-
-async function callOpenAI(openAiKey, messages, model = DEFAULTS.MODEL, temperature = DEFAULTS.TEMPERATURE, maxTokens = DEFAULTS.MAX_TOKENS) {
-  const client = new OpenAI({ apiKey: openAiKey });
-  const completion = await client.chat.completions.create({
-    model,
-    messages,
-    temperature,
-    max_tokens: maxTokens
-  });
-  return completion?.choices?.[0]?.message?.content ?? "";
-}
-
-/* -------------------- Optional buildPrompt loader -------------------- */
-
-function loadBuildPromptIfAvailable() {
-  try {
-    const loaderPath = path.resolve(process.cwd(), "tools/render-engine/utils/buildPrompt.mjs");
-    if (fs.existsSync(loaderPath)) {
-      return import(loaderPath);
-    }
-  } catch (e) { /* ignore */ }
-  return null;
-}
-
-/* -------------------- Main mount function -------------------- */
+/* -------------------- Main mount function (replacement block) -------------------- */
 
 export async function mountDescribeRoute(app, opts = {}) {
   const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || opts.engineSecret || "dev-secret";
@@ -268,10 +7,23 @@ export async function mountDescribeRoute(app, opts = {}) {
   const TARGET_AUDIT_SCORE = Number(process.env.TARGET_AUDIT_SCORE || opts.targetAuditScore || DEFAULTS.TARGET_AUDIT_SCORE);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || opts.maxAttempts || DEFAULTS.MAX_ATTEMPTS);
 
-  console.log("gptEnforcer: mounting /describe route (modular)");
+  // Opt-in strict enforcement flag: set env ENFORCE_AVIDIA_STANDARD="1" or pass { enforceAvidiaStandard: true }
+  const ENFORCE_AVIDIA = process.env.ENFORCE_AVIDIA_STANDARD === "1" || Boolean(opts.enforceAvidiaStandard);
+
+  console.log("gptEnforcer: mounting /describe route (modular) enforceAvidia=", ENFORCE_AVIDIA);
 
   // health idempotent
   app.get("/healthz", (_, res) => res.json({ ok: true }));
+
+  // small helper used only when enforcement is enabled
+  function isAvidiaCompliant(parsed) {
+    if (!parsed || typeof parsed !== "object") return false;
+    if (!parsed.desc_audit || typeof parsed.desc_audit !== "object") return false;
+    const sc = typeof parsed.desc_audit.score === "number" ? Number(parsed.desc_audit.score) : NaN;
+    if (parsed.desc_audit.passed === true) return true;
+    if (!Number.isNaN(sc) && sc >= TARGET_AUDIT_SCORE) return true;
+    return false;
+  }
 
   app.post("/describe", async (req, res) => {
     try {
@@ -323,7 +75,13 @@ Input placeholders: {{PRODUCT_NAME}}, {{SHORT_DESCRIPTION}}, {{BRAND}}, {{SPECS}
 Return valid JSON only.`;
       }
 
-      // If no OpenAI key -> deterministic mock
+      // Enforcement: if strict and no OpenAI key, fail fast
+      if (!OPENAI_KEY && ENFORCE_AVIDIA) {
+        console.error("gptEnforcer: ENFORCE_AVIDIA_STANDARD=1 but OPENAI_API_KEY is missing");
+        return res.status(503).json({ error: "render engine unavailable: missing OpenAI key for strict enforcement" });
+      }
+
+      // If no OpenAI key -> deterministic mock (keeps current behavior when NOT enforcing)
       if (!OPENAI_KEY) {
         const response = {
           descriptionHtml: `<p>${shortDescription}</p>`,
@@ -378,7 +136,7 @@ Return valid JSON only.`;
         return await callOpenAI(OPENAI_KEY, messages, OPENAI_MODEL, DEFAULTS.TEMPERATURE, DEFAULTS.MAX_TOKENS);
       }
 
-      // Attempt + repair loop
+      // Attempt + repair loop (unchanged behavior)
       let attempt = 0;
       let lastModelText = "";
       let lastRepairText = "";
@@ -511,7 +269,7 @@ Return valid JSON only.`;
         }
       } // end attempts
 
-      // If we have a parsedResult return it; else fallback
+      // If we have a parsedResult return it; else fallback (but enforce if requested)
       if (parsedResult && typeof parsedResult === "object") {
         parsedResult._debug ||= {};
         parsedResult._debug.promptEngine = promptEngineInfo;
@@ -525,6 +283,23 @@ Return valid JSON only.`;
           violations: lastViolations,
           warnings: lastWarnings
         };
+
+        // Enforcement check: if strict, require Avidia compliance, otherwise return as-is
+        if (ENFORCE_AVIDIA && !isAvidiaCompliant(parsedResult)) {
+          console.error("gptEnforcer: model output failed Avidia compliance under enforcement", { attempts: attempt, violations: lastViolations });
+          return res.status(422).json({
+            error: "model_noncompliant",
+            message: "model did not produce Avidia Standard compliant JSON within allowed attempts",
+            _debug: {
+              promptEngineInfo,
+              attempts: attempt,
+              lastModelTextPreview: String(lastModelText || "").slice(0, 8000),
+              lastRepairTextPreview: String(lastRepairText || "").slice(0, 8000),
+              violations: lastViolations,
+              warnings: lastWarnings
+            }
+          });
+        }
 
         // Enforce slug rules: build from name_best if present
         try {
@@ -543,7 +318,23 @@ Return valid JSON only.`;
         return res.json(parsedResult);
       }
 
-      // fallback response
+      // fallback response (if enforcement off) OR error if enforcement on
+      if (ENFORCE_AVIDIA) {
+        console.error("gptEnforcer: no compliant parsed result and enforcement active", { lastModelText: String(lastModelText || "").slice(0,1200) });
+        return res.status(422).json({
+          error: "model_noncompliant",
+          message: "no compliant JSON result produced",
+          _debug: {
+            promptEngineInfo,
+            attempts: attempt,
+            lastModelText: String(lastModelText || "").slice(0, 8000),
+            lastRepairText: String(lastRepairText || "").slice(0, 8000),
+            violations: lastViolations,
+            warnings: lastWarnings
+          }
+        });
+      }
+
       const fallback = {
         descriptionHtml: `<p>${shortDescription}</p>`,
         sections: {
@@ -579,5 +370,3 @@ Return valid JSON only.`;
 
   console.log("gptEnforcer: /describe mounted");
 }
-
-export default mountDescribeRoute;
