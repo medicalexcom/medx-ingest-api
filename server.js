@@ -37,6 +37,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+
+
+import { mountDescribeRoute } from "./tools/render-engine/gptInstructionsEnforcer.mjs";
+
+
+
 app.get("/",  (_, res) => res.type("text").send("ingest-api OK"));
 app.get("/healthz", (_, res) => res.json({ ok: true }));
 
