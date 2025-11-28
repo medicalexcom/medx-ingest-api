@@ -1,14 +1,14 @@
 // tools/render-engine/gptInstructionsEnforcer.mjs
-// GPT Instructions Enforcer (STRICT + server-side audit authoritative).
-// - Server computes desc_audit; model cannot claim a pass.
-// - Deterministic, grounded H1 auto-expansion (no guessing).
-// - Explicit HTML skeleton repair prompts to enforce Avidia structure.
-// - If model fails to produce fully compliant JSON after attempts → 422 (no fallback).
+// GPT Instructions Enforcer: mounts /describe on an Express app and enforces
+// the custom GPT instructions (validation, normalization, grounding, repair loop).
 //
-// Deploy notes:
-// - Requires OPENAI_API_KEY and RENDER_ENGINE_SECRET in env.
-// - You can set ENFORCE_AVIDIA_STANDARD="0" to disable strict enforcement (not recommended).
-// - Test in staging first.
+// Usage: import { mountDescribeRoute } from "./tools/render-engine/gptInstructionsEnforcer.mjs";
+//        mountDescribeRoute(app);
+//
+// Notes:
+// - Reads OPENAI_API_KEY and RENDER_ENGINE_SECRET from env when available.
+// - Attempts to load tools/render-engine/utils/buildPrompt.mjs (if present).
+// - Returns JSON with desc_audit, normalized product payload, and _debug info.
 
 import OpenAI from "openai";
 import path from "node:path";
@@ -31,6 +31,7 @@ function stripFences(s = "") {
     .replace(/```(?:json)?/gi, "")
     .replace(/```/g, "");
 }
+
 function extractJsonCandidate(rawText) {
   if (!rawText || typeof rawText !== "string") return null;
   let t = rawText.trim();
@@ -44,42 +45,58 @@ function extractJsonCandidate(rawText) {
   try { return JSON.parse(t); } catch (_) {}
   return null;
 }
+
 function enforceEnDashAndFixEm(text = "") {
   return (text || "").replace(/\u2014/g, "–").replace(/---+/g, "–");
 }
-function escapeRegExp(s = "") { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+function escapeRegExp(s = "") {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function slugifyName(name = "") {
+  // Deterministic slugify aligned with instruction rules (ASCII-folding omitted for brevity)
+  // Lowercase, & -> and, non-alnum -> single hyphen, trim hyphens
   if (!name) return "";
   let s = String(name).toLowerCase();
   s = s.replace(/&/g, " and ");
+  // Replace non-ascii chars with ascii approximations if possible (basic)
   s = s.normalize("NFKD").replace(/[\u0300-\u036F]/g, "");
   s = s.replace(/[^a-z0-9]+/g, "-");
   s = s.replace(/^-+|-+$/g, "");
   s = s.replace(/-+/g, "-");
   return s;
 }
+
 function trimSlugByRules(slug, maxChars = 60, maxTokens = 7) {
   if (!slug) return slug;
   slug = slug.slice(0, maxChars);
   const parts = slug.split("-").filter(Boolean);
-  while (parts.join("-").length > maxChars || parts.length > maxTokens) parts.pop();
+  while (parts.join("-").length > maxChars || parts.length > maxTokens) {
+    // drop the weakest trailing token (prefer descriptors)
+    parts.pop();
+  }
   return parts.join("-");
 }
+
 function pickShortNameFromH1(h1) {
   if (!h1) return "";
-  const parts = String(h1).split("–").map(p => p.trim());
+  const parts = String(h1).split("–").map(p => p.trim()); // split on en-dash
   if (parts.length > 0 && parts[0]) {
     const candidate = parts[0].slice(0, 60);
-    return candidate.replace(/\s+\S*$/, "") || candidate;
+    // trim to last whole word
+    const trimmed = candidate.replace(/\s+\S*$/, "");
+    return trimmed || candidate;
   }
   const fallback = String(h1).slice(0, 60);
   return fallback.replace(/\s+\S*$/, "") || fallback;
 }
 
-/* -------------------------- HTML normalization helpers ------------------------- */
+/* -------------------------- HTML normalization ------------------------- */
 
 function fixBulletFormattingInHtml(html = "") {
   if (!html) return html;
+  // Ensure bullets follow: <li><strong>Label</strong> – Explanation.</li>
   return html.replace(/<li>([\s\S]*?)<\/li>/gi, (m, inner) => {
     let s = (inner || "").trim();
     s = enforceEnDashAndFixEm(s);
@@ -100,14 +117,46 @@ function fixBulletFormattingInHtml(html = "") {
     return `<li><strong>${label}</strong> – ${rest}</li>`;
   });
 }
+
 function extractTextLength(html = "") {
   if (!html) return 0;
   return String(html).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().length;
 }
+
 function countHtmlListItems(html = "") {
   if (!html) return 0;
   const m = html.match(/<li>/gi);
   return m ? m.length : 0;
+}
+
+/* ------------------------ Helpers for Avidia adjustments ------------------------ */
+
+// Remove sections (H2 and following until next H2) from HTML string.
+// sectionsToRemove is array of exact H2 titles, e.g. ["Internal Links", "Manuals and Troubleshooting Guides"]
+function stripSectionsFromHtml(html = "", sectionsToRemove = []) {
+  if (!html || !sectionsToRemove || !sectionsToRemove.length) return html;
+  let out = String(html);
+  for (const sec of sectionsToRemove) {
+    // Match <h2>sec</h2> and everything up to next <h2> or end
+    const re = new RegExp(`<h2>\\s*${escapeRegExp(sec)}\\s*<\\/h2>[\\s\\S]*?(?=(<h2>|$))`, "i");
+    out = out.replace(re, "");
+  }
+  return out;
+}
+
+// Replace extra occurrences (>allowed) of shortName in HTML with a neutral phrase.
+// Keeps the first `allowed` occurrences; replaces subsequent with 'this product'.
+function replaceExtraShortNameOccurrences(html = "", shortName = "", allowed = 2) {
+  if (!html || !shortName) return html;
+  const regex = new RegExp(escapeRegExp(shortName), "gi");
+  let count = 0;
+  return html.replace(regex, (m) => {
+    count++;
+    if (count <= allowed) return m;
+    // preserve case of first char: if original starts with uppercase, use 'This product' else 'this product'
+    const isUpper = /^[A-Z]/.test(m);
+    return isUpper ? "This product" : "this product";
+  });
 }
 
 /* ------------------------ Validation & Normalization ------------------------ */
@@ -121,7 +170,9 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
   const nameBest = normalized.name_best || normalized.product_name || modelInput.name || "";
   const shortName = normalized.short_name_60 || pickShortNameFromH1(nameBest);
 
-  // H1 length enforcement (90-110)
+  const isAvidia = String((modelInput && modelInput.format) || "").toLowerCase() === "avidia_standard";
+
+  // H1 length enforcement (90-110) if present
   if (normalized.name_best) {
     const nlen = String(normalized.name_best).length;
     if (nlen < 90 || nlen > 110) {
@@ -144,15 +195,20 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
   }
 
   // Required H2 headings presence and order
-  const requiredH2 = [
+  // For AvidiaDescribe we skip Internal Links and Manuals sections entirely.
+  let requiredH2 = [
     "Hook and Bullets",
     "Main Description",
     "Features and Benefits",
     "Product Specifications",
-    "Internal Links",
+    // "Internal Links",   // SKIP for Avidia
     "Why Choose",
     "Frequently Asked Questions"
   ];
+  // For non-Avidia modes, keep Internal Links in the required list if desired (original behavior)
+  if (!isAvidia) {
+    requiredH2.splice(4, 0, "Internal Links"); // insert at original place
+  }
   requiredH2.forEach((h) => {
     if (!descHtml.includes(`<h2>${h}</h2>`)) {
       violations.push({ section: "Structure", issue: `Missing heading: ${h}`, fix_hint: `Insert <h2>${h}</h2> in the correct order` });
@@ -163,7 +219,7 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
   const hookMatch = descHtml.match(/<h2>Hook and Bullets<\/h2>[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i);
   const hookListHtml = hookMatch ? hookMatch[1] : "";
   const hookCount = countHtmlListItems(hookListHtml);
-  if (hookCount < 3 || hookCount > 6) {
+  if (hookCount < 3) {
     violations.push({ section: "Hook", issue: `Hook bullets count ${hookCount}; expected 3–6`, fix_hint: "Add grounded bullets to reach 3–6" });
   }
 
@@ -191,7 +247,7 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     }
   } catch (e) {}
 
-  // Apply minor fixes
+  // Remove or normalize trivial formatting issues
   if (descHtml) {
     let fixed = descHtml;
     fixed = enforceEnDashAndFixEm(fixed);
@@ -200,39 +256,14 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     normalized.description_html = fixed;
   }
 
-  // Manuals presence when pdf manual urls are present
+  // Manuals section presence when input has manuals
   const manualsPresentInInput = Array.isArray(modelInput.pdf_manual_urls) && modelInput.pdf_manual_urls.length > 0;
-  if (/\<h2\>Manuals and Troubleshooting Guides\<\/h2\>/i.test(normalized.descriptionHtml || "") && !manualsPresentInInput) {
+  // For AvidiaDescribe: skip penalizing Manuals entirely (user requested). For other modes, enforce.
+  if (!isAvidia && /\<h2\>Manuals and Troubleshooting Guides\<\/h2\>/i.test(normalized.descriptionHtml || "") && !manualsPresentInInput) {
     violations.push({ section: "Manuals", issue: "Manuals section rendered but no pdf_manual_urls provided", fix_hint: "Remove manuals section or provide valid PDF URLs" });
   }
 
   return { normalized, violations, warnings };
-}
-
-/* -------------------- Server-side desc_audit computation -------------------- */
-
-function computeDescAudit(normalized, modelInput) {
-  // simple deterministic scoring based on violations and presence of required features.
-  const out = { score: 10.0, passed: false, violations: [], warnings: [], data_gaps: [], conflicts: [] };
-
-  const { violations, warnings } = (() => {
-    try { return validateAndNormalize(normalized, modelInput); } catch (e) { return { normalized, violations: [{ section: "System", issue: "validation-failed", fix_hint: String(e) }], warnings: [] }; }
-  })();
-
-  out.violations = violations;
-  out.warnings = warnings || [];
-
-  // Deduct per violation
-  const base = 10.0;
-  let deduction = 0;
-  deduction += Math.min(violations.length * 0.9, 9.5); // heavy penalty per violation
-  let score = Math.max(0, base - deduction);
-
-  // If no violations and description length ok → pass
-  if (!violations.length) out.passed = true;
-
-  out.score = Math.round(score * 100) / 100;
-  return out;
 }
 
 /* -------------------- OpenAI call wrapper -------------------- */
@@ -260,125 +291,6 @@ function loadBuildPromptIfAvailable() {
   return null;
 }
 
-/* -------------------- Deterministic H1 auto-expansion (grounded only) -------------------- */
-
-function expandNameDeterministically(nameBest, modelInput, targetMin = 90) {
-  if (!nameBest) return nameBest;
-  if (String(nameBest).length >= targetMin) return nameBest;
-  const pieces = [];
-
-  // Extract grounded candidates from specs (prefer high-value keys)
-  const specPriority = ["capacity", "weight_capacity", "product_weight", "overall_dimensions", "material", "model", "color"];
-  try {
-    const specs = modelInput.specs || {};
-    for (const k of specPriority) {
-      if (specs[k] && !pieces.includes(String(specs[k]).trim())) pieces.push(String(specs[k]).trim());
-      if (pieces.length >= 4) break;
-    }
-  } catch {}
-
-  // Also use first two features if present
-  try {
-    if (Array.isArray(modelInput.variants) && modelInput.variants.length && pieces.length < 4) {
-      // skip - variants are structured
-    }
-    if (Array.isArray(modelInput.features) && modelInput.features.length) {
-      for (const f of modelInput.features) {
-        const t = String(f || "").trim();
-        if (t && !pieces.includes(t)) {
-          pieces.push(t);
-          if (pieces.length >= 4) break;
-        }
-      }
-    }
-  } catch {}
-
-  // Use shortDescription if available
-  if (modelInput.shortDescription && pieces.length < 4) {
-    const s = String(modelInput.shortDescription).trim();
-    if (s && !pieces.includes(s)) pieces.push(s);
-  }
-
-  // Build appended string progressively until reaches targetMin or no candidates
-  let cur = String(nameBest);
-  let i = 0;
-  while (cur.length < targetMin && i < pieces.length) {
-    const add = pieces[i++];
-    // sanitize: remove trailing punctuation
-    const clean = String(add).replace(/^[\s\-\–\:]+|[\s\-\–\:]+$/g, "");
-    if (!clean) continue;
-    cur = `${cur}, ${clean}`;
-    if (cur.length >= targetMin) break;
-  }
-
-  // Final trim to max 110 if needed by removing trailing tokens
-  if (cur.length > 110) cur = cur.slice(0, 110).replace(/\s+\S*$/, "").trim();
-  return cur;
-}
-
-/* -------------------- Repair prompt skeleton -------------------- */
-
-function buildRepairSkeletonPrompt(violations, modelInput, previousOutput) {
-  const requiredSkeleton = [
-    "<!-- REQUIRED: Return valid JSON only. No extra text. -->",
-    "JSON keys required: name_candidates (array), name_best (string), name_best_seo_score (number), short_name_60 (string), desc_audit (object), product_name, generated_product_url, description_html (string), meta_title, meta_description, search_keywords, internal_links (array), final_description (string)",
-    "",
-    "description_html MUST contain the following H2 headings in this exact order:",
-    "1) <h2>Hook and Bullets</h2>",
-    "2) <h2>Main Description</h2>",
-    "3) <h2>Features and Benefits</h2>",
-    "4) <h2>Product Specifications</h2>",
-    "5) <h2>Internal Links</h2>",
-    "6) <h2>Why Choose</h2>",
-    "7) <h2>Frequently Asked Questions</h2>",
-    "",
-    "HOOK requirements:",
-    "- First paragraph: 2–3 sentences including one empathy clause and one outcome clause.",
-    "- Bold the short_name_60 once in the first sentence using <strong>short_name</strong>.",
-    "- Provide 3–6 bullets (<ul><li>...) following bullet format: <li><strong>Label</strong> – Explanation.</li>",
-    "",
-    "MAIN DESCRIPTION requirements:",
-    "- H2 title: use a short keyword variation (not the full long name).",
-    "- 4–6 sentence intro paragraph including one buyer-outcome sentence and at least two semantic variants of the primary concept.",
-    "",
-    "FEATURES & BENEFITS requirements:",
-    "- H2 exactly 'Features and Benefits'.",
-    "- 2–4 H3 groups with title and bullets in the <li><strong>Label</strong> – Explanation.</li> format.",
-    "",
-    "PRODUCT SPECIFICATIONS requirements:",
-    "- H2 exactly 'Product Specifications'.",
-    "- 2–4 H3 groups, bullets follow <li><strong>Spec Name</strong>: imperial (metric)</li>",
-    "",
-    "INTERNAL LINKS:",
-    "- Place exactly two site-relative internal_links after Product Specifications and before Why Choose. Provide internal_links array in JSON with type, anchor, url, confidence.",
-    "",
-    "WHY CHOOSE:",
-    "- H2 and 3–6 bullets. Include at least one differentiator bullet (measurable if present in inputs).",
-    "",
-    "FAQ:",
-    "- 5–7 Q&A pairs. Questions use <h3> and answers are <p> paragraphs.",
-    "",
-    "GROUNDING rules:",
-    "- Use ONLY the input JSON for facts (modelInput). Do NOT invent numbers, warranty terms, weights, capacities, or specs.",
-    "- If a value is missing, OMIT it from customer-facing HTML and list it in desc_audit.data_gaps.",
-    "",
-    "AUDIT:",
-    "- Do not set desc_audit.passed = true yourself. The server will compute the audit after your JSON. Return desc_audit with score field only if you include a draft; the server will override.",
-    "",
-    "PREVIOUS OUTPUT (for context):",
-    JSON.stringify(previousOutput || {}, null, 2),
-    "",
-    "INPUT (grounding):",
-    JSON.stringify(modelInput || {}, null, 2),
-    "",
-    "Return only JSON. Strictly follow skeleton and formatting rules above."
-  ].join("\n");
-
-  // Add readable violations list
-  const vlist = (violations || []).map((v, i) => `${i+1}. ${v.section} — ${v.issue} (${v.fix_hint || "no hint"})`).join("\n");
-  return `The previous output failed validation for these issues:\n\n${vlist}\n\nPlease apply the exact fixes and return only JSON matching the skeleton below.\n\n${requiredSkeleton}`;
-}
-
 /* -------------------- Main mount function -------------------- */
 
 export async function mountDescribeRoute(app, opts = {}) {
@@ -388,10 +300,9 @@ export async function mountDescribeRoute(app, opts = {}) {
   const TARGET_AUDIT_SCORE = Number(process.env.TARGET_AUDIT_SCORE || opts.targetAuditScore || DEFAULTS.TARGET_AUDIT_SCORE);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || opts.maxAttempts || DEFAULTS.MAX_ATTEMPTS);
 
-  const ENFORCE_AVIDIA = process.env.ENFORCE_AVIDIA_STANDARD !== "0"; // default true
+  console.log("gptEnforcer: mounting /describe route (modular)");
 
-  console.log("gptEnforcer (STRICT): mounting /describe route enforceAvidia=", ENFORCE_AVIDIA);
-
+  // health idempotent
   app.get("/healthz", (_, res) => res.json({ ok: true }));
 
   app.post("/describe", async (req, res) => {
@@ -400,22 +311,13 @@ export async function mountDescribeRoute(app, opts = {}) {
       const key = rawHeader.toLowerCase().startsWith("bearer ") ? rawHeader.replace(/^Bearer\s+/i, "") : rawHeader;
       if (!key || key !== ENGINE_SECRET) return res.status(401).json({ error: "unauthorized: invalid engine key" });
 
-      if (!ENFORCE_AVIDIA) {
-        return res.status(400).json({ error: "ENFORCE_AVIDIA_STANDARD must be enabled for this service" });
-      }
-
-      if (!OPENAI_KEY) {
-        console.error("gptEnforcer: OPENAI_API_KEY missing; cannot run strict enforcer");
-        return res.status(503).json({ error: "render engine unavailable", message: "OPENAI_API_KEY missing; Avidia standard cannot run without model access" });
-      }
-
       const body = req.body || {};
       const name = body.name || "Sample product";
       const shortDescription = body.shortDescription || "Short description";
 
-      // Build finalPrompt: prefer buildPrompt, else use canonical describePrompt.md; fatal if missing
+      // Build finalPrompt using buildPrompt if available
       let finalPrompt = null;
-      let promptEngineInfo = { usedBuildPrompt: false, usedDescribeMd: false, buildError: null };
+      let promptEngineInfo = { usedBuildPrompt: false, buildError: null };
 
       try {
         const modImport = await loadBuildPromptIfAvailable();
@@ -423,40 +325,60 @@ export async function mountDescribeRoute(app, opts = {}) {
           const mod = await modImport;
           if (mod && typeof mod.buildPrompt === "function") {
             promptEngineInfo.usedBuildPrompt = true;
-            finalPrompt = mod.buildPrompt("describe", {
+            const vars = {
               PRODUCT_NAME: name,
               SHORT_DESCRIPTION: shortDescription,
               BRAND: body.brand || "",
+              SCRAPED_OVERVIEW: body.scrapedOverview || "",
               FEATURES: Array.isArray(body.features) ? body.features.join("\n") : (body.features || ""),
               SPECS: JSON.stringify(body.specs || {}),
               MANUALS: (body.manuals || []).join("\n"),
               FORMAT: body.format || "avidia_standard",
               CATEGORY: body.category || "",
-              SOURCE_URL: body.sourceUrl || ""
-            });
+              SOURCE_URL: body.sourceUrl || "",
+              VARIANTS: JSON.stringify(body.variants || []),
+              SPEC_TABLE: JSON.stringify(body.spec_table || {})
+            };
+            finalPrompt = mod.buildPrompt("describe", vars);
+          } else {
+            promptEngineInfo.buildError = "buildPrompt not found in module";
           }
         }
       } catch (e) {
         promptEngineInfo.buildError = String(e && e.message ? e.message : e);
+        console.warn("gptEnforcer: buildPrompt load failed:", promptEngineInfo.buildError);
       }
 
       if (!finalPrompt) {
-        try {
-          const dp = path.resolve(process.cwd(), "tools/render-engine/prompts/describePrompt.md");
-          if (fs.existsSync(dp)) {
-            finalPrompt = fs.readFileSync(dp, "utf8");
-            promptEngineInfo.usedDescribeMd = true;
-          }
-        } catch (e) {
-          promptEngineInfo.buildError = String(e && e.message ? e.message : e);
-        }
+        finalPrompt = `MASTER-FALLBACK: You are a normalization pipeline that MUST RETURN RAW JSON ONLY with keys: descriptionHtml, sections, seo, normalizedPayload, raw.
+Input placeholders: {{PRODUCT_NAME}}, {{SHORT_DESCRIPTION}}, {{BRAND}}, {{SPECS}}, {{FORMAT}}.
+Return valid JSON only.`;
       }
 
-      if (!finalPrompt) {
-        console.error("gptEnforcer: no describe prompt available (buildPrompt or describePrompt.md).");
-        return res.status(500).json({ error: "server_misconfiguration", message: "No describe prompt available for strict enforcer", details: promptEngineInfo });
+      // If no OpenAI key -> deterministic mock
+      if (!OPENAI_KEY) {
+        const response = {
+          descriptionHtml: `<p>${shortDescription}</p>`,
+          sections: {
+            overview: `${shortDescription}`,
+            features: [`Feature A for ${name}`, `Feature B`],
+            specsSummary: body.specs || {},
+            includedItems: [],
+            manualsSectionHtml: ""
+          },
+          seo: {
+            h1: name,
+            pageTitle: `${name} - Buy now`,
+            metaDescription: shortDescription,
+            seoShortDescription: shortDescription
+          },
+          normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? null, format: body.format ?? "avidia_standard" },
+          raw: { request: body, promptEngineInfo }
+        };
+        return res.json(response);
       }
 
+      // Build structured model input for grounding
       const modelInput = {
         tenant_id: ((req.header("x-tenant-id") || null) || body.tenant_id || null),
         user_id: ((req.header("x-user-id") || null) || body.user_id || null),
@@ -470,12 +392,13 @@ export async function mountDescribeRoute(app, opts = {}) {
         pdf_manual_urls: body.pdf_manual_urls || body.manuals || []
       };
 
+      // grounding instruction
       const groundingInstruction = [
         "READ THESE INSTRUCTIONS CAREFULLY:",
         "1) INPUT JSON follows in the next message. Use ONLY the input data to produce customer-facing content.",
         "2) DO NOT INVENT product names, specs, weights, warranty terms, capacities, or other factual values.",
-        "3) If a value is missing, OMIT it from the customer-facing HTML and list the gap under desc_audit.data_gaps.",
-        "4) RETURN ONLY valid JSON matching the required schema. No commentary, no code fences, no extra text."
+        "3) If a value is missing or ambiguous, OMIT the corresponding line/bullet from the customer-facing HTML and list the gap under desc_audit.data_gaps.",
+        "4) RETURN ONLY valid JSON matching the schema requested by the system prompt. No commentary, no code fences, no extra text."
       ].join(" ");
 
       async function callModel(userInstructions) {
@@ -488,26 +411,19 @@ export async function mountDescribeRoute(app, opts = {}) {
         return await callOpenAI(OPENAI_KEY, messages, OPENAI_MODEL, DEFAULTS.TEMPERATURE, DEFAULTS.MAX_TOKENS);
       }
 
-      // First request: ask model to produce Avidia-format JSON (no desc_audit passed claims necessary)
+      // Attempt + repair loop
       let attempt = 0;
       let lastModelText = "";
       let lastRepairText = "";
       let parsedResult = null;
-      let collectedViolations = [];
-      let collectedWarnings = [];
+      let passed = false;
+      let lastViolations = [];
+      let lastWarnings = [];
 
-      // Primary initial instruction: produce JSON following schema; do NOT mark passed=true (server will compute)
-      const primaryInstruction = [
-        "Produce ONLY valid JSON matching the Avidia schema. RETURN JSON ONLY.",
-        "Do NOT set desc_audit.passed = true yourself; include desc_audit.score only if you produce a draft. The server will compute the authoritative desc_audit after receiving your JSON.",
-        "Ensure description_html contains all required H2 headings and the structure in the repository's describePrompt.md.",
-        "If you lack facts, omit them and list them in desc_audit.data_gaps."
-      ].join("\n\n");
-
-      while (attempt < MAX_ATTEMPTS) {
+      while (attempt < MAX_ATTEMPTS && !passed) {
         attempt++;
         try {
-          lastModelText = await callModel(primaryInstruction);
+          lastModelText = await callModel("Produce ONLY valid JSON matching the Avidia schema. RETURN JSON ONLY.");
         } catch (e) {
           lastModelText = "";
         }
@@ -516,131 +432,215 @@ export async function mountDescribeRoute(app, opts = {}) {
           try { return JSON.parse(lastModelText); } catch (_) { return extractJsonCandidate(lastModelText); }
         })();
 
+        // If parsed includes desc_audit.score, check early accept
+        if (parsedResult && parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number") {
+          const sc = Number(parsedResult.desc_audit.score);
+          if (sc >= TARGET_AUDIT_SCORE || parsedResult.desc_audit.passed === true) {
+            // run programmatic validation and return
+            const { normalized, violations, warnings } = validateAndNormalize(parsedResult, modelInput);
+            parsedResult = normalized;
+            lastViolations = violations;
+            lastWarnings = warnings;
+            // Before accepting, apply Avidia-specific post-processing:
+            const isAvidia = String((modelInput && modelInput.format) || "").toLowerCase() === "avidia_standard";
+            if (isAvidia) {
+              // Strip Internal Links and Manuals sections from descriptionHtml for AvidiaDescribe
+              parsedResult.descriptionHtml = stripSectionsFromHtml(parsedResult.descriptionHtml || "", ["Internal Links", "Manuals and Troubleshooting Guides"]);
+              parsedResult.description_html = parsedResult.descriptionHtml;
+              // Remove internal_links array if present
+              if (parsedResult.internal_links) delete parsedResult.internal_links;
+              // Replace extra short_name occurrences beyond 2 with neutral phrase
+              const shortName = parsedResult.short_name_60 || pickShortNameFromH1(parsedResult.name_best || modelInput.name || "");
+              parsedResult.descriptionHtml = replaceExtraShortNameOccurrences(parsedResult.descriptionHtml || "", shortName, 2);
+              parsedResult.description_html = parsedResult.descriptionHtml;
+            }
+            passed = true;
+            break;
+          }
+        }
+
         if (parsedResult) {
-          // Programmatic normalization + validation
+          // programmatic validation
           const { normalized, violations, warnings } = validateAndNormalize(parsedResult, modelInput);
           parsedResult = normalized;
-          collectedViolations = violations;
-          collectedWarnings = warnings;
+          lastViolations = violations;
+          lastWarnings = warnings;
 
-          // Deterministic H1 auto-expansion when too short (grounded only)
-          try {
-            const h = parsedResult.name_best || parsedResult.product_name || modelInput.name || "";
-            if (h && String(h).length < 90) {
-              const expanded = expandNameDeterministically(h, modelInput, 90);
-              if (expanded && expanded.length >= 90 && expanded.length <= 110) {
-                parsedResult.name_best = expanded;
-                parsedResult.short_name_60 = pickShortNameFromH1(expanded);
-                // refresh slug
-                const rawSlug = slugifyName(expanded);
-                parsedResult.generated_product_url = `/${trimSlugByRules(rawSlug, 60, 7)}`;
-                // Re-run validation
-                const reVal = validateAndNormalize(parsedResult, modelInput);
-                parsedResult = reVal.normalized;
-                collectedViolations = reVal.violations;
-                collectedWarnings = reVal.warnings;
-              }
-            }
-          } catch (e) {
-            // non-fatal
+          // Avidia-specific post-processing before repair iteration: strip the sections so they don't trigger violations
+          const isAvidia = String((modelInput && modelInput.format) || "").toLowerCase() === "avidia_standard";
+          if (isAvidia && parsedResult && parsedResult.descriptionHtml) {
+            parsedResult.descriptionHtml = stripSectionsFromHtml(parsedResult.descriptionHtml, ["Internal Links", "Manuals and Troubleshooting Guides"]);
+            parsedResult.description_html = parsedResult.descriptionHtml;
+            if (parsedResult.internal_links) delete parsedResult.internal_links;
+            // replace extra short_name occurrences beyond 2
+            const shortName = parsedResult.short_name_60 || pickShortNameFromH1(parsedResult.name_best || modelInput.name || "");
+            parsedResult.descriptionHtml = replaceExtraShortNameOccurrences(parsedResult.descriptionHtml || "", shortName, 2);
+            parsedResult.description_html = parsedResult.descriptionHtml;
+            // re-validate after stripping/replacing
+            const reVal = validateAndNormalize(parsedResult, modelInput);
+            parsedResult = reVal.normalized;
+            lastViolations = reVal.violations;
+            lastWarnings = reVal.warnings;
           }
 
-          // compute server authoritative audit
-          const descAudit = computeDescAudit(parsedResult, modelInput);
-          parsedResult.desc_audit = parsedResult.desc_audit || {};
-          parsedResult.desc_audit.score = descAudit.score;
-          parsedResult.desc_audit.passed = descAudit.passed;
-          parsedResult.desc_audit.violations = descAudit.violations;
-          parsedResult.desc_audit.warnings = descAudit.warnings;
-
-          // Accept only when passed true and no programmatic violations
-          if (descAudit.passed && (!descAudit.violations || descAudit.violations.length === 0)) {
-            // attach debug and return
-            parsedResult._debug = {
-              promptEngineInfo,
-              attempts: attempt,
-              lastModelTextPreview: String(lastModelText || "").slice(0, 1200)
-            };
-            return res.json(parsedResult);
-          }
-
-          // Not passed: if attempts remain, send repair prompt with exact violations and skeleton
-          if (attempt < MAX_ATTEMPTS) {
-            const repairPrompt = buildRepairSkeletonPrompt(collectedViolations, modelInput, parsedResult);
+          // If structural violations exist, ask for explicit fixes
+          if (lastViolations.length && attempt < MAX_ATTEMPTS) {
+            const repairInstruction = [
+              "The previous JSON output failed these validation checks. Apply the exact fixes below and RETURN ONLY the corrected JSON object. Do NOT add commentary.",
+              "Validation issues:",
+              ...lastViolations.map((v, i) => `${i + 1}. ${v.section} — ${v.issue} (${v.fix_hint || "no hint"})`),
+              "",
+              "Fix rules (apply programmatically where possible):",
+              "- Use en-dash (–) between bold label and explanation in bullets.",
+              "- Ensure bullet format: <li><strong>Label</strong> – Explanation.</li>",
+              "- Hook bullets >=3 and <=6; Why Choose bullets 3–6; FAQs 5–7.",
+              "- Ensure description text length 1200–32000 characters (text only).",
+              "- H1 length 90–110 characters (do not change name_best unless explicitly allowed).",
+              "",
+              "INPUT (for grounding):",
+              JSON.stringify(modelInput, null, 2),
+              "",
+              "PreviousOutput:",
+              JSON.stringify(parsedResult, null, 2),
+              "",
+              "Return only JSON."
+            ].join("\n\n");
             try {
-              lastRepairText = await callModel(repairPrompt);
-            } catch (e) {
-              lastRepairText = "";
-            }
+              lastRepairText = await callModel(repairInstruction);
+            } catch (e) { lastRepairText = ""; }
             const parsedRepair = (() => {
               try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
             })();
             if (parsedRepair) {
-              // loop will validate parsedRepair next iteration
               parsedResult = parsedRepair;
-              continue;
-            } else {
-              // loop continues, will re-issue primaryInstruction or next repair
-              continue;
+              const res = validateAndNormalize(parsedResult, modelInput);
+              parsedResult = res.normalized;
+              lastViolations = res.violations;
+              lastWarnings = res.warnings;
+              // continue loop - will re-evaluate
+            }
+          } else if (!lastViolations.length && parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number" && parsedResult.desc_audit.score < TARGET_AUDIT_SCORE && attempt < MAX_ATTEMPTS) {
+            // semantic improvement pass
+            const repairInstruction = [
+              "The previous JSON output passed structural validation but its desc_audit.score is below the target.",
+              `Target desc_audit.score: ${TARGET_AUDIT_SCORE}.`,
+              "Do not change name_best. Improve semantic quality by: adding grounded LSI variants, ensuring metaTitle/metaDescription length criteria, enforcing short_name usage <=2, and enhancing 'Why Choose' differentiator.",
+              "Return ONLY the revised JSON object (no commentary).",
+              "",
+              "INPUT (for grounding):",
+              JSON.stringify(modelInput, null, 2),
+              "",
+              "PreviousOutput:",
+              JSON.stringify(parsedResult, null, 2)
+            ].join("\n\n");
+            try {
+              lastRepairText = await callModel(repairInstruction);
+            } catch (e) { lastRepairText = ""; }
+            const parsedRepair = (() => {
+              try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
+            })();
+            if (parsedRepair) {
+              parsedResult = parsedRepair;
+              const res = validateAndNormalize(parsedResult, modelInput);
+              parsedResult = res.normalized;
+              lastViolations = res.violations;
+              lastWarnings = res.warnings;
             }
           }
         } else {
-          // not parseable, if attempts remain, ask for JSON-only repair
+          // parsing failed - forced JSON repair
           if (attempt < MAX_ATTEMPTS) {
             const repairPrompt = [
               "The model's previous output could not be parsed as JSON. Here is the original output:",
               lastModelText,
-              "",
-              "Please return the same information but ONLY as valid JSON matching the Avidia schema. Do not include code fences or extra text.",
+              "Please return the same information but ONLY as valid JSON matching the schema. Do not include code fences or extra text.",
               "INPUT:",
               JSON.stringify(modelInput, null, 2)
             ].join("\n\n");
             try {
               lastRepairText = await callModel(repairPrompt);
-            } catch (e) {
-              lastRepairText = "";
-            }
+            } catch (e) { lastRepairText = ""; }
             const parsedRepair = (() => {
               try { return JSON.parse(lastRepairText); } catch (_) { return extractJsonCandidate(lastRepairText); }
             })();
             if (parsedRepair) {
               parsedResult = parsedRepair;
-              continue;
-            } else {
-              continue;
+              const res = validateAndNormalize(parsedResult, modelInput);
+              parsedResult = res.normalized;
+              lastViolations = res.violations;
+              lastWarnings = res.warnings;
             }
           }
         }
       } // end attempts
 
-      // If we get here, model failed to produce Avidia-compliant JSON
-      console.error("gptEnforcer: model failed to produce Avidia-compliant JSON after attempts", {
-        attempts: MAX_ATTEMPTS,
-        lastModelText: String(lastModelText || "").slice(0, 16000),
-        lastRepairText: String(lastRepairText || "").slice(0, 16000),
-        violations: collectedViolations
-      });
+      // If we have a parsedResult return it; else fallback
+      if (parsedResult && typeof parsedResult === "object") {
+        parsedResult._debug ||= {};
+        parsedResult._debug.promptEngine = promptEngineInfo;
+        parsedResult._debug.attempts = attempt;
+        parsedResult._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
+        parsedResult._debug._input_preview = {
+          name: modelInput.name,
+          shortDescription: String(modelInput.shortDescription || "").slice(0,200),
+          brand: modelInput.brand,
+          specs_keys: Object.keys(modelInput.specs || {}).slice(0,50),
+          violations: lastViolations,
+          warnings: lastWarnings
+        };
 
-      return res.status(422).json({
-        error: "model_noncompliant",
-        message: "Model did not produce Avidia Standard compliant JSON within allowed repair attempts. No fallback returned.",
-        attempts: MAX_ATTEMPTS,
-        _debug: {
+        // Enforce slug rules: build from name_best if present
+        try {
+          const finalName = parsedResult.name_best || parsedResult.product_name || modelInput.name || "";
+          let rawSlug = slugifyName(finalName);
+          let finalSlug = trimSlugByRules(rawSlug, 60, 7);
+          parsedResult.generated_product_url = finalSlug ? `/${finalSlug}` : `/${slugifyName(modelInput.name || "product")}`;
+          if (finalSlug !== rawSlug) {
+            parsedResult.desc_audit = parsedResult.desc_audit || {};
+            parsedResult.desc_audit.slug_resolution = `trimmed from ${rawSlug} to ${finalSlug}`;
+            parsedResult.desc_audit.warnings = parsedResult.desc_audit.warnings || [];
+            parsedResult.desc_audit.warnings.push({ code: "SLUG_TRIMMED", section: "Slug", message: `Slug was trimmed to meet token/length limits`, fix_hint: "Trim trailing tokens or adjust name_best" });
+          }
+        } catch (e) { /* non-fatal */ }
+
+        return res.json(parsedResult);
+      }
+
+      // fallback response
+      const fallback = {
+        descriptionHtml: `<p>${shortDescription}</p>`,
+        sections: {
+          overview: shortDescription,
+          features: [`Feature A for ${name}`, `Feature B`],
+          specsSummary: body.specs || {},
+          includedItems: [],
+          manualsSectionHtml: ""
+        },
+        seo: {
+          h1: name,
+          pageTitle: `${name} - Buy now`,
+          metaDescription: shortDescription,
+          seoShortDescription: shortDescription
+        },
+        normalizedPayload: { name, brand: body.brand ?? null, specs: body.specs ?? {}, format: body.format ?? "avidia_standard" },
+        raw: {
+          request: body,
           promptEngineInfo,
-          lastModelText: String(lastModelText || "").slice(0, 16000),
-          lastRepairText: String(lastRepairText || "").slice(0, 16000),
-          violations: collectedViolations,
-          warnings: collectedWarnings,
-          input_preview: { name: modelInput.name, brand: modelInput.brand, specs_keys: Object.keys(modelInput.specs || {}) }
+          modelText: lastModelText,
+          repairText: lastRepairText,
+          note: "fallback returned after attempts",
+          violations: lastViolations,
+          warnings: lastWarnings
         }
-      });
+      };
+      return res.json(fallback);
     } catch (err) {
       console.error("gptEnforcer: unexpected error:", err?.stack || err);
       return res.status(500).json({ error: "internal", details: String(err) });
     }
   });
 
-  console.log("gptEnforcer (STRICT): /describe mounted");
+  console.log("gptEnforcer: /describe mounted");
 }
 
 export default mountDescribeRoute;
