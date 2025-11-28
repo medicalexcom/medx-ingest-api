@@ -43,6 +43,10 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
+
+
+
+
 {
   // Inlined render-engine fallback (ESM-safe) — upgraded to use master prompts (if available),
   // tolerant JSON extraction, and an automated revise+repair loop (up to 3 attempts) that
@@ -66,10 +70,6 @@ app.use(express.json({ limit: "1mb" }));
       // Accept either x-engine-key or Authorization: Bearer <token>
       const rawHeader = (req.header("x-engine-key") || req.header("authorization") || "").toString();
 
-
-
-
-      
       // DEBUG: masked header logging (temporary)
       const receivedRaw = rawHeader || "";
       function maskKey(s) {
@@ -78,11 +78,6 @@ app.use(express.json({ limit: "1mb" }));
       }
       console.log("render-engine: received-key-len=", receivedRaw.length, "startsWithBearer=", receivedRaw.toLowerCase().startsWith("bearer "), "masked=", maskKey(receivedRaw));
 
-
-
-
-      
-      
       const key = rawHeader.toLowerCase().startsWith("bearer ")
         ? rawHeader.replace(/^Bearer\s+/i, "")
         : rawHeader;
@@ -132,11 +127,11 @@ app.use(express.json({ limit: "1mb" }));
       if (!finalPrompt) {
         finalPrompt = `MASTER-FALLBACK: You are a normalization pipeline that MUST RETURN RAW JSON ONLY with keys: descriptionHtml, sections, seo, normalizedPayload, raw.
 Input:
-name: ${name}
-shortDescription: ${shortDescription}
-brand: ${body.brand || ""}
-specs: ${JSON.stringify(body.specs || {})}
-format: ${body.format || "avidia_standard"}
+name: {{PRODUCT_NAME}}
+shortDescription: {{SHORT_DESCRIPTION}}
+brand: {{BRAND}}
+specs: {{SPECS}}
+format: {{FORMAT}}
 ---
 Return valid JSON only. If parsing fails, the system will re-prompt you to repair.`;
       }
@@ -186,15 +181,41 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
         return null;
       }
 
-      async function askModel(promptSystem, userInstructions = "Produce the JSON that conforms to the schema.") {
+      // Build structured model input to force grounding (the model MUST use this)
+      const modelInput = {
+        tenant_id: ((req.header("x-tenant-id") || null) || body.tenant_id || null),
+        user_id: ((req.header("x-user-id") || null) || body.user_id || null),
+        name,
+        shortDescription,
+        brand: body.brand || null,
+        specs: body.specs || {},
+        format: body.format || "avidia_standard",
+        variants: body.variants || [],
+        pdf_manual_urls: body.pdf_manual_urls || body.manuals || []
+      };
+
+      // explicit grounding instruction (redundant but explicit)
+      const groundingInstruction = [
+        "READ THESE INSTRUCTIONS CAREFULLY:",
+        "1) INPUT JSON follows in the next message. Use ONLY the input data to produce customer-facing content.",
+        "2) DO NOT INVENT product names, specs, weights, warranty terms, capacities, or other factual values.",
+        "3) If a value is missing or ambiguous, OMIT the corresponding line/bullet from the customer-facing HTML and list the gap under desc_audit.data_gaps.",
+        "4) RETURN ONLY valid JSON matching the schema requested by the system prompt. No commentary, no code fences, no extra text."
+      ].join(" ");
+
+      // askModel now always includes the system prompt + grounding + structured input
+      async function askModel(promptSystem, inputObj, userInstructions = "Produce the JSON that conforms to the schema.") {
+        const messages = [
+          { role: "system", content: promptSystem },
+          { role: "user", content: groundingInstruction },
+          { role: "user", content: "INPUT:\n" + JSON.stringify(inputObj, null, 2) },
+          { role: "user", content: userInstructions }
+        ];
         const completion = await client.chat.completions.create({
           model: OPENAI_MODEL || "gpt-4o-mini",
-          messages: [
-            { role: "system", content: promptSystem },
-            { role: "user", content: userInstructions }
-          ],
+          messages,
           temperature: 0.0,
-          max_tokens: 1600
+          max_tokens: 3200
         });
         return completion?.choices?.[0]?.message?.content ?? "";
       }
@@ -208,9 +229,10 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
 
       while (attempt < 3 && !passed) {
         attempt++;
-        // 1) ask model
+        // 1) ask model (provide structured input so model must ground)
         try {
-          lastModelText = await askModel(finalPrompt, "Produce only valid JSON matching the Avidia schema. Return JSON only.");
+          lastModelText = await askModel(finalPrompt, modelInput, "Produce ONLY valid JSON matching the Avidia schema. RETURN JSON ONLY.");
+          console.log("render-engine: model reply length=", String(lastModelText || "").length, "attempt=", attempt);
         } catch (e) {
           console.error("render-engine: openai call failed on attempt", attempt, e?.message || e);
           lastModelText = "";
@@ -224,9 +246,7 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
         // 3) if parsed and contains desc_audit.score, evaluate
         if (parsedResult && parsedResult.desc_audit && typeof parsedResult.desc_audit.score === "number") {
           auditScore = Number(parsedResult.desc_audit.score);
-          // Passed conditions:
-          //     - auditScore >= TARGET_AUDIT_SCORE OR
-          //     - desc_audit.passed === true (and only data_gaps/variant warnings remain)
+          console.log("render-engine: parsed desc_audit.score=", auditScore);
           if (auditScore >= TARGET_AUDIT_SCORE || parsedResult.desc_audit.passed === true) {
             passed = true;
             break;
@@ -236,14 +256,15 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
         // 4) If parsed but score low, ask for a revision (repair loop)
         if (parsedResult && attempt < 3) {
           const repairInstruction = [
-            "The previous JSON output did not meet the audit target. You will now REVISE the JSON to improve the desc_audit.score toward the target.",
+            "The previous JSON output did not meet the audit target. REVISE the JSON to improve desc_audit.score toward the target.",
             `Target desc_audit.score: ${TARGET_AUDIT_SCORE}.`,
             "Do not change name_best. Apply targeted fixes only (formatting, metadata lengths, add missing sections if grounded, synonym rotations, remove placeholders).",
             "Return ONLY the revised JSON object (no commentary)."
           ].join("\n\n");
 
           try {
-            lastRepairText = await askModel(finalPrompt, repairInstruction + "\n\nPreviousOutput:\n" + lastModelText);
+            lastRepairText = await askModel(finalPrompt, modelInput, repairInstruction + "\n\nPreviousOutput:\n" + lastModelText);
+            console.log("render-engine: repair reply length=", String(lastRepairText || "").length);
           } catch (e) {
             console.error("render-engine: repair call failed", e?.message || e);
             lastRepairText = "";
@@ -272,7 +293,8 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
               "Please return the same information but ONLY as valid JSON matching the schema. Do not include code fences or extra text."
             ].join("\n\n");
             try {
-              lastRepairText = await askModel(finalPrompt, repairPrompt);
+              lastRepairText = await askModel(finalPrompt, modelInput, repairPrompt);
+              console.log("render-engine: forced repair reply length=", String(lastRepairText || "").length);
             } catch (e) {
               console.error("render-engine: forced-repair call failed", e?.message || e);
               lastRepairText = "";
@@ -293,16 +315,23 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
           }
         }
 
-        // If this was the last attempt and we didn't pass, we will break and return best effort below.
+        // If this was the last attempt and we didn't pass, we will exit loop and return best effort below.
       } // end attempts
 
       // If we have a parsedResult return it; else return fallback shaped JSON including model text and repair attempts for debugging
-      if (parsedResult) {
+      if (parsedResult && typeof parsedResult === "object") {
         // Attach promptEngineInfo for observability (which loader was used)
         parsedResult._debug ||= {};
         parsedResult._debug.promptEngine = promptEngineInfo;
         parsedResult._debug.attempts = attempt;
         parsedResult._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
+        // Also surface the structured input used for grounding (mask sensitive parts)
+        parsedResult._debug._input_preview = {
+          name: modelInput.name,
+          shortDescription: String(modelInput.shortDescription || "").slice(0,200),
+          brand: modelInput.brand,
+          specs_keys: Object.keys(modelInput.specs || {}).slice(0,50)
+        };
         return res.json(parsedResult);
       } else {
         // fallback shaped response with model traces
@@ -340,9 +369,6 @@ Return valid JSON only. If parsing fails, the system will re-prompt you to repai
 
   console.log("main: inline render-engine /describe mounted (enhanced)");
 }
-
-
-
 
 
 
