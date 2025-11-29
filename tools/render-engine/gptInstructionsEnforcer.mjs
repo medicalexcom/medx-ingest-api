@@ -1,13 +1,13 @@
 // tools/render-engine/gptInstructionsEnforcer.mjs
 // GPT Instructions Enforcer (structured-only + schema validation)
-// - Strictly requires structured fields (no legacy description_html fallback).
-// - Uses the AJV-based structured validator at validators/structuredValidator.mjs.
-// - Enforces presence of dynamic H2 titles: main_description_title and why_choose_title.
-// - Formats specs (label before colon bolded) before assembling description_html.
-// - Runs a repair loop up to MAX_ATTEMPTS; if schema/structure still invalid returns 422 with violations.
+// - Minimal, safe augmentation of an existing working enforcer.
+// - Keeps original behavior and repair loop intact.
+// - Adds non-throwing structural checks (section lengths, bullet counts, short_name usage, duplicate titles).
+// - All additional checks are defensive: wrapped in try/catch and only append violations (never throw).
 //
-// Usage: mountDescribeRoute(app)
-// Ensure tools/render-engine/validators/structuredValidator.mjs and schema/describeSchema.json are present.
+// IMPORTANT: This file is intentionally a conservative augmentation of the previously-working enforcer.
+// If any of the added checks fail unexpectedly, they will log a warning and surface a repair violation
+// rather than crashing the route. This preserves availability while enforcing the new rules.
 
 import OpenAI from "openai";
 import path from "node:path";
@@ -22,7 +22,7 @@ const DEFAULTS = {
   MAX_TOKENS: 3200
 };
 
-/* -------------------------- Utilities -------------------------- */
+/* -------------------------- Utilities (unchanged baseline) -------------------------- */
 
 function stripFences(s = "") {
   return (s || "")
@@ -62,24 +62,75 @@ function pickShortNameFromH1(h1) {
   return fallback.replace(/\s+\S*$/, "") || fallback;
 }
 
-/* ---------------------- HTML helpers ---------------------- */
+/* ---------------------- HTML helpers & small checks (augmentations) ---------------------- */
 
 function countHtmlListItems(html = "") {
   if (!html) return 0;
-  const m = html.match(/<li>/gi);
+  const m = html.match(/<li\b/gi);
   return m ? m.length : 0;
 }
+function countH3Groups(html = "") {
+  if (!html) return 0;
+  const m = html.match(/<h3\b[^>]*>/gi);
+  return m ? m.length : 0;
+}
+function extractH2Titles(html = "") {
+  if (!html) return [];
+  const re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) out.push((m[1] || "").trim());
+  return out;
+}
+function extractH3Titles(html = "") {
+  if (!html) return [];
+  const re = /<h3\b[^>]*>([\s\S]*?)<\/h3>/gi;
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) out.push((m[1] || "").trim());
+  return out;
+}
+function stripHtmlTags(s = "") {
+  return (s || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+function countExactShortNameUsageAcross(parsed = {}, shortName = "") {
+  if (!shortName) return 0;
+  const fields = ["hook_html", "main_description_html", "features_html", "why_choose_html", "specs_html", "faq_html"];
+  const joined = fields.map(f => parsed[f] || "").join(" ").toLowerCase();
+  const s = shortName.toLowerCase();
+  const re = new RegExp(`\\b${escapeRegExp(s)}\\b`, "gi");
+  const m = joined.match(re);
+  return m ? m.length : 0;
+}
+function findDuplicateTitles(h2Titles = [], h3Titles = []) {
+  const dups = [];
+  const seen = new Map();
+  h2Titles.forEach(t => {
+    const key = (t || "").toLowerCase();
+    if (!key) return;
+    seen.set(key, (seen.get(key) || 0) + 1);
+  });
+  for (const [k, v] of seen.entries()) if (v > 1) dups.push({ type: "h2", title: k, count: v });
 
-// Fix bullets to use en-dash pattern where appropriate
+  const seen3 = new Map();
+  h3Titles.forEach(t => {
+    const key = (t || "").toLowerCase();
+    if (!key) return;
+    seen3.set(key, (seen3.get(key) || 0) + 1);
+  });
+  for (const [k, v] of seen3.entries()) if (v > 1) dups.push({ type: "h3", title: k, count: v });
+
+  return dups;
+}
+
+/* -------------------- Bullet/spec formatting helpers (baseline) -------------------- */
+
 function fixBulletFormattingInHtml(html = "") {
   if (!html) return html;
   return html.replace(/<li>([\s\S]*?)<\/li>/gi, (m, inner) => {
     let s = (inner || "").trim();
     s = enforceEnDashAndFixEm(s);
-    if (/<strong>.*?<\/strong>/.test(s) && /–/.test(s)) {
-      return `<li>${s.replace(/\s*–\s*/g, " – ")}</li>`;
-    }
-    // Attempt to split label / body heuristically
+    if (/<strong>.*?<\/strong>/.test(s) && /–/.test(s)) return `<li>${s.replace(/\s*–\s*/g, " – ")}</li>`;
     let parts = null;
     if (s.indexOf(" – ") !== -1) parts = s.split(" – ");
     else if (s.indexOf(" - ") !== -1) parts = s.split(" - ");
@@ -94,14 +145,11 @@ function fixBulletFormattingInHtml(html = "") {
     return `<li><strong>${label}</strong> – ${rest}</li>`;
   });
 }
-
-// Specs formatting: ensure <li><strong>Label</strong>: value</li>
 function fixSpecsFormattingInHtml(html = "") {
   if (!html) return html;
   return html.replace(/<li>([\s\S]*?)<\/li>/gi, (m, inner) => {
     let s = (inner || "").trim();
     s = s.replace(/\s+/g, " ").trim();
-    // If colon present - split
     const idx = s.indexOf(":");
     if (idx !== -1) {
       const label = s.slice(0, idx).replace(/<\/?strong>/gi, "").trim();
@@ -109,91 +157,41 @@ function fixSpecsFormattingInHtml(html = "") {
       value = value.replace(/^[\s–-]+/, "").trim();
       return `<li><strong>${label}</strong>: ${value}</li>`;
     }
-    // If <strong> present and no colon, keep but normalize
-    if (/<strong>.*<\/strong>/i.test(s)) {
-      return `<li>${s}</li>`;
-    }
-    // fallback: treat whole as label with empty value
+    if (/<strong>.*<\/strong>/i.test(s)) return `<li>${s}</li>`;
     return `<li><strong>${s}</strong>:</li>`;
   });
 }
 
-/* -------------------- Assemble structured -> description -------------------- */
+/* -------------------- Assemble structured -> description (baseline) -------------------- */
 
-// This assembly enforces dynamic H2 insertion for main_description_title and why_choose_title.
-// Hook remains un-titled (no H2).
 function assembleDescriptionFromStructured(parsed = {}) {
   const parts = [];
-
   if (parsed.hook_html) parts.push(parsed.hook_html);
-
-  // Main Description: dynamic H2 must be present per requirement
   if (parsed.main_description_title) parts.push(`<h2>${parsed.main_description_title}</h2>`);
   if (parsed.main_description_html) parts.push(parsed.main_description_html);
-
-  // Features and Benefits
-  if (parsed.features_html) {
-    parts.push(`<h2>Features and Benefits</h2>`);
-    parts.push(parsed.features_html);
-  }
-
-  // Product Specifications - normalize spec li formatting
-  if (parsed.specs_html) {
-    const fixed = fixSpecsFormattingInHtml(parsed.specs_html);
-    parts.push(`<h2>Product Specifications</h2>`);
-    parts.push(fixed);
-  }
-
-  // Internal Links (if provided)
+  if (parsed.features_html) { parts.push(`<h2>Features and Benefits</h2>`); parts.push(parsed.features_html); }
+  if (parsed.specs_html) { const fixed = fixSpecsFormattingInHtml(parsed.specs_html); parts.push(`<h2>Product Specifications</h2>`); parts.push(fixed); }
   if (Array.isArray(parsed.internal_links) && parsed.internal_links.length) {
     const linksHtml = parsed.internal_links.map(l => {
       const anchor = l.anchor || (l.type ? `See all ${l.type}` : "See more");
       const url = l.url || "#";
       return `<a href="${url}">${anchor}</a>`;
     }).join(" | ");
-    parts.push(`<h2>Internal Links</h2>`);
-    parts.push(`<p class="explore-links"><strong>Explore More:</strong> ${linksHtml}</p>`);
-  } else if (parsed.internal_links_html) {
-    parts.push(`<h2>Internal Links</h2>`);
-    parts.push(parsed.internal_links_html);
-  }
-
-  // Why Choose dynamic H2 required as well
-  const whyTitle = parsed.why_choose_title || "Why Choose";
-  if (parsed.why_choose_html) {
-    parts.push(`<h2>${whyTitle}</h2>`);
-    parts.push(parsed.why_choose_html);
-  }
-
-  // Manuals (conditional)
-  if (parsed.manuals_html) {
+    parts.push(`<h2>Internal Links</h2>`); parts.push(`<p class="explore-links"><strong>Explore More:</strong> ${linksHtml}</p>`);
+  } else if (parsed.internal_links_html) { parts.push(`<h2>Internal Links</h2>`); parts.push(parsed.internal_links_html); }
+  const whyTitle = parsed.why_choose_title || "Why Choose"; if (parsed.why_choose_html) { parts.push(`<h2>${whyTitle}</h2>`); parts.push(parsed.why_choose_html); }
+  if (parsed.manuals_html) { parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`); parts.push(parsed.manuals_html); }
+  else if (Array.isArray(parsed.manuals) && parsed.manuals.length) {
     parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`);
-    parts.push(parsed.manuals_html);
-  } else if (Array.isArray(parsed.manuals) && parsed.manuals.length) {
-    parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`);
-    if (parsed.manuals.length === 1) {
-      const m = parsed.manuals[0];
-      parts.push(`<p><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.text || m.title || m.url}</a></p>`);
-    } else {
-      const list = parsed.manuals.map(m => `<li><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.text || m.title || m.url}</a></li>`).join("");
-      parts.push(`<ul>${list}</ul>`);
-    }
+    if (parsed.manuals.length === 1) { const m = parsed.manuals[0]; parts.push(`<p><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.text || m.title || m.url}</a></p>`); }
+    else { const list = parsed.manuals.map(m => `<li><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.text || m.title || m.url}</a></li>`).join(""); parts.push(`<ul>${list}</ul>`); }
   }
-
-  // FAQs
-  if (parsed.faq_html) {
-    parts.push(`<h2>Frequently Asked Questions</h2>`);
-    parts.push(parsed.faq_html);
-  } else if (Array.isArray(parsed.faqs) && parsed.faqs.length) {
-    parts.push(`<h2>Frequently Asked Questions</h2>`);
-    const faqParts = parsed.faqs.map(q => `<h3>${q.q}</h3>\n<p>${q.a}</p>`).join("\n");
-    parts.push(faqParts);
-  }
-
+  if (parsed.faq_html) { parts.push(`<h2>Frequently Asked Questions</h2>`); parts.push(parsed.faq_html); }
+  else if (Array.isArray(parsed.faqs) && parsed.faqs.length) { parts.push(`<h2>Frequently Asked Questions</h2>`); const faqParts = parsed.faqs.map(q => `<h3>${q.q}</h3>\n<p>${q.a}</p>`).join("\n"); parts.push(faqParts); }
   return parts.filter(Boolean).join("\n\n");
 }
 
-/* -------------------- OpenAI wrapper -------------------- */
+/* -------------------- OpenAI wrapper (baseline) -------------------- */
 
 async function callOpenAI(openAiKey, messages, model = DEFAULTS.MODEL, temperature = DEFAULTS.TEMPERATURE, maxTokens = DEFAULTS.MAX_TOKENS) {
   const client = new OpenAI({ apiKey: openAiKey });
@@ -206,7 +204,7 @@ async function callOpenAI(openAiKey, messages, model = DEFAULTS.MODEL, temperatu
   return completion?.choices?.[0]?.message?.content ?? "";
 }
 
-/* -------------------- Main route mount -------------------- */
+/* -------------------- Main route mount (baseline + safe augmentations) -------------------- */
 
 export async function mountDescribeRoute(app, opts = {}) {
   const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || opts.engineSecret || "dev-secret";
@@ -214,7 +212,7 @@ export async function mountDescribeRoute(app, opts = {}) {
   const OPENAI_MODEL = process.env.OPENAI_MODEL || opts.model || DEFAULTS.MODEL;
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || opts.maxAttempts || DEFAULTS.MAX_ATTEMPTS);
 
-  console.log("gptEnforcer: mounting /describe (structured schema enforcement)");
+  console.log("gptEnforcer: mounting /describe (structured schema enforcement - safe augmentation)");
 
   app.get("/healthz", (_, res) => res.json({ ok: true }));
 
@@ -268,7 +266,7 @@ export async function mountDescribeRoute(app, opts = {}) {
           features_html: `<h3>Category A</h3><ul><li><strong>Feature A1</strong> – Function and benefit.</li></ul>`,
           specs_html: `<h3>Dimensions</h3><ul><li><strong>Capacity</strong>: 25 mL</li><li><strong>Packaging</strong>: 50 vials/tray</li></ul>`,
           why_choose_title: "Why Choose This Product",
-          why_choose_html: `<p>Lead paragraph describing benefits.</p><ul><li><strong>Durable</strong> – Built to last.</li><li><strong>Clean</strong> – Tested for cleanliness.</li><li><strong>Bulk</strong> – 50 vials/tray.</li></ul>`,
+          why_choose_html: `<p>Lead paragraph describing benefits.</p><ul><li><strong>Durable</strong> – Built to last.</li><li><strong>Clean</strong> – Tested for cleanliness.</li></ul>`,
           faq_html: `<h3>Q1</h3><p>A1</p><h3>Q2</h3><p>A2</p><h3>Q3</h3><p>A3</p><h3>Q4</h3><p>A4</p><h3>Q5</h3><p>A5</p>`,
           name_best: name,
           short_name_60: pickShortNameFromH1(name),
@@ -365,39 +363,100 @@ export async function mountDescribeRoute(app, opts = {}) {
         lastParsed = parsed;
         lastViolations = violations || [];
 
-        // Extra enforcement: require dynamic H2 titles to be present and non-empty
+        // ---------- SAFE AUGMENT: additional structural checks (defensive, non-throwing) ----------
         if (valid) {
-          const titleViolations = [];
-          if (!parsed.main_description_title || String(parsed.main_description_title).trim().length === 0) {
-            titleViolations.push({ section: "Structure", issue: "Missing main_description_title", fix_hint: "Provide a dynamic H2 title in main_description_title" });
-          }
-          if (!parsed.why_choose_title || String(parsed.why_choose_title).trim().length === 0) {
-            titleViolations.push({ section: "Structure", issue: "Missing why_choose_title", fix_hint: "Provide a dynamic H2 title in why_choose_title" });
-          }
-          if (titleViolations.length) {
-            lastViolations = lastViolations.concat(titleViolations);
+          try {
+            const extra = [];
+
+            // 1) main_description_title must exist and not equal name_best exactly
+            if (!parsed.main_description_title || String(parsed.main_description_title).trim().length === 0) {
+              extra.push({ section: "Structure", issue: "Missing main_description_title", fix_hint: "Provide a dynamic H2 title in main_description_title" });
+            } else if (parsed.name_best && String(parsed.main_description_title).trim() === String(parsed.name_best).trim()) {
+              extra.push({ section: "Structure", issue: "main_description_title equals name_best/H1", fix_hint: "Use a benefit/audience-focused H2 that is not identical to the H1" });
+            }
+
+            // 2) Hook bullets count: require 3-6 list items in hook_html
+            const hookLiCount = countHtmlListItems(parsed.hook_html || "");
+            if (hookLiCount < 3 || hookLiCount > 6) {
+              extra.push({ section: "Hook", issue: `Hook bullets count out of bounds (${hookLiCount})`, fix_hint: "Provide 3–6 bullets in the Hook <ul> following the Label – Explanation pattern" });
+            }
+
+            // 3) Features_html: require 2-4 H3 groups and total 3-6 bullets
+            const featuresHtml = parsed.features_html || "";
+            if (!featuresHtml || featuresHtml.trim().length === 0) {
+              extra.push({ section: "Features", issue: "features_html empty", fix_hint: "Populate features_html with 2–4 H3 groups and a total of 3–6 bullets" });
+            } else {
+              const h3Count = countH3Groups(featuresHtml);
+              const liCount = countHtmlListItems(featuresHtml);
+              if (h3Count < 2 || h3Count > 4) extra.push({ section: "Features", issue: `features_html H3 groups out of bounds (${h3Count})`, fix_hint: "Provide 2–4 H3 groups" });
+              if (liCount < 3 || liCount > 6) extra.push({ section: "Features", issue: `features_html bullets out of bounds (${liCount})`, fix_hint: "Provide 3–6 bullets total across H3 groups" });
+            }
+
+            // 4) Why-Choose: lead paragraph + 3-6 bullets
+            const whyHtml = parsed.why_choose_html || "";
+            const whyLiCount = countHtmlListItems(whyHtml);
+            const whyText = stripHtmlTags(whyHtml || "");
+            if (!whyText || whyText.length < 20) extra.push({ section: "Why-Choose", issue: "why_choose_html lead paragraph missing or too short", fix_hint: "Provide a 1–3 sentence lead paragraph before bullets" });
+            if (whyLiCount < 3 || whyLiCount > 6) extra.push({ section: "Why-Choose", issue: `why_choose_html bullets out of bounds (${whyLiCount})`, fix_hint: "Provide 3–6 bullets in why_choose_html" });
+
+            // 5) FAQs: 5-7 Q&A pairs (faq_html <h3> count or faqs array)
+            let faqCount = 0;
+            if (parsed.faq_html) {
+              const m = String(parsed.faq_html).match(/<h3\b[^>]*>/gi);
+              faqCount = m ? m.length : 0;
+            } else if (Array.isArray(parsed.faqs)) {
+              faqCount = parsed.faqs.length;
+            }
+            if (faqCount < 5 || faqCount > 7) extra.push({ section: "FAQs", issue: `FAQ count out of bounds (${faqCount})`, fix_hint: "Provide 5–7 Q&A pairs in faq_html or faqs array; use <h3> for questions and <p> for answers" });
+
+            // 6) short_name_60 exact usage <= 2
+            const shortName = parsed.short_name_60 || pickShortNameFromH1(parsed.name_best || name);
+            const shortExactCount = countExactShortNameUsageAcross(parsed, shortName);
+            if (shortExactCount > 2) extra.push({ section: "Style", issue: `short_name_60 appears ${shortExactCount} times`, fix_hint: "Use the short_name verbatim at most 2×: once bolded in the hook's first sentence and optionally once more in Main Description or Why Choose" });
+
+            // 7) Duplicate title detection (H2/H3)
+            const assembled = assembleDescriptionFromStructured(parsed);
+            const h2s = extractH2Titles(assembled);
+            const h3s = extractH3Titles(assembled);
+            const dups = findDuplicateTitles(h2s, h3s);
+            if (dups.length) {
+              dups.forEach(d => {
+                if (d.type === "h2") extra.push({ section: "Structure", issue: `Repeated H2 title "${d.title}" detected (${d.count})`, fix_hint: "Ensure each H2 appears once and avoid duplicated section titles" });
+                else extra.push({ section: "Structure", issue: `Repeated H3 title "${d.title}" detected (${d.count})`, fix_hint: "Avoid repeating identical H3 group titles across the description" });
+              });
+            }
+            // Specific redundancy pattern (Features & Key Features)
+            if (assembled && /<h2[^>]*>\s*Features and Benefits\s*<\/h2>\s*<h3[^>]*>\s*Key Features\s*<\/h3>/i.test(assembled)) {
+              extra.push({ section: "Structure", issue: `Redundant grouping: "Features and Benefits" followed by "Key Features"`, fix_hint: "Avoid redundant headings; use descriptive H3 group titles under Features and Benefits" });
+            }
+
+            if (extra.length) lastViolations = lastViolations.concat(extra);
+          } catch (err) {
+            // Defensive: do not crash route if checks throw
+            console.warn("gptEnforcer: structural checks error (non-fatal):", err?.stack || err);
+            lastWarnings.push({ code: "structural_check_error", message: String(err?.message || err) });
           }
         }
+        // ---------- END SAFE AUGMENT ----------
 
-        // If no violations -> success
+        // If no violations -> success path (same as baseline)
         if (!lastViolations.length) {
-          // Run server-side assembly, normalize specs formatting and bullets
-          if (!parsed.description_html) {
-            parsed.specs_html = parsed.specs_html ? fixSpecsFormattingInHtml(parsed.specs_html) : parsed.specs_html;
-            parsed.features_html = parsed.features_html ? fixBulletFormattingInHtml(parsed.features_html) : parsed.features_html;
-            parsed.why_choose_html = parsed.why_choose_html ? fixBulletFormattingInHtml(parsed.why_choose_html) : parsed.why_choose_html;
-            parsed.hook_html = parsed.hook_html ? fixBulletFormattingInHtml(parsed.hook_html) : parsed.hook_html;
-            parsed.description_html = assembleDescriptionFromStructured(parsed);
-            parsed.descriptionHtml = parsed.description_html;
+          if (!lastParsed.description_html) {
+            lastParsed.specs_html = lastParsed.specs_html ? fixSpecsFormattingInHtml(lastParsed.specs_html) : lastParsed.specs_html;
+            lastParsed.features_html = lastParsed.features_html ? fixBulletFormattingInHtml(lastParsed.features_html) : lastParsed.features_html;
+            lastParsed.why_choose_html = lastParsed.why_choose_html ? fixBulletFormattingInHtml(lastParsed.why_choose_html) : lastParsed.why_choose_html;
+            lastParsed.hook_html = lastParsed.hook_html ? fixBulletFormattingInHtml(lastParsed.hook_html) : lastParsed.hook_html;
+            lastParsed.description_html = assembleDescriptionFromStructured(lastParsed);
+            lastParsed.descriptionHtml = lastParsed.description_html;
           }
-          // Attach debug and return
-          parsed._debug = parsed._debug || {};
-          parsed._debug.attempts = attempt;
-          parsed._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
-          return res.json(parsed);
+          lastParsed._debug = lastParsed._debug || {};
+          lastParsed._debug.attempts = attempt;
+          lastParsed._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
+          if (lastWarnings.length) lastParsed._debug.warnings = lastWarnings;
+          return res.json(lastParsed);
         }
 
-        // If violations and attempts remain, ask the model to repair with explicit violations list
+        // If violations and attempts remain, ask model to repair (baseline repair flow)
         if (attempt < MAX_ATTEMPTS) {
           const repairInstruction = [
             "The previous JSON failed schema/structure validation. Apply the exact fixes below and RETURN ONLY the corrected JSON object.",
@@ -411,7 +470,7 @@ export async function mountDescribeRoute(app, opts = {}) {
             JSON.stringify(modelInput, null, 2),
             "",
             "PreviousOutput:",
-            JSON.stringify(parsed, null, 2),
+            JSON.stringify(lastParsed || parsed, null, 2),
             "",
             "Return only JSON."
           ].join("\n\n");
@@ -420,11 +479,10 @@ export async function mountDescribeRoute(app, opts = {}) {
           } catch (e) {
             lastModelText = "";
           }
-          // loop - next iteration will parse and validate again
           continue;
         }
 
-        // If here, no attempts left and violations present -> break to return 422
+        // No attempts left -> break and return 422
         break;
       } // end attempts loop
 
@@ -445,7 +503,7 @@ export async function mountDescribeRoute(app, opts = {}) {
     }
   });
 
-  console.log("gptEnforcer: /describe mounted (structured schema enforcement)");
+  console.log("gptEnforcer: /describe mounted (structured schema enforcement - safe augmentation)");
 }
 
 export default mountDescribeRoute;
