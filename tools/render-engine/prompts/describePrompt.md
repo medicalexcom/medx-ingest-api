@@ -1372,3 +1372,53 @@ Performance Mode
 
 When running in automation batches (`auto_batch=true`), skip readability metric computation to reduce token usage.  
 Only the structural audit must run in this mode.
+
+
+
+
+# Server Additional Requirements
+
+IMPORTANT: This file is the model-facing instruction. It has been updated to require a strict structured JSON output (no legacy description_html-only responses). The model MUST return the structured fields (main_description_title and why_choose_title are required dynamic H2 titles). The server enforcer performs schema validation and will reject non-conformant responses.
+
+Summary of required structured fields (top-level JSON):
+- hook_html: string (intro paragraph(s) + a <ul> with 3–6 <li> bullets). Bold short_name_60 once in the first sentence.
+- main_description_title: string (dynamic H2 title for the Main Description).
+- main_description_html: string (4–6 sentence intro; include a buyer-outcome sentence and at least two LSI variants).
+- features_html: string (H3 groups + <ul> bullets; bullets use `<li><strong>Feature</strong> – Explanation.</li>`).
+- specs_html: string (H3 groups + <ul> bullets; **spec bullets MUST use colon format**: `<li><strong>Spec Name</strong>: value</li>`).
+- why_choose_title: string (dynamic H2 title for Why Choose).
+- why_choose_html: string (lead paragraph + 3–6 <li> bullets; one bullet must be a measurable differentiator if grounded).
+- faq_html OR faqs (array): faq_html string with `<h3>` questions and `<p>` answers, or faqs array of {q,a} objects. Must contain 5–7 Q&A pairs.
+- name_best: string
+- short_name_60: string (≤ 60 chars; bold once in the hook)
+- desc_audit: object (audit result info; minimal fields allowed)
+
+Strict rules:
+- Do NOT emit a top-level description_html-only response. The server requires the structured fields and will assemble the final description.
+- main_description_title and why_choose_title must be present and non-empty.
+- Product Specifications bullets must use colon format with label bolded before the colon: `<li><strong>Label</strong>: value</li>`.
+- Bullets in other sections must use en-dash pattern: `<li><strong>Label</strong> – Explanation.</li>`.
+- If a grounded fact is missing from INPUT, omit the bullet and add the key to desc_audit.data_gaps.
+- No Markdown. Use HTML tags only where specified.
+
+Example (top-level JSON snippet the model must return):
+{
+  "hook_html": "<p><strong>short name</strong> ...</p><ul><li><strong>Feature</strong> – Benefit.</li>...</ul>",
+  "main_description_title": "Dynamic Main H2 Title",
+  "main_description_html": "<p>Four to six sentence intro with buyer-outcome sentence and at least two LSI variants.</p>",
+  "features_html": "<h3>Group</h3><ul><li><strong>Feature</strong> – Benefit.</li></ul>",
+  "specs_html": "<h3>Dimensions</h3><ul><li><strong>Capacity</strong>: 25 mL</li></ul>",
+  "why_choose_title": "Why Choose This Product",
+  "why_choose_html": "<p>Lead paragraph.</p><ul><li><strong>Differentiator</strong> – Measurable edge.</li>...</ul>",
+  "faq_html": "<h3>Question?</h3><p>Answer.</p>...",
+  "name_best": "Full H1 Product Name – key spec",
+  "short_name_60": "Short Name",
+  "desc_audit": { "score": 9.8, "passed": true, "violations": [] }
+}
+
+Note: The server will validate the returned JSON against the canonical schema (tools/render-engine/schema/describeSchema.json) and will reject non-conformant outputs with a 422 and machine-readable violations. Follow the schema strictly.
+
+
+
+
+
