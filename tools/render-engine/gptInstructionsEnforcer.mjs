@@ -159,6 +159,101 @@ function replaceExtraShortNameOccurrences(html = "", shortName = "", allowed = 2
   });
 }
 
+/* -------------------- Structured assembly helper -------------------- */
+
+// Assemble description_html server-side from structured fields returned by the model.
+// NOTE: Hook and Main Description are guidance-only and are not inserted as H2 headings.
+function assembleDescriptionFromStructured(parsed = {}) {
+  // Expect parsed.hook_html, parsed.main_description_html, parsed.features_html, parsed.specs_html,
+  // parsed.internal_links_html or parsed.internal_links (array), parsed.why_choose_html, parsed.manuals_html, parsed.faq_html (string or array)
+  let parts = [];
+
+  // Hook: insert raw content (no H2)
+  if (parsed.hook_html) {
+    parts.push(parsed.hook_html);
+  } else if (parsed.hook) {
+    parts.push(parsed.hook);
+  }
+
+  // Main Description: guidance-only (no H2)
+  if (parsed.main_description_html) {
+    parts.push(parsed.main_description_html);
+  } else if (parsed.main_description) {
+    parts.push(parsed.main_description);
+  }
+
+  // Features and Benefits: H2 + content (model should return features_html containing H3 groups / <ul>)
+  if (parsed.features_html) {
+    parts.push(`<h2>Features and Benefits</h2>`);
+    parts.push(parsed.features_html);
+  } else if (parsed.features) {
+    parts.push(`<h2>Features and Benefits</h2>`);
+    parts.push(parsed.features);
+  }
+
+  // Product Specifications
+  if (parsed.specs_html) {
+    parts.push(`<h2>Product Specifications</h2>`);
+    parts.push(parsed.specs_html);
+  } else if (parsed.specs_html_groups) {
+    parts.push(`<h2>Product Specifications</h2>`);
+    parts.push(parsed.specs_html_groups);
+  }
+
+  // Internal Links (conditional; do not render for Avidia unless evidence present)
+  if (Array.isArray(parsed.internal_links) && parsed.internal_links.length) {
+    const linksHtml = parsed.internal_links.map(l => {
+      const anchor = l.anchor || (l.type ? `See all ${l.type}` : "See more");
+      const url = l.url || "#";
+      return `<a href="${url}">${anchor}</a>`;
+    }).join(" | ");
+    parts.push(`<h2>Internal Links</h2>`);
+    parts.push(`<p class="explore-links"><strong>Explore More:</strong> ${linksHtml}</p>`);
+  } else if (parsed.internal_links_html) {
+    parts.push(`<h2>Internal Links</h2>`);
+    parts.push(parsed.internal_links_html);
+  }
+
+  // Why Choose
+  if (parsed.why_choose_html) {
+    parts.push(`<h2>Why Choose</h2>`);
+    parts.push(parsed.why_choose_html);
+  } else if (parsed.why_choose) {
+    parts.push(`<h2>Why Choose</h2>`);
+    parts.push(parsed.why_choose);
+  }
+
+  // Manuals (conditional)
+  if (parsed.manuals_html) {
+    parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`);
+    parts.push(parsed.manuals_html);
+  } else if (Array.isArray(parsed.manuals) && parsed.manuals.length) {
+    parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`);
+    if (parsed.manuals.length === 1) {
+      const m = parsed.manuals[0];
+      parts.push(`<p><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.text || m.title || m.url}</a></p>`);
+    } else {
+      const list = parsed.manuals.map(m => `<li><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.text || m.title || m.url}</a></li>`).join("");
+      parts.push(`<ul>${list}</ul>`);
+    }
+  }
+
+  // FAQs
+  if (parsed.faq_html) {
+    parts.push(`<h2>Frequently Asked Questions</h2>`);
+    parts.push(parsed.faq_html);
+  } else if (Array.isArray(parsed.faqs) && parsed.faqs.length) {
+    parts.push(`<h2>Frequently Asked Questions</h2>`);
+    const faqParts = parsed.faqs.map(q => {
+      const qHtml = `<h3>${q.q}</h3>\n<p>${q.a}</p>`;
+      return qHtml;
+    }).join("\n");
+    parts.push(faqParts);
+  }
+
+  return parts.filter(Boolean).join("\n\n");
+}
+
 /* ------------------------ Validation & Normalization ------------------------ */
 
 function validateAndNormalize(parsed = {}, modelInput = {}) {
@@ -166,7 +261,26 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
   const warnings = [];
   const normalized = JSON.parse(JSON.stringify(parsed || {}));
 
-  const descHtml = normalized.descriptionHtml || normalized.description_html || "";
+  // Determine whether structured fields were provided
+  const hasStructured = Boolean(
+    normalized.hook_html ||
+    normalized.main_description_html ||
+    normalized.features_html ||
+    normalized.specs_html ||
+    normalized.why_choose_html ||
+    normalized.faq_html ||
+    (Array.isArray(normalized.faqs) && normalized.faqs.length)
+  );
+
+  // Build descriptionHtml for legacy flows or to run some checks
+  if (!normalized.descriptionHtml && normalized.description_html) normalized.descriptionHtml = normalized.description_html;
+  if (!normalized.descriptionHtml && hasStructured) {
+    // assemble from structured content
+    normalized.descriptionHtml = assembleDescriptionFromStructured(normalized);
+    normalized.description_html = normalized.descriptionHtml;
+  }
+
+  const descHtml = normalized.descriptionHtml || "";
   const nameBest = normalized.name_best || normalized.product_name || modelInput.name || "";
   const shortName = normalized.short_name_60 || pickShortNameFromH1(nameBest);
 
@@ -186,7 +300,7 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     violations.push({ section: "Name", issue: "Missing name_best (H1) in output", fix_hint: "Provide name_best equal to the selected H1" });
   }
 
-  // Description length
+  // Description length (apply to assembled / provided content)
   const dlen = extractTextLength(descHtml);
   if (dlen < 1200) {
     violations.push({ section: "Description", issue: `Description too short (${dlen} chars)`, fix_hint: "Add grounded content from inputs until description reaches minimum length" });
@@ -194,52 +308,103 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     violations.push({ section: "Description", issue: `Description too long (${dlen} chars)`, fix_hint: "Trim non-essential content while preserving required sections" });
   }
 
-  // Required H2 headings presence and order
-  // For AvidiaDescribe we skip Internal Links and Manuals sections entirely.
-  let requiredH2 = [
-    "Hook and Bullets",
-    "Main Description",
-    "Features and Benefits",
-    "Product Specifications",
-    // "Internal Links",   // SKIP for Avidia
-    "Why Choose",
-    "Frequently Asked Questions"
-  ];
-  // For non-Avidia modes, keep Internal Links in the required list if desired (original behavior)
-  if (!isAvidia) {
-    requiredH2.splice(4, 0, "Internal Links"); // insert at original place
-  }
-  requiredH2.forEach((h) => {
-    if (!descHtml.includes(`<h2>${h}</h2>`)) {
-      violations.push({ section: "Structure", issue: `Missing heading: ${h}`, fix_hint: `Insert <h2>${h}</h2> in the correct order` });
+  // Validate presence & counts using structured fields when available, otherwise fallback to HTML heading checks
+  if (hasStructured) {
+    // Hook presence and bullets count
+    const hookHtml = normalized.hook_html || "";
+    const hookListMatch = hookHtml.match(/<ul[^>]*>([\s\S]*?)<\/ul>/i);
+    const hookCount = hookListMatch ? countHtmlListItems(hookListMatch[1]) : 0;
+    if (!hookHtml) {
+      violations.push({ section: "Structure", issue: "Missing Hook content (hook_html)", fix_hint: "Provide hook_html with intro paragraph and bullets" });
+    } else if (hookCount < 3) {
+      violations.push({ section: "Hook", issue: `Hook bullets count ${hookCount}; expected 3–6`, fix_hint: "Add grounded bullets to reach 3–6" });
     }
-  });
 
-  // Hook bullets count
-  const hookMatch = descHtml.match(/<h2>Hook and Bullets<\/h2>[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i);
-  const hookListHtml = hookMatch ? hookMatch[1] : "";
-  const hookCount = countHtmlListItems(hookListHtml);
-  if (hookCount < 3) {
-    violations.push({ section: "Hook", issue: `Hook bullets count ${hookCount}; expected 3–6`, fix_hint: "Add grounded bullets to reach 3–6" });
+    // Main Description presence (no H2 required)
+    const mainDesc = normalized.main_description_html || "";
+    if (!mainDesc) {
+      violations.push({ section: "Structure", issue: "Missing Main Description (main_description_html)", fix_hint: "Provide main_description_html with 4–6 sentences" });
+    }
+
+    // Features and Benefits: ensure features_html exists and has at least some bullets
+    const featuresHtml = normalized.features_html || "";
+    if (!featuresHtml) {
+      violations.push({ section: "Structure", issue: "Missing Features and Benefits (features_html)", fix_hint: "Provide features_html with H3 groups and bullets" });
+    } else {
+      const liCount = countHtmlListItems(featuresHtml);
+      if (liCount < 2) {
+        violations.push({ section: "Features", issue: `Features list too short (${liCount} bullets)`, fix_hint: "Add grounded feature bullets" });
+      }
+    }
+
+    // Product Specifications check
+    const specsHtml = normalized.specs_html || "";
+    if (!specsHtml) {
+      violations.push({ section: "Structure", issue: "Missing Product Specifications (specs_html)", fix_hint: "Provide specs_html with H3 groups and spec bullets" });
+    }
+
+    // Why Choose bullets count
+    const whyHtml = normalized.why_choose_html || "";
+    const whyListMatch = whyHtml.match(/<ul[^>]*>([\s\S]*?)<\/ul>/i);
+    const whyCount = whyListMatch ? countHtmlListItems(whyListMatch[1]) : 0;
+    if (!whyHtml) {
+      violations.push({ section: "Structure", issue: "Missing Why Choose (why_choose_html)", fix_hint: "Provide why_choose_html with lead paragraph and 3–6 bullets" });
+    } else if (whyCount < 3 || whyCount > 6) {
+      violations.push({ section: "Why Choose", issue: `Why Choose bullets ${whyCount}; expected 3–6`, fix_hint: "Adjust bullets count to be within 3–6" });
+    }
+
+    // FAQs count
+    let faqCount = 0;
+    if (normalized.faq_html) {
+      faqCount = (normalized.faq_html.match(/<h3>/gi) || []).length;
+    } else if (Array.isArray(normalized.faqs) && normalized.faqs.length) {
+      faqCount = normalized.faqs.length;
+    }
+    if (faqCount < 5 || faqCount > 7) {
+      violations.push({ section: "FAQ", issue: `FAQ count ${faqCount}; expected 5–7`, fix_hint: "Add or remove Q&A pairs to reach 5–7" });
+    }
+  } else {
+    // Legacy fallback: check for required H2 headings in descriptionHtml (except Hook/Main Description which are guidance-only)
+    const requiredH2 = [
+      "Features and Benefits",
+      "Product Specifications",
+      "Internal Links",
+      "Why Choose",
+      "Frequently Asked Questions"
+    ];
+    const presentH2s = requiredH2.filter(h => descHtml.includes(`<h2>${h}</h2>`));
+    requiredH2.forEach((h) => {
+      if (!descHtml.includes(`<h2>${h}</h2>`)) {
+        violations.push({ section: "Structure", issue: `Missing heading: ${h}`, fix_hint: `Insert <h2>${h}</h2> in the correct order` });
+      }
+    });
+
+    // Hook bullets count: try to detect by looking for intro paragraph followed by a <ul>
+    const hookMatch = descHtml.match(/<p>[\s\S]*?<\/p>\s*<ul[^>]*>([\s\S]*?)<\/ul>/i);
+    const hookListHtml = hookMatch ? hookMatch[1] : "";
+    const hookCount = countHtmlListItems(hookListHtml);
+    if (hookCount < 3) {
+      violations.push({ section: "Hook", issue: `Hook bullets count ${hookCount}; expected 3–6`, fix_hint: "Add grounded bullets to reach 3–6" });
+    }
+
+    // Why Choose bullets count
+    const whyMatch = descHtml.match(/<h2>Why Choose<\/h2>[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i);
+    const whyListHtml = whyMatch ? whyMatch[1] : "";
+    const whyCount = countHtmlListItems(whyListHtml);
+    if (whyCount < 3 || whyCount > 6) {
+      violations.push({ section: "Why Choose", issue: `Why Choose bullets ${whyCount}; expected 3–6`, fix_hint: "Adjust bullets count to be within 3–6" });
+    }
+
+    // FAQ count
+    const faqSectionMatch = descHtml.match(/<h2>Frequently Asked Questions<\/h2>[\s\S]*$/i);
+    const faqSection = faqSectionMatch ? faqSectionMatch[0] : "";
+    const faqCount = (faqSection.match(/<h3>/gi) || []).length;
+    if (faqCount < 5 || faqCount > 7) {
+      violations.push({ section: "FAQ", issue: `FAQ count ${faqCount}; expected 5–7`, fix_hint: "Add or remove Q&A pairs to reach 5–7" });
+    }
   }
 
-  // Why Choose bullets count
-  const whyMatch = descHtml.match(/<h2>Why Choose<\/h2>[\s\S]*?<ul[^>]*>([\s\S]*?)<\/ul>/i);
-  const whyListHtml = whyMatch ? whyMatch[1] : "";
-  const whyCount = countHtmlListItems(whyListHtml);
-  if (whyCount < 3 || whyCount > 6) {
-    violations.push({ section: "Why Choose", issue: `Why Choose bullets ${whyCount}; expected 3–6`, fix_hint: "Adjust bullets count to be within 3–6" });
-  }
-
-  // FAQ count 5-7
-  const faqSectionMatch = descHtml.match(/<h2>Frequently Asked Questions<\/h2>[\s\S]*$/i);
-  const faqSection = faqSectionMatch ? faqSectionMatch[0] : "";
-  const faqCount = (faqSection.match(/<h3>/gi) || []).length;
-  if (faqCount < 5 || faqCount > 7) {
-    violations.push({ section: "FAQ", issue: `FAQ count ${faqCount}; expected 5–7`, fix_hint: "Add or remove Q&A pairs to reach 5–7" });
-  }
-
-  // short_name usage <=2
+  // short_name usage <=2 (check assembled HTML)
   try {
     const occ = shortName ? (String(descHtml).match(new RegExp(escapeRegExp(shortName), "gi")) || []).length : 0;
     if (occ > 2) {
@@ -256,9 +421,9 @@ function validateAndNormalize(parsed = {}, modelInput = {}) {
     normalized.description_html = fixed;
   }
 
-  // Manuals section presence when input has manuals
+  // Manuals section presence when input has manuals (conditional)
   const manualsPresentInInput = Array.isArray(modelInput.pdf_manual_urls) && modelInput.pdf_manual_urls.length > 0;
-  // For AvidiaDescribe: skip penalizing Manuals entirely (user requested). For other modes, enforce.
+  // For AvidiaDescribe: skip penalizing Manuals entirely; otherwise enforce if present in description
   if (!isAvidia && /\<h2\>Manuals and Troubleshooting Guides\<\/h2\>/i.test(normalized.descriptionHtml || "") && !manualsPresentInInput) {
     violations.push({ section: "Manuals", issue: "Manuals section rendered but no pdf_manual_urls provided", fix_hint: "Remove manuals section or provide valid PDF URLs" });
   }
@@ -350,7 +515,7 @@ export async function mountDescribeRoute(app, opts = {}) {
       }
 
       if (!finalPrompt) {
-        finalPrompt = `MASTER-FALLBACK: You are a normalization pipeline that MUST RETURN RAW JSON ONLY with keys: descriptionHtml, sections, seo, normalizedPayload, raw.
+        finalPrompt = `MASTER-FALLBACK: You are a normalization pipeline that MUST RETURN RAW JSON ONLY with keys: descriptionHtml (optional), hook_html, main_description_html, features_html, specs_html, why_choose_html, faq_html (or faqs array), internal_links (array), manuals_html (or manuals array), desc_audit, name_candidates, name_best, short_name_60, product_name, generated_product_url, meta_title, meta_description, search_keywords, final_description.
 Input placeholders: {{PRODUCT_NAME}}, {{SHORT_DESCRIPTION}}, {{BRAND}}, {{SPECS}}, {{FORMAT}}.
 Return valid JSON only.`;
       }
@@ -359,6 +524,12 @@ Return valid JSON only.`;
       if (!OPENAI_KEY) {
         const response = {
           descriptionHtml: `<p>${shortDescription}</p>`,
+          hook_html: `<p><strong>${shortDescription}</strong></p>`,
+          main_description_html: `<p>Main description for ${name}</p>`,
+          features_html: `<h3>Group</h3><ul><li><strong>Feature</strong> – Benefit.</li></ul>`,
+          specs_html: `<h3>Specs</h3><ul><li><strong>Weight</strong>: 1.2 kg (2.6 lb)</li></ul>`,
+          why_choose_html: `<p>Why choose this product.</p><ul><li><strong>Reliability</strong> – Proven in tests.</li></ul>`,
+          faq_html: `<h3>Q1</h3><p>A1.</p>`,
           sections: {
             overview: `${shortDescription}`,
             features: [`Feature A for ${name}`, `Feature B`],
@@ -411,28 +582,28 @@ Return valid JSON only.`;
         return await callOpenAI(OPENAI_KEY, messages, OPENAI_MODEL, DEFAULTS.TEMPERATURE, DEFAULTS.MAX_TOKENS);
       }
 
-      // Stronger primary instruction: require exact skeleton + min length
+      // Stronger primary instruction: require structured fields. Hook/MainDescription guidance-only (do not insert literal H2s)
       const primaryInstruction = [
         "RETURN ONLY valid JSON. DO NOT output any text outside the JSON object.",
-        "JSON must include keys: name_candidates, name_best, short_name_60, desc_audit (you may include a draft score but server will compute authoritative audit), product_name, generated_product_url, description_html, meta_title, meta_description, search_keywords, internal_links (array) and final_description.",
+        "JSON should preferably include these structured fields: hook_html, main_description_html, features_html, specs_html, why_choose_html, faq_html (or faqs array), internal_links (array), manuals_html (or manuals array).",
         "",
-        "description_html MUST contain these H2 headings in EXACT order and include content for each:",
-        "1) <h2>Hook and Bullets</h2>   -- Hook: 2–3 sentence intro with one empathy clause and one outcome clause; Bold the short_name_60 once in the first sentence using <strong>…</strong>. Then 3–6 bullets in <ul> with each <li><strong>Label</strong> – Explanation.</li>",
-        "2) <h2>Main Description</h2>   -- 4–6 sentence intro, at least one buyer-outcome sentence, include at least two semantic variants of the primary concept.",
-        "3) <h2>Features and Benefits</h2> -- 2–4 H3 groups, each with 1–6 bullets in <li><strong>Feature</strong> – Benefit.</li>",
-        "4) <h2>Product Specifications</h2> -- 2–4 H3 groups, bullets in <li><strong>Spec Name</strong>: imperial (metric)</li>",
-        "5) <h2>Internal Links</h2> -- (For Avidia format, DO NOT render this section unless pdf_manual_urls or internal_link evidence exists) ",
-        "6) <h2>Why Choose</h2> -- 1 short lead paragraph + 3–6 bullets; one bullet must be a measurable differentiator if grounded inputs support it.",
-        "7) <h2>Frequently Asked Questions</h2> -- include 5–7 Q&A pairs; questions use <h3> and answers are <p>.",
+        "Important: 'Hook' and 'Main Description' are guidance-only sections and MUST NOT be inserted as literal <h2>Hook and Bullets</h2> or <h2>Main Description</h2>. The server will assemble the final description and will NOT insert those H2 headings.",
         "",
-        "MINIMUM LENGTH: When stripped of HTML tags, the description text MUST be >= 1200 characters. If you cannot reach 1200 characters using ONLY the provided input fields (features, specs, pdf_text, pdf_docs, browsed_text), do NOT invent facts — instead, populate desc_audit.data_gaps with the missing fields and still return the required HTML skeleton (you may leave sections empty but must include headings and required numbers of bullets where you have grounded content).",
+        "If you cannot provide structured fields, you may return description_html (legacy). When providing structured fields, ensure:",
+        "- Hook: hook_html contains a 2–3 sentence intro and a <ul> with 3–6 <li> bullets (each bullet: <strong>Label</strong> – Explanation.). Bold short_name_60 once in the first sentence (use <strong>..</strong>).",
+        "- Main Description: main_description_html contains 4–6 sentences, including one buyer-outcome sentence and at least two semantic variants.",
+        "- Features and Benefits: features_html contains 2–4 H3 groups each with a <ul> of bullets formatted <li><strong>Feature</strong> – Benefit.</li>.",
+        "- Product Specifications: specs_html contains 2–4 H3 groups with bullets formatted <li><strong>Spec Name</strong>: imperial (metric)</li>.",
+        "- Why Choose: why_choose_html contains 1 lead paragraph + 3–6 bullets; one bullet must be a measurable differentiator if grounded inputs support it.",
+        "- FAQs: faq_html or faqs must include 5–7 Q&A pairs; questions use <h3> and answers are <p>.",
         "",
-        "USE ONLY the grounding INPUT provided in the 'INPUT:' JSON. DO NOT GUESS numeric specs, warranty terms, weights, or capacities. If a value is missing, omit it from the body and add it to desc_audit.data_gaps.",
+        "MINIMUM LENGTH: When stripped of HTML tags, the assembled description text MUST be >= 1200 characters. If you cannot reach 1200 characters using ONLY the provided input fields, do NOT invent facts — populate desc_audit.data_gaps and still return structured fields.",
+        "",
+        "USE ONLY the grounding INPUT provided in the 'INPUT:' JSON. DO NOT GUESS numeric specs, warranty terms, weights, or capacities.",
         "",
         "Formatting rules: use en-dash (–) between <strong>Label</strong> and Explanation in bullets, no Markdown, no code fences, correct HTML tags only.",
         "",
-        "INPUT (grounding) follows below. Use it only.",
-        ""
+        "INPUT (grounding) follows below. Use it only."
       ].join("\n\n");
 
       // Attempt + repair loop
@@ -456,7 +627,13 @@ Return valid JSON only.`;
           try { return JSON.parse(lastModelText); } catch (_) { return extractJsonCandidate(lastModelText); }
         })();
 
-        // If we parsed something, attempt immediate expansion if too short BEFORE validation
+        // If parsedResult includes structured fields but no assembled descriptionHtml, assemble it for validation
+        if (parsedResult && !parsedResult.description_html && (parsedResult.hook_html || parsedResult.main_description_html || parsedResult.features_html)) {
+          parsedResult.description_html = assembleDescriptionFromStructured(parsedResult);
+          parsedResult.descriptionHtml = parsedResult.description_html;
+        }
+
+        // Immediate expansion pass if assembled content too short (same as before)
         if (parsedResult && parsedResult.description_html) {
           try {
             const strippedLen = extractTextLength(parsedResult.description_html || parsedResult.descriptionHtml || "");
@@ -469,11 +646,9 @@ Return valid JSON only.`;
               const reasons = groundedList.length ? `Use these grounded facts: ${groundedList.join("; ")}` : "No grounded facts available.";
 
               const expandRepair = [
-                "The previous JSON is too short when HTML tags are removed. You must expand the description to reach at least 1200 characters (text only).",
+                "The previous JSON is too short when HTML tags are removed. You must expand the structured fields (hook_html, main_description_html, features_html, specs_html, why_choose_html, faq_html) so that the assembled description reaches at least 1200 characters (text only).",
                 "Do NOT invent facts. Use ONLY the grounding inputs listed below. If a needed fact is missing, add it to desc_audit.data_gaps and leave that line out of the body.",
                 reasons,
-                "",
-                "Expand each required section fully (Hook, Main Description, Features and Benefits, Product Specifications, Why Choose, FAQ) using only grounded facts. Maintain required bullet counts. Keep bullets concise; ensure each bullet ends with a period.",
                 "",
                 "Return ONLY the corrected JSON object (no commentary)."
               ].join("\n\n");
@@ -490,6 +665,10 @@ Return valid JSON only.`;
 
               if (parsedExpanded) {
                 parsedResult = parsedExpanded;
+                if (!parsedResult.description_html && (parsedResult.hook_html || parsedResult.main_description_html || parsedResult.features_html)) {
+                  parsedResult.description_html = assembleDescriptionFromStructured(parsedResult);
+                  parsedResult.descriptionHtml = parsedResult.description_html;
+                }
                 // let flow continue to validation below
               } else {
                 // If model cannot expand, set server-side data_gaps so validation fails with explicit guidance
@@ -668,6 +847,12 @@ Return valid JSON only.`;
           violations: lastViolations,
           warnings: lastWarnings
         };
+
+        // If model returned structured fields but no descriptionHtml, assemble it
+        if (!parsedResult.descriptionHtml && (parsedResult.hook_html || parsedResult.features_html || parsedResult.main_description_html)) {
+          parsedResult.descriptionHtml = assembleDescriptionFromStructured(parsedResult);
+          parsedResult.description_html = parsedResult.descriptionHtml;
+        }
 
         // Enforce slug rules: build from name_best if present
         try {
