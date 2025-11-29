@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DescribeResponse",
+  "type": "object",
+  "required": [
+    "hook_html",
+    "main_description_html",
+    "features_html",
+    "specs_html",
+    "why_choose_html",
+    "faq_html",
+    "name_best",
+    "short_name_60",
+    "desc_audit"
+  ],
+  "properties": {
+    "hook_html": { "type": "string", "minLength": 1 },
+    "main_description_title": { "type": "string" },
+    "main_description_html": { "type": "string", "minLength": 1 },
+    "features_html": { "type": "string", "minLength": 1 },
+    "specs_html": { "type": "string", "minLength": 1 },
+    "why_choose_title": { "type": "string" },
+    "why_choose_html": { "type": "string", "minLength": 1 },
+    "faq_html": { "type": "string", "minLength": 1 },
+    "faqs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["q", "a"],
+        "properties": {
+          "q": { "type": "string" },
+          "a": { "type": "string" }
+        }
+      }
+    },
+    "internal_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "anchor", "url"],
+        "properties": {
+          "type": { "type": "string" },
+          "anchor": { "type": "string" },
+          "url": { "type": "string", "format": "uri" },
+          "confidence": { "type": "number" }
+        }
+      }
+    },
+    "manuals": {
+      "type": "array",
+      "items": { "type": "object", "required": ["url", "title"], "properties": { "url": { "type": "string", "format": "uri" }, "title": { "type": "string" } } }
+    },
+    "name_best": { "type": "string" },
+    "short_name_60": { "type": "string" },
+    "desc_audit": { "type": "object" }
+  },
+  "additionalProperties": true
+}
