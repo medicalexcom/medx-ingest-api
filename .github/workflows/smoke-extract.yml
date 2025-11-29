@@ -1,0 +1,43 @@
+name: Smoke test - ingest/scraper
+
+# Manual workflow to run the smoke test script which calls the central ingest endpoint
+# Set the target URL and the secret INGEST_API_KEY in repository secrets if required.
+#
+# Usage: run from the Actions UI -> Run workflow -> provide url and dry_run
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Target product URL to ingest'
+        required: true
+        default: 'https://www.apple.com/iphone-17/'
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        default: '20'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ github.event.inputs.node-version }}
+
+      - name: Install deps (if any)
+        run: |
+          npm ci || true
+
+      - name: Run smoke test script (call ingest)
+        env:
+          INGEST_API_ENDPOINT: ${{ secrets.INGEST_API_ENDPOINT || 'https://medx-ingest-api.onrender.com' }}
+          INGEST_API_KEY: ${{ secrets.INGEST_API_KEY || '' }}
+        run: |
+          node scripts/test-extract.js "${{ github.event.inputs.url }}"
