@@ -1,13 +1,13 @@
-// tools/render-engine/gptInstructionsEnforcer-3.mjs
-// Lightweight augmentation of the original gptInstructionsEnforcer.mjs
-// - Keeps original behavior intact but adds additional structural checks:
-//   * Hook bullets count (3-6)
-//   * Features: 2-4 H3 groups and 3-6 bullets total
-//   * Why-Choose: lead paragraph + 3-6 bullets
-//   * FAQs: 5-7 Q&As
-//   * short_name_60 exact verbatim appearances <= 2
-//   * duplicate H2/H3 title detection (e.g., duplicated "Product Specifications")
-// - Designed as a minimal, resilient augmentation of the working baseline to avoid runtime crashes.
+// tools/render-engine/gptInstructionsEnforcer.mjs
+// GPT Instructions Enforcer (structured-only + schema validation)
+// - Strictly requires structured fields (no legacy description_html fallback).
+// - Uses the AJV-based structured validator at validators/structuredValidator.mjs.
+// - Enforces presence of dynamic H2 titles: main_description_title and why_choose_title.
+// - Formats specs (label before colon bolded) before assembling description_html.
+// - Runs a repair loop up to MAX_ATTEMPTS; if schema/structure still invalid returns 422 with violations.
+//
+// Usage: mountDescribeRoute(app)
+// Ensure tools/render-engine/validators/structuredValidator.mjs and schema/describeSchema.json are present.
 
 import OpenAI from "openai";
 import path from "node:path";
@@ -22,7 +22,7 @@ const DEFAULTS = {
   MAX_TOKENS: 3200
 };
 
-/* -------------------------- Utilities (unchanged base) -------------------------- */
+/* -------------------------- Utilities -------------------------- */
 
 function stripFences(s = "") {
   return (s || "")
@@ -62,74 +62,15 @@ function pickShortNameFromH1(h1) {
   return fallback.replace(/\s+\S*$/, "") || fallback;
 }
 
-/* ---------------------- Additional HTML helpers & checks ---------------------- */
+/* ---------------------- HTML helpers ---------------------- */
 
 function countHtmlListItems(html = "") {
   if (!html) return 0;
-  const m = html.match(/<li\b/gi);
+  const m = html.match(/<li>/gi);
   return m ? m.length : 0;
-}
-function countH3Groups(html = "") {
-  if (!html) return 0;
-  const m = html.match(/<h3\b[^>]*>/gi);
-  return m ? m.length : 0;
-}
-function extractH2Titles(html = "") {
-  if (!html) return [];
-  const re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    out.push((m[1] || "").trim());
-  }
-  return out;
-}
-function extractH3Titles(html = "") {
-  if (!html) return [];
-  const re = /<h3\b[^>]*>([\s\S]*?)<\/h3>/gi;
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    out.push((m[1] || "").trim());
-  }
-  return out;
-}
-function stripHtml(s = "") {
-  return (s || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-}
-function countExactShortNameUsageAcross(parsed = {}, shortName = "") {
-  if (!shortName) return 0;
-  const fields = ["hook_html", "main_description_html", "features_html", "why_choose_html", "specs_html", "faq_html"];
-  const joined = fields.map(f => parsed[f] || "").join(" ").toLowerCase();
-  const s = shortName.toLowerCase();
-  const re = new RegExp(`\\b${escapeRegExp(s)}\\b`, "gi");
-  const m = joined.match(re);
-  return m ? m.length : 0;
-}
-function findDuplicateTitles(h2s = [], h3s = []) {
-  const dups = [];
-  const map = new Map();
-  h2s.forEach(t => {
-    const k = (t || "").toLowerCase();
-    if (!k) return;
-    map.set(k, (map.get(k) || 0) + 1);
-  });
-  for (const [k, v] of map.entries()) {
-    if (v > 1) dups.push({ type: "h2", title: k, count: v });
-  }
-  const map3 = new Map();
-  h3s.forEach(t => {
-    const k = (t || "").toLowerCase();
-    if (!k) return;
-    map3.set(k, (map3.get(k) || 0) + 1);
-  });
-  for (const [k, v] of map3.entries()) {
-    if (v > 1) dups.push({ type: "h3", title: k, count: v });
-  }
-  return dups;
 }
 
-// keep the original bullet/spec formatting helpers (unchanged)
+// Fix bullets to use en-dash pattern where appropriate
 function fixBulletFormattingInHtml(html = "") {
   if (!html) return html;
   return html.replace(/<li>([\s\S]*?)<\/li>/gi, (m, inner) => {
@@ -138,6 +79,7 @@ function fixBulletFormattingInHtml(html = "") {
     if (/<strong>.*?<\/strong>/.test(s) && /–/.test(s)) {
       return `<li>${s.replace(/\s*–\s*/g, " – ")}</li>`;
     }
+    // Attempt to split label / body heuristically
     let parts = null;
     if (s.indexOf(" – ") !== -1) parts = s.split(" – ");
     else if (s.indexOf(" - ") !== -1) parts = s.split(" - ");
@@ -152,11 +94,14 @@ function fixBulletFormattingInHtml(html = "") {
     return `<li><strong>${label}</strong> – ${rest}</li>`;
   });
 }
+
+// Specs formatting: ensure <li><strong>Label</strong>: value</li>
 function fixSpecsFormattingInHtml(html = "") {
   if (!html) return html;
   return html.replace(/<li>([\s\S]*?)<\/li>/gi, (m, inner) => {
     let s = (inner || "").trim();
     s = s.replace(/\s+/g, " ").trim();
+    // If colon present - split
     const idx = s.indexOf(":");
     if (idx !== -1) {
       const label = s.slice(0, idx).replace(/<\/?strong>/gi, "").trim();
@@ -164,34 +109,42 @@ function fixSpecsFormattingInHtml(html = "") {
       value = value.replace(/^[\s–-]+/, "").trim();
       return `<li><strong>${label}</strong>: ${value}</li>`;
     }
+    // If <strong> present and no colon, keep but normalize
     if (/<strong>.*<\/strong>/i.test(s)) {
       return `<li>${s}</li>`;
     }
+    // fallback: treat whole as label with empty value
     return `<li><strong>${s}</strong>:</li>`;
   });
 }
 
-/* -------------------- Assemble structured -> description (unchanged) -------------------- */
+/* -------------------- Assemble structured -> description -------------------- */
 
+// This assembly enforces dynamic H2 insertion for main_description_title and why_choose_title.
+// Hook remains un-titled (no H2).
 function assembleDescriptionFromStructured(parsed = {}) {
   const parts = [];
 
   if (parsed.hook_html) parts.push(parsed.hook_html);
 
+  // Main Description: dynamic H2 must be present per requirement
   if (parsed.main_description_title) parts.push(`<h2>${parsed.main_description_title}</h2>`);
   if (parsed.main_description_html) parts.push(parsed.main_description_html);
 
+  // Features and Benefits
   if (parsed.features_html) {
     parts.push(`<h2>Features and Benefits</h2>`);
     parts.push(parsed.features_html);
   }
 
+  // Product Specifications - normalize spec li formatting
   if (parsed.specs_html) {
     const fixed = fixSpecsFormattingInHtml(parsed.specs_html);
     parts.push(`<h2>Product Specifications</h2>`);
     parts.push(fixed);
   }
 
+  // Internal Links (if provided)
   if (Array.isArray(parsed.internal_links) && parsed.internal_links.length) {
     const linksHtml = parsed.internal_links.map(l => {
       const anchor = l.anchor || (l.type ? `See all ${l.type}` : "See more");
@@ -205,12 +158,14 @@ function assembleDescriptionFromStructured(parsed = {}) {
     parts.push(parsed.internal_links_html);
   }
 
+  // Why Choose dynamic H2 required as well
   const whyTitle = parsed.why_choose_title || "Why Choose";
   if (parsed.why_choose_html) {
     parts.push(`<h2>${whyTitle}</h2>`);
     parts.push(parsed.why_choose_html);
   }
 
+  // Manuals (conditional)
   if (parsed.manuals_html) {
     parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`);
     parts.push(parsed.manuals_html);
@@ -225,6 +180,7 @@ function assembleDescriptionFromStructured(parsed = {}) {
     }
   }
 
+  // FAQs
   if (parsed.faq_html) {
     parts.push(`<h2>Frequently Asked Questions</h2>`);
     parts.push(parsed.faq_html);
@@ -237,7 +193,7 @@ function assembleDescriptionFromStructured(parsed = {}) {
   return parts.filter(Boolean).join("\n\n");
 }
 
-/* -------------------- OpenAI wrapper (unchanged) -------------------- */
+/* -------------------- OpenAI wrapper -------------------- */
 
 async function callOpenAI(openAiKey, messages, model = DEFAULTS.MODEL, temperature = DEFAULTS.TEMPERATURE, maxTokens = DEFAULTS.MAX_TOKENS) {
   const client = new OpenAI({ apiKey: openAiKey });
@@ -250,7 +206,7 @@ async function callOpenAI(openAiKey, messages, model = DEFAULTS.MODEL, temperatu
   return completion?.choices?.[0]?.message?.content ?? "";
 }
 
-/* -------------------- Main route mount (augmented checks) -------------------- */
+/* -------------------- Main route mount -------------------- */
 
 export async function mountDescribeRoute(app, opts = {}) {
   const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || opts.engineSecret || "dev-secret";
@@ -258,7 +214,7 @@ export async function mountDescribeRoute(app, opts = {}) {
   const OPENAI_MODEL = process.env.OPENAI_MODEL || opts.model || DEFAULTS.MODEL;
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || opts.maxAttempts || DEFAULTS.MAX_ATTEMPTS);
 
-  console.log("gptEnforcer-3: mounting /describe (structured schema enforcement - augmented)");
+  console.log("gptEnforcer: mounting /describe (structured schema enforcement)");
 
   app.get("/healthz", (_, res) => res.json({ ok: true }));
 
@@ -272,6 +228,7 @@ export async function mountDescribeRoute(app, opts = {}) {
       const name = body.name || "Sample product";
       const shortDescription = body.shortDescription || "Short description";
 
+      // Build finalPrompt from buildPrompt if available, otherwise fallback
       let finalPrompt = null;
       let promptEngineInfo = { usedBuildPrompt: false, buildError: null };
 
@@ -295,32 +252,35 @@ export async function mountDescribeRoute(app, opts = {}) {
         }
       } catch (e) {
         promptEngineInfo.buildError = String(e?.message || e);
-        console.warn("gptEnforcer-3: buildPrompt load failed:", promptEngineInfo.buildError);
+        console.warn("gptEnforcer: buildPrompt load failed:", promptEngineInfo.buildError);
       }
 
       if (!finalPrompt) {
-        finalPrompt = `MASTER-FALLBACK: Return valid JSON only. REQUIRED structured top-level fields: hook_html, main_description_title, main_description_html, features_html, specs_html, why_choose_title, why_choose_html, faq_html or faqs, name_best, short_name_60, desc_audit. Use only INPUT grounding provided.`;
+        finalPrompt = `MASTER-FALLBACK: Return valid JSON only. REQUIRED structured top-level fields: hook_html (string), main_description_title (string), main_description_html (string), features_html (string), specs_html (string), why_choose_title (string), why_choose_html (string), faq_html or faqs (array), name_best, short_name_60, desc_audit.\nDo NOT return description_html-only. Use only the INPUT grounding provided.`;
       }
 
+      // If no OpenAI key, respond with a deterministic structured mock (useful for local dev)
       if (!OPENAI_KEY) {
         const mock = {
           hook_html: `<p><strong>${pickShortNameFromH1(name)}</strong> is designed for ...</p><ul><li><strong>Feature A</strong> – Benefit A.</li><li><strong>Feature B</strong> – Benefit B.</li><li><strong>Feature C</strong> – Benefit C.</li></ul>`,
           main_description_title: "Dynamic Main Description Title",
-          main_description_html: `<p>Main description paragraph with buyer-outcome.</p>`,
+          main_description_html: `<p>Main description paragraph with buyer-outcome that helps users perform tasks more efficiently.</p>`,
           features_html: `<h3>Category A</h3><ul><li><strong>Feature A1</strong> – Function and benefit.</li></ul>`,
-          specs_html: `<h3>Dimensions</h3><ul><li><strong>Capacity</strong>: 25 mL</li></ul>`,
+          specs_html: `<h3>Dimensions</h3><ul><li><strong>Capacity</strong>: 25 mL</li><li><strong>Packaging</strong>: 50 vials/tray</li></ul>`,
           why_choose_title: "Why Choose This Product",
-          why_choose_html: `<p>Lead paragraph describing benefits.</p><ul><li><strong>Durable</strong> – Built to last.</li></ul>`,
+          why_choose_html: `<p>Lead paragraph describing benefits.</p><ul><li><strong>Durable</strong> – Built to last.</li><li><strong>Clean</strong> – Tested for cleanliness.</li><li><strong>Bulk</strong> – 50 vials/tray.</li></ul>`,
           faq_html: `<h3>Q1</h3><p>A1</p><h3>Q2</h3><p>A2</p><h3>Q3</h3><p>A3</p><h3>Q4</h3><p>A4</p><h3>Q5</h3><p>A5</p>`,
           name_best: name,
           short_name_60: pickShortNameFromH1(name),
           desc_audit: { score: 9.9, passed: true, violations: [] }
         };
+        // Assemble description_html server-side
         mock.description_html = assembleDescriptionFromStructured(mock);
         mock.descriptionHtml = mock.description_html;
         return res.json(mock);
       }
 
+      // Build grounding modelInput for prompts
       const modelInput = {
         tenant_id: ((req.header("x-tenant-id") || null) || body.tenant_id || null),
         user_id: ((req.header("x-user-id") || null) || body.user_id || null),
@@ -352,14 +312,17 @@ export async function mountDescribeRoute(app, opts = {}) {
         return await callOpenAI(OPENAI_KEY, messages, OPENAI_MODEL, DEFAULTS.TEMPERATURE, DEFAULTS.MAX_TOKENS);
       }
 
+      // Primary instruction (strict - model must return structured fields)
       const primaryInstruction = [
         "RETURN ONLY valid JSON. DO NOT output any other text.",
-        "You MUST return the required structured fields at the top level: hook_html, main_description_title, main_description_html, features_html, specs_html, why_choose_title, why_choose_html, faq_html or faqs, name_best, short_name_60, desc_audit.",
+        "You MUST return the required structured fields at the top level: hook_html (string), main_description_title (string), main_description_html (string), features_html (string), specs_html (string), why_choose_title (string), why_choose_html (string), faq_html (string) or faqs (array), name_best, short_name_60, desc_audit (object).",
         "Do NOT return description_html-only. The server will assemble the final description_html from these structured fields.",
+        "For Product Specifications use colon format: <li><strong>Spec Name</strong>: value</li> (label bold before colon).",
         "If any required item cannot be grounded from input, omit the specific bullet/line and list it under desc_audit.data_gaps.",
         "Use only the grounding INPUT provided below."
       ].join("\n\n");
 
+      // Repair loop: attempt to get schema-compliant JSON up to MAX_ATTEMPTS
       let attempt = 0;
       let lastModelText = "";
       let lastParsed = null;
@@ -379,6 +342,7 @@ export async function mountDescribeRoute(app, opts = {}) {
         })();
 
         if (!parsed) {
+          // Ask model to return valid JSON only
           if (attempt < MAX_ATTEMPTS) {
             const repair = [
               "The previous output could not be parsed as valid JSON. RETURN ONLY valid JSON matching the required structured schema (no commentary).",
@@ -389,112 +353,51 @@ export async function mountDescribeRoute(app, opts = {}) {
             try {
               lastModelText = await callModel(repair);
             } catch (e) { lastModelText = ""; }
-            continue;
+            continue; // next attempt will try to parse
           } else {
             lastViolations = [{ section: "JSON", issue: "Model output could not be parsed as JSON", fix_hint: "Ensure the model returns a single JSON object with the required structured fields" }];
             break;
           }
         }
 
-        // AJV schema validation
+        // Validate with AJV-based validator
         const { valid, violations } = validateStructuredResponse(parsed);
         lastParsed = parsed;
         lastViolations = violations || [];
 
-        // Additional structural & content checks (minimal, robust)
+        // Extra enforcement: require dynamic H2 titles to be present and non-empty
         if (valid) {
-          const extra = [];
-
-          try {
-            // main_description_title presence + not equal to name_best
-            if (!parsed.main_description_title || String(parsed.main_description_title).trim().length === 0) {
-              extra.push({ section: "Structure", issue: "Missing main_description_title", fix_hint: "Provide a dynamic H2 in main_description_title" });
-            } else if (parsed.name_best && String(parsed.main_description_title).trim() === String(parsed.name_best).trim()) {
-              extra.push({ section: "Structure", issue: "main_description_title equals name_best/H1", fix_hint: "Use a benefit/audience H2, not the product H1 verbatim" });
-            }
-
-            // Hook bullets: require 3-6 bullets
-            const hookLi = countHtmlListItems(parsed.hook_html || "");
-            if (hookLi < 3 || hookLi > 6) {
-              extra.push({ section: "Hook", issue: `Hook bullets count out of bounds (${hookLi})`, fix_hint: "Provide 3–6 bullets in the hook <ul> using the Label – Explanation pattern" });
-            }
-
-            // Features: 2-4 H3 groups and total 3-6 bullets
-            const featHtml = parsed.features_html || "";
-            if (!featHtml || featHtml.trim().length === 0) {
-              extra.push({ section: "Features", issue: "features_html empty", fix_hint: "Populate features_html with 2–4 H3 groups and a total of 3–6 bullets" });
-            } else {
-              const h3Count = countH3Groups(featHtml);
-              const liCount = countHtmlListItems(featHtml);
-              if (h3Count < 2 || h3Count > 4) extra.push({ section: "Features", issue: `features_html H3 groups out of bounds (${h3Count})`, fix_hint: "Provide 2–4 H3 groups" });
-              if (liCount < 3 || liCount > 6) extra.push({ section: "Features", issue: `features_html bullets out of bounds (${liCount})`, fix_hint: "Provide 3–6 bullets total across H3 groups" });
-            }
-
-            // Why-Choose: lead paragraph & 3-6 bullets
-            const whyHtml = parsed.why_choose_html || "";
-            const whyLi = countHtmlListItems(whyHtml);
-            const whyText = stripHtml(whyHtml || "");
-            if (!whyText || whyText.length < 20) extra.push({ section: "Why-Choose", issue: "why_choose_html lead paragraph missing or too short", fix_hint: "Include a 1–3 sentence lead paragraph before bullets" });
-            if (whyLi < 3 || whyLi > 6) extra.push({ section: "Why-Choose", issue: `why_choose_html bullets out of bounds (${whyLi})`, fix_hint: "Provide 3–6 bullets in why_choose_html" });
-
-            // FAQs: 5-7 Q&A pairs
-            let faqCount = 0;
-            if (parsed.faq_html) {
-              const m = String(parsed.faq_html).match(/<h3\b[^>]*>/gi);
-              faqCount = m ? m.length : 0;
-            } else if (Array.isArray(parsed.faqs)) {
-              faqCount = parsed.faqs.length;
-            }
-            if (faqCount < 5 || faqCount > 7) extra.push({ section: "FAQs", issue: `FAQ count out of bounds (${faqCount})`, fix_hint: "Provide 5–7 Q&A pairs; each question uses <h3> and each answer a <p>" });
-
-            // short_name usage <=2
-            const shortName = parsed.short_name_60 || pickShortNameFromH1(parsed.name_best || name);
-            const shortCount = countExactShortNameUsageAcross(parsed, shortName);
-            if (shortCount > 2) extra.push({ section: "Style", issue: `short_name_60 appears ${shortCount} times`, fix_hint: "Use short_name verbatim at most 2× (hook first sentence + optional once more)" });
-
-            // Duplicate H2/H3 detection
-            const assembled = assembleDescriptionFromStructured(parsed);
-            const h2s = extractH2Titles(assembled);
-            const h3s = extractH3Titles(assembled);
-            const dupes = findDuplicateTitles(h2s, h3s);
-            if (dupes.length) {
-              dupes.forEach(d => {
-                if (d.type === "h2") extra.push({ section: "Structure", issue: `Repeated H2 title "${d.title}" appears ${d.count} times`, fix_hint: "Ensure each H2 appears once; avoid duplicated sections" });
-                else extra.push({ section: "Structure", issue: `Repeated H3 title "${d.title}" appears ${d.count} times`, fix_hint: "Avoid repeating identical H3 group titles across the description" });
-              });
-            }
-
-            // Specific duplication pattern: "Product Specifications" repeated
-            const psCount = h2s.filter(t => (t || "").toLowerCase().includes("product specifications")).length;
-            if (psCount > 1) extra.push({ section: "Structure", issue: `Multiple "Product Specifications" H2 headings detected (${psCount})`, fix_hint: "Use a single Product Specifications H2 and place all spec H3 groups beneath it" });
-
-          } catch (err) {
-            // resilience: if any check throws, record a warning but don't crash the whole route
-            console.warn("gptEnforcer-3: structural checks error:", err?.stack || err);
-            lastWarnings.push({ code: "structural_check_error", message: String(err?.message || err) });
+          const titleViolations = [];
+          if (!parsed.main_description_title || String(parsed.main_description_title).trim().length === 0) {
+            titleViolations.push({ section: "Structure", issue: "Missing main_description_title", fix_hint: "Provide a dynamic H2 title in main_description_title" });
           }
-
-          if (extra.length) lastViolations = lastViolations.concat(extra);
+          if (!parsed.why_choose_title || String(parsed.why_choose_title).trim().length === 0) {
+            titleViolations.push({ section: "Structure", issue: "Missing why_choose_title", fix_hint: "Provide a dynamic H2 title in why_choose_title" });
+          }
+          if (titleViolations.length) {
+            lastViolations = lastViolations.concat(titleViolations);
+          }
         }
 
         // If no violations -> success
         if (!lastViolations.length) {
-          if (!lastParsed.description_html) {
-            lastParsed.specs_html = lastParsed.specs_html ? fixSpecsFormattingInHtml(lastParsed.specs_html) : lastParsed.specs_html;
-            lastParsed.features_html = lastParsed.features_html ? fixBulletFormattingInHtml(lastParsed.features_html) : lastParsed.features_html;
-            lastParsed.why_choose_html = lastParsed.why_choose_html ? fixBulletFormattingInHtml(lastParsed.why_choose_html) : lastParsed.why_choose_html;
-            lastParsed.hook_html = lastParsed.hook_html ? fixBulletFormattingInHtml(lastParsed.hook_html) : lastParsed.hook_html;
-            lastParsed.description_html = assembleDescriptionFromStructured(lastParsed);
-            lastParsed.descriptionHtml = lastParsed.description_html;
+          // Run server-side assembly, normalize specs formatting and bullets
+          if (!parsed.description_html) {
+            parsed.specs_html = parsed.specs_html ? fixSpecsFormattingInHtml(parsed.specs_html) : parsed.specs_html;
+            parsed.features_html = parsed.features_html ? fixBulletFormattingInHtml(parsed.features_html) : parsed.features_html;
+            parsed.why_choose_html = parsed.why_choose_html ? fixBulletFormattingInHtml(parsed.why_choose_html) : parsed.why_choose_html;
+            parsed.hook_html = parsed.hook_html ? fixBulletFormattingInHtml(parsed.hook_html) : parsed.hook_html;
+            parsed.description_html = assembleDescriptionFromStructured(parsed);
+            parsed.descriptionHtml = parsed.description_html;
           }
-          lastParsed._debug = lastParsed._debug || {};
-          lastParsed._debug.attempts = attempt;
-          lastParsed._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
-          if (lastWarnings.length) lastParsed._debug.warnings = lastWarnings;
-          return res.json(lastParsed);
+          // Attach debug and return
+          parsed._debug = parsed._debug || {};
+          parsed._debug.attempts = attempt;
+          parsed._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
+          return res.json(parsed);
         }
 
-        // If violations and attempts remain, instruct repair
+        // If violations and attempts remain, ask the model to repair with explicit violations list
         if (attempt < MAX_ATTEMPTS) {
           const repairInstruction = [
             "The previous JSON failed schema/structure validation. Apply the exact fixes below and RETURN ONLY the corrected JSON object.",
@@ -508,7 +411,7 @@ export async function mountDescribeRoute(app, opts = {}) {
             JSON.stringify(modelInput, null, 2),
             "",
             "PreviousOutput:",
-            JSON.stringify(lastParsed || parsed, null, 2),
+            JSON.stringify(parsed, null, 2),
             "",
             "Return only JSON."
           ].join("\n\n");
@@ -517,16 +420,18 @@ export async function mountDescribeRoute(app, opts = {}) {
           } catch (e) {
             lastModelText = "";
           }
+          // loop - next iteration will parse and validate again
           continue;
         }
 
-        // exhausted attempts -> break to return 422
+        // If here, no attempts left and violations present -> break to return 422
         break;
-      }
+      } // end attempts loop
 
+      // Failure path: return 422 with machine actionable violations and model preview
       const errorPayload = {
         error: "structured_validation_failed",
-        message: "Model output failed structured schema/structure validation after retries.",
+        message: "Model output failed structured schema/structure validation after retries. No legacy description_html-only fallback is accepted.",
         violations: lastViolations,
         model_text_preview: String(lastModelText || "").slice(0, 3200),
         attempts: attempt,
@@ -535,12 +440,12 @@ export async function mountDescribeRoute(app, opts = {}) {
       return res.status(422).json(errorPayload);
 
     } catch (err) {
-      console.error("gptEnforcer-3: unexpected error:", err?.stack || err);
+      console.error("gptEnforcer: unexpected error:", err?.stack || err);
       return res.status(500).json({ error: "internal", details: String(err) });
     }
   });
 
-  console.log("gptEnforcer-3: /describe mounted (structured schema enforcement - augmented)");
+  console.log("gptEnforcer: /describe mounted (structured schema enforcement)");
 }
 
 export default mountDescribeRoute;
