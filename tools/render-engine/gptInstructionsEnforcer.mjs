@@ -69,6 +69,16 @@ function countHtmlListItems(html = "") {
   const m = html.match(/<li>/gi);
   return m ? m.length : 0;
 }
+function countH3Groups(html = "") {
+  if (!html) return 0;
+  const m = html.match(/<h3\b[^>]*>/gi);
+  return m ? m.length : 0;
+}
+function countH2(html = "") {
+  if (!html) return 0;
+  const m = html.match(/<h2\b[^>]*>/gi);
+  return m ? m.length : 0;
+}
 
 // Fix bullets to use en-dash pattern where appropriate
 function fixBulletFormattingInHtml(html = "") {
@@ -118,6 +128,66 @@ function fixSpecsFormattingInHtml(html = "") {
   });
 }
 
+/* -------------------- Unit normalization -------------------- */
+
+// Normalize common unit tokens to standardized forms (international)
+function normalizeUnitsInHtml(html = "") {
+  if (!html) return html;
+  // mapping: uppercase variants -> canonical form
+  const unitMap = {
+    "\\bIN\\b": "in",
+    "\\bINCH\\b": "in",
+    "\\bINCHES\\b": "in",
+    "\\bFT\\b": "ft",
+    "\\bCM\\b": "cm",
+    "\\bMM\\b": "mm",
+    "\\bM\\b": "m",
+    "\\bLB\\b": "lb",
+    "\\bLBS\\b": "lb",
+    "\\bOZ\\b": "oz",
+    "\\bML\\b": "mL",
+    "\\bUL\\b": "µL",
+    "\\bG\\b": "g",
+    "\\bKG\\b": "kg"
+  };
+  let out = html;
+  for (const [k, v] of Object.entries(unitMap)) {
+    const re = new RegExp(k, "gi");
+    out = out.replace(re, v);
+  }
+  // normalize whitespace around unit punctuation (e.g., "25 mL" or "25mL" -> "25 mL")
+  out = out.replace(/(\d)(mL|µL|cm|mm|in|ft|kg|g|lb|oz)\b/gi, (m, d, u) => `${d} ${u}`);
+  return out;
+}
+
+/* -------------------- Content checks (features/faqs/short_name/title) -------------------- */
+
+function shortNameExactCountAcross(parsed, shortName) {
+  const fields = ["hook_html", "main_description_html", "features_html", "why_choose_html", "specs_html", "faq_html"];
+  const joined = fields.map(f => parsed[f] || "").join(" ").toLowerCase();
+  const s = (shortName || "").toLowerCase();
+  if (!s) return 0;
+  // word boundary exact match count
+  const re = new RegExp(`\\b${escapeRegExp(s)}\\b`, "gi");
+  const m = joined.match(re);
+  return m ? m.length : 0;
+}
+function totalShortNameTokenOverlapAcross(parsed, shortName) {
+  // A light-weight variant-count: count occurrences of any token from shortName (excluding stopwords) to detect overuse of variations
+  if (!shortName) return 0;
+  const tokens = shortName.split(/\s+/).filter(t => t.length > 2);
+  if (!tokens.length) return 0;
+  const fields = ["hook_html", "main_description_html", "features_html", "why_choose_html", "specs_html", "faq_html"];
+  const joined = fields.map(f => parsed[f] || "").join(" ").toLowerCase();
+  let count = 0;
+  for (const token of tokens) {
+    const re = new RegExp(`\\b${escapeRegExp(token.toLowerCase())}\\b`, "gi");
+    const m = joined.match(re);
+    if (m) count += m.length;
+  }
+  return count;
+}
+
 /* -------------------- Assemble structured -> description -------------------- */
 
 // This assembly enforces dynamic H2 insertion for main_description_title and why_choose_title.
@@ -139,7 +209,8 @@ function assembleDescriptionFromStructured(parsed = {}) {
 
   // Product Specifications - normalize spec li formatting
   if (parsed.specs_html) {
-    const fixed = fixSpecsFormattingInHtml(parsed.specs_html);
+    let fixed = fixSpecsFormattingInHtml(parsed.specs_html);
+    fixed = normalizeUnitsInHtml(fixed);
     parts.push(`<h2>Product Specifications</h2>`);
     parts.push(fixed);
   }
@@ -256,7 +327,7 @@ export async function mountDescribeRoute(app, opts = {}) {
       }
 
       if (!finalPrompt) {
-        finalPrompt = `MASTER-FALLBACK: Return valid JSON only. REQUIRED structured top-level fields: hook_html (string), main_description_title (string), main_description_html (string), features_html (string), specs_html (string), why_choose_title (string), why_choose_html (string), faq_html or faqs (array), internal_links (array optional), manuals or manuals_html (optional), name_best, short_name_60, desc_audit.\nDo NOT return description_html-only fallback. Use only the INPUT grounding provided.`;
+        finalPrompt = `MASTER-FALLBACK: Return valid JSON only. REQUIRED structured top-level fields: hook_html (string), main_description_title (string), main_description_html (string), features_html (string), specs_html (string), why_choose_title (string), why_choose_html (string), faq_html or faqs (array), name_best, short_name_60, desc_audit. main_description_title MUST NOT equal the product H1/name_best. Units must follow standardized unit abbreviations (e.g., in, lb, oz, mL). features_html must include 2–4 H3 groups and 3–6 bullets in total. faq_html must contain 5–7 Q&A pairs. short_name_60 may appear verbatim in the first sentence only and at most once more (<=2 total). Return only JSON.`;
       }
 
       // If no OpenAI key, respond with a deterministic structured mock (useful for local dev)
@@ -274,7 +345,11 @@ export async function mountDescribeRoute(app, opts = {}) {
           short_name_60: pickShortNameFromH1(name),
           desc_audit: { score: 9.9, passed: true, violations: [] }
         };
-        // Assemble description_html server-side
+        // Assemble description_html server-side (also normalize units in specs)
+        mock.specs_html = normalizeUnitsInHtml(mock.specs_html);
+        mock.features_html = fixBulletFormattingInHtml(mock.features_html);
+        mock.why_choose_html = fixBulletFormattingInHtml(mock.why_choose_html);
+        mock.hook_html = fixBulletFormattingInHtml(mock.hook_html);
         mock.description_html = assembleDescriptionFromStructured(mock);
         mock.descriptionHtml = mock.description_html;
         return res.json(mock);
@@ -319,7 +394,7 @@ export async function mountDescribeRoute(app, opts = {}) {
         "Do NOT return description_html-only. The server will assemble the final description_html from these structured fields.",
         "For Product Specifications use colon format: <li><strong>Spec Name</strong>: value</li> (label bold before colon).",
         "If any required item cannot be grounded from input, omit the specific bullet/line and list it under desc_audit.data_gaps.",
-        "Use only the grounding INPUT provided below."
+        "main_description_title MUST NOT equal the H1/name_best exactly. Units must use standardized abbreviations (e.g., in, lb, oz, mL). features_html must include 2–4 H3 groups and 3–6 bullets total. faq_html or faqs must include 5–7 Q&A pairs. short_name_60 may appear verbatim at most 2 times in the description body."
       ].join("\n\n");
 
       // Repair loop: attempt to get schema-compliant JSON up to MAX_ATTEMPTS
@@ -374,6 +449,51 @@ export async function mountDescribeRoute(app, opts = {}) {
           if (!parsed.why_choose_title || String(parsed.why_choose_title).trim().length === 0) {
             titleViolations.push({ section: "Structure", issue: "Missing why_choose_title", fix_hint: "Provide a dynamic H2 title in why_choose_title" });
           }
+          // main_description_title must not equal H1/name_best
+          if (parsed.main_description_title && parsed.name_best && String(parsed.main_description_title).trim() === String(parsed.name_best).trim()) {
+            titleViolations.push({ section: "Structure", issue: "main_description_title equals name_best/H1", fix_hint: "Use a dynamic H2 (main_description_title) that is not identical to the H1 name_best; use a benefit-focused title" });
+          }
+          // features_html counts: require 2-4 H3 groups and 3-6 bullets total
+          const featuresHtml = parsed.features_html || "";
+          const featuresH3Count = countH3Groups(featuresHtml);
+          const featuresLiCount = countHtmlListItems(featuresHtml);
+          if (!featuresHtml || featuresHtml.trim().length === 0) {
+            titleViolations.push({ section: "Structure", issue: "features_html empty", fix_hint: "Populate features_html with 2–4 H3 groups and 3–6 bullets total" });
+          } else {
+            if (featuresH3Count < 2 || featuresH3Count > 4) {
+              titleViolations.push({ section: "Structure", issue: `features_html H3 groups out of bounds (${featuresH3Count})`, fix_hint: "Provide between 2 and 4 H3 groups in features_html" });
+            }
+            if (featuresLiCount < 3 || featuresLiCount > 6) {
+              titleViolations.push({ section: "Structure", issue: `features_html bullets out of bounds (${featuresLiCount})`, fix_hint: "Provide a total of 3–6 bullets across features_html groups" });
+            }
+          }
+          // faq count: 5-7
+          let faqCount = 0;
+          if (parsed.faq_html) {
+            const m = String(parsed.faq_html).match(/<h3\b[^>]*>/gi);
+            faqCount = m ? m.length : 0;
+          } else if (Array.isArray(parsed.faqs)) {
+            faqCount = parsed.faqs.length;
+          }
+          if (faqCount < 5 || faqCount > 7) {
+            titleViolations.push({ section: "Structure", issue: `FAQ count out of bounds (${faqCount})`, fix_hint: "Provide 5–7 Q&A pairs in faq_html or in faqs array" });
+          }
+          // short_name usage: exact occurrences <= 2
+          const shortName = parsed.short_name_60 || "";
+          const exactCount = shortNameExactCountAcross(parsed, shortName);
+          if (exactCount > 2) {
+            titleViolations.push({ section: "Style", issue: `short_name_60 appears ${exactCount} times`, fix_hint: "Use the short_name verbatim at most 2×: once bolded in the hook's first sentence and optionally once more in Main Description or Why Choose" });
+          }
+          // token overlap (light variant check) - warn if excessive
+          const tokenOverlap = totalShortNameTokenOverlapAcross(parsed, shortName);
+          if (tokenOverlap > 6) {
+            titleViolations.push({ section: "Style", issue: `Many short-name tokens detected (${tokenOverlap})`, fix_hint: "Use variations or synonyms; avoid repeating short-name tokens excessively" });
+          }
+          // Normalize units in specs_html and check for uppercase units (flag)
+          if (parsed.specs_html && /(\bIN\b|\bLB\b|\bML\b|\bOZ\b|\bCM\b)/.test(parsed.specs_html)) {
+            titleViolations.push({ section: "Format", issue: "Non-standard unit casing in specs_html", fix_hint: "Use standardized unit abbreviations (e.g., in, lb, oz, mL); server will normalize but prefer model to emit correct forms" });
+          }
+
           if (titleViolations.length) {
             lastViolations = lastViolations.concat(titleViolations);
           }
@@ -384,6 +504,7 @@ export async function mountDescribeRoute(app, opts = {}) {
           // Run server-side assembly, normalize specs formatting and bullets
           if (!parsed.description_html) {
             parsed.specs_html = parsed.specs_html ? fixSpecsFormattingInHtml(parsed.specs_html) : parsed.specs_html;
+            parsed.specs_html = parsed.specs_html ? normalizeUnitsInHtml(parsed.specs_html) : parsed.specs_html;
             parsed.features_html = parsed.features_html ? fixBulletFormattingInHtml(parsed.features_html) : parsed.features_html;
             parsed.why_choose_html = parsed.why_choose_html ? fixBulletFormattingInHtml(parsed.why_choose_html) : parsed.why_choose_html;
             parsed.hook_html = parsed.hook_html ? fixBulletFormattingInHtml(parsed.hook_html) : parsed.hook_html;
