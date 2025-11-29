@@ -6,6 +6,11 @@
 // - Formats specs (label before colon bolded) before assembling description_html.
 // - Runs a repair loop up to MAX_ATTEMPTS; if schema/structure still invalid returns 422 with violations.
 //
+// This variant adds strict enforcement for:
+//  - section lengths and bullet counts (hook, features, why-choose, faqs)
+//  - maximum verbatim short_name occurrences and token repetition thresholds
+//  - duplicate/replicated H2/H3 title detection (no repeated "Product Specifications", "Features and Benefits" followed by "Key Features", etc.)
+//
 // Usage: mountDescribeRoute(app)
 // Ensure tools/render-engine/validators/structuredValidator.mjs and schema/describeSchema.json are present.
 
@@ -62,12 +67,94 @@ function pickShortNameFromH1(h1) {
   return fallback.replace(/\s+\S*$/, "") || fallback;
 }
 
-/* ---------------------- HTML helpers ---------------------- */
+/* ---------------------- HTML helpers & checks ---------------------- */
 
 function countHtmlListItems(html = "") {
   if (!html) return 0;
-  const m = html.match(/<li>/gi);
+  const m = html.match(/<li\b/gi);
   return m ? m.length : 0;
+}
+function countH3Groups(html = "") {
+  if (!html) return 0;
+  const m = html.match(/<h3\b[^>]*>/gi);
+  return m ? m.length : 0;
+}
+function countH2(html = "") {
+  if (!html) return 0;
+  const m = html.match(/<h2\b[^>]*>/gi);
+  return m ? m.length : 0;
+}
+function extractH2TitlesFromHtml(html = "") {
+  if (!html) return [];
+  const re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    out.push((m[1] || "").trim());
+  }
+  return out;
+}
+function extractH3TitlesFromHtml(html = "") {
+  if (!html) return [];
+  const re = /<h3\b[^>]*>([\s\S]*?)<\/h3>/gi;
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    out.push((m[1] || "").trim());
+  }
+  return out;
+}
+function stripHtmlTags(s = "") {
+  return (s || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+function countExactShortNameUsageAcross(parsed = {}, shortName = "") {
+  if (!shortName) return 0;
+  const fields = ["hook_html", "main_description_html", "features_html", "why_choose_html", "specs_html", "faq_html"];
+  const joined = fields.map(f => parsed[f] || "").join(" ").toLowerCase();
+  const s = shortName.toLowerCase();
+  const re = new RegExp(`\\b${escapeRegExp(s)}\\b`, "gi");
+  const m = joined.match(re);
+  return m ? m.length : 0;
+}
+function tokenOverlapCount(parsed = {}, shortName = "") {
+  if (!shortName) return 0;
+  const tokens = shortName.split(/\s+/).filter(t => t.length > 2);
+  if (!tokens.length) return 0;
+  const fields = ["hook_html", "main_description_html", "features_html", "why_choose_html", "specs_html", "faq_html"];
+  const joined = fields.map(f => parsed[f] || "").join(" ").toLowerCase();
+  let count = 0;
+  for (const token of tokens) {
+    const re = new RegExp(`\\b${escapeRegExp(token.toLowerCase())}\\b`, "gi");
+    const m = joined.match(re);
+    if (m) count += m.length;
+  }
+  return count;
+}
+function findDuplicateTitles(h2Titles = [], h3Titles = []) {
+  const dups = [];
+  // H2 duplicates
+  const seen = new Map();
+  h2Titles.forEach(t => {
+    const key = stripHtmlTags(t).toLowerCase();
+    if (!key) return;
+    const c = seen.get(key) || 0;
+    seen.set(key, c + 1);
+  });
+  for (const [k, v] of seen.entries()) {
+    if (v > 1) dups.push({ type: "h2", title: k, count: v });
+  }
+  // H3 duplicates across the whole doc (avoid repeating same group titles)
+  const seen3 = new Map();
+  h3Titles.forEach(t => {
+    const key = stripHtmlTags(t).toLowerCase();
+    if (!key) return;
+    const c = seen3.get(key) || 0;
+    seen3.set(key, c + 1);
+  });
+  for (const [k, v] of seen3.entries()) {
+    if (v > 1) dups.push({ type: "h3", title: k, count: v });
+  }
+  return dups;
 }
 
 // Fix bullets to use en-dash pattern where appropriate
@@ -120,31 +207,25 @@ function fixSpecsFormattingInHtml(html = "") {
 
 /* -------------------- Assemble structured -> description -------------------- */
 
-// This assembly enforces dynamic H2 insertion for main_description_title and why_choose_title.
-// Hook remains un-titled (no H2).
 function assembleDescriptionFromStructured(parsed = {}) {
   const parts = [];
 
   if (parsed.hook_html) parts.push(parsed.hook_html);
 
-  // Main Description: dynamic H2 must be present per requirement
   if (parsed.main_description_title) parts.push(`<h2>${parsed.main_description_title}</h2>`);
   if (parsed.main_description_html) parts.push(parsed.main_description_html);
 
-  // Features and Benefits
   if (parsed.features_html) {
     parts.push(`<h2>Features and Benefits</h2>`);
     parts.push(parsed.features_html);
   }
 
-  // Product Specifications - normalize spec li formatting
   if (parsed.specs_html) {
     const fixed = fixSpecsFormattingInHtml(parsed.specs_html);
     parts.push(`<h2>Product Specifications</h2>`);
     parts.push(fixed);
   }
 
-  // Internal Links (if provided)
   if (Array.isArray(parsed.internal_links) && parsed.internal_links.length) {
     const linksHtml = parsed.internal_links.map(l => {
       const anchor = l.anchor || (l.type ? `See all ${l.type}` : "See more");
@@ -158,14 +239,12 @@ function assembleDescriptionFromStructured(parsed = {}) {
     parts.push(parsed.internal_links_html);
   }
 
-  // Why Choose dynamic H2 required as well
   const whyTitle = parsed.why_choose_title || "Why Choose";
   if (parsed.why_choose_html) {
     parts.push(`<h2>${whyTitle}</h2>`);
     parts.push(parsed.why_choose_html);
   }
 
-  // Manuals (conditional)
   if (parsed.manuals_html) {
     parts.push(`<h2>Manuals and Troubleshooting Guides</h2>`);
     parts.push(parsed.manuals_html);
@@ -180,7 +259,6 @@ function assembleDescriptionFromStructured(parsed = {}) {
     }
   }
 
-  // FAQs
   if (parsed.faq_html) {
     parts.push(`<h2>Frequently Asked Questions</h2>`);
     parts.push(parsed.faq_html);
@@ -256,7 +334,7 @@ export async function mountDescribeRoute(app, opts = {}) {
       }
 
       if (!finalPrompt) {
-        finalPrompt = `MASTER-FALLBACK: Return valid JSON only. REQUIRED structured top-level fields: hook_html (string), main_description_title (string), main_description_html (string), features_html (string), specs_html (string), why_choose_title (string), why_choose_html (string), faq_html or faqs (array), name_best, short_name_60, desc_audit.\nDo NOT return description_html-only. Use only the INPUT grounding provided.`;
+        finalPrompt = `MASTER-FALLBACK: Return valid JSON only. REQUIRED structured top-level fields: hook_html (string), main_description_title (string), main_description_html (string), features_html (string), specs_html (string), why_choose_title (string), why_choose_html (string), faq_html or faqs (array), name_best, short_name_60, desc_audit. Do NOT return description_html-only. Use only the INPUT grounding provided.`;
       }
 
       // If no OpenAI key, respond with a deterministic structured mock (useful for local dev)
@@ -367,34 +445,113 @@ export async function mountDescribeRoute(app, opts = {}) {
 
         // Extra enforcement: require dynamic H2 titles to be present and non-empty
         if (valid) {
-          const titleViolations = [];
+          const extraViolations = [];
+
+          // main_description_title presence and not equal to H1
           if (!parsed.main_description_title || String(parsed.main_description_title).trim().length === 0) {
-            titleViolations.push({ section: "Structure", issue: "Missing main_description_title", fix_hint: "Provide a dynamic H2 title in main_description_title" });
+            extraViolations.push({ section: "Structure", issue: "Missing main_description_title", fix_hint: "Provide a dynamic H2 title in main_description_title" });
+          } else if (parsed.name_best && String(parsed.main_description_title).trim() === String(parsed.name_best).trim()) {
+            extraViolations.push({ section: "Structure", issue: "main_description_title equals name_best/H1", fix_hint: "Use a benefit-focused H2 title that is not identical to the H1" });
           }
-          if (!parsed.why_choose_title || String(parsed.why_choose_title).trim().length === 0) {
-            titleViolations.push({ section: "Structure", issue: "Missing why_choose_title", fix_hint: "Provide a dynamic H2 title in why_choose_title" });
+
+          // Hook bullets: require 3-6 <li> within hook_html's first <ul>
+          const hookHtml = parsed.hook_html || "";
+          const hookLiCount = countHtmlListItems(hookHtml);
+          if (hookLiCount < 3 || hookLiCount > 6) {
+            extraViolations.push({ section: "Hook", issue: `Hook bullets count out of bounds (${hookLiCount})`, fix_hint: "Provide 3–6 bullets in the Hook <ul> following the Label – Explanation pattern" });
           }
-          if (titleViolations.length) {
-            lastViolations = lastViolations.concat(titleViolations);
+
+          // Features: 2-4 H3 groups and total 3-6 bullets
+          const featuresHtml = parsed.features_html || "";
+          if (!featuresHtml || featuresHtml.trim().length === 0) {
+            extraViolations.push({ section: "Structure", issue: "features_html empty", fix_hint: "Populate features_html with 2–4 H3 groups and a total of 3–6 bullets" });
+          } else {
+            const featuresH3Count = countH3Groups(featuresHtml);
+            const featuresLiCount = countHtmlListItems(featuresHtml);
+            if (featuresH3Count < 2 || featuresH3Count > 4) {
+              extraViolations.push({ section: "Features", issue: `features_html H3 groups out of bounds (${featuresH3Count})`, fix_hint: "Provide between 2 and 4 H3 groups in features_html" });
+            }
+            if (featuresLiCount < 3 || featuresLiCount > 6) {
+              extraViolations.push({ section: "Features", issue: `features_html bullets out of bounds (${featuresLiCount})`, fix_hint: "Provide a total of 3–6 bullets across features_html groups" });
+            }
           }
+
+          // Why-Choose: lead paragraph + 3-6 bullets
+          const whyHtml = parsed.why_choose_html || "";
+          const whyLiCount = countHtmlListItems(whyHtml);
+          const whyTextStripped = stripHtmlTags(whyHtml || "");
+          if (!whyTextStripped || whyTextStripped.length < 20) {
+            extraViolations.push({ section: "Why-Choose", issue: "why_choose_html too short or missing lead paragraph", fix_hint: "Provide a 1–3 sentence lead paragraph and 3–6 bullets in why_choose_html" });
+          }
+          if (whyLiCount < 3 || whyLiCount > 6) {
+            extraViolations.push({ section: "Why-Choose", issue: `why_choose_html bullets out of bounds (${whyLiCount})`, fix_hint: "Provide 3–6 bullets in why_choose_html" });
+          }
+
+          // FAQs: 5-7 Q&As (either faq_html with <h3> count or faqs array)
+          let faqCount = 0;
+          if (parsed.faq_html) {
+            const m = String(parsed.faq_html).match(/<h3\b[^>]*>/gi);
+            faqCount = m ? m.length : 0;
+          } else if (Array.isArray(parsed.faqs)) {
+            faqCount = parsed.faqs.length;
+          }
+          if (faqCount < 5 || faqCount > 7) {
+            extraViolations.push({ section: "FAQs", issue: `FAQ count out of bounds (${faqCount})`, fix_hint: "Provide 5–7 Q&A pairs in faq_html or faqs array; each question uses <h3> and each answer a <p>" });
+          }
+
+          // Short name usage: exact <= 2, token overlap threshold (warning if excessive)
+          const shortName = parsed.short_name_60 || pickShortNameFromH1(parsed.name_best || name);
+          const exactCount = countExactShortNameUsageAcross(parsed, shortName);
+          if (exactCount > 2) {
+            extraViolations.push({ section: "Style", issue: `short_name_60 appears ${exactCount} times`, fix_hint: "Use the short_name verbatim at most 2×: once bolded in the hook's first sentence and optionally once more in Main Description or Why Choose" });
+          }
+          const tokenOverlap = tokenOverlapCount(parsed, shortName);
+          if (tokenOverlap > 7) {
+            extraViolations.push({ section: "Style", issue: `Many short-name tokens detected (${tokenOverlap})`, fix_hint: "Use synonyms or descriptive variations; avoid repeating short-name tokens excessively" });
+          }
+
+          // Duplicate title detection: H2 and H3 duplicates and H3 equal to H2
+          const assembledHtml = assembleDescriptionFromStructured(parsed);
+          const h2Titles = extractH2TitlesFromHtml(assembledHtml);
+          const h3Titles = extractH3TitlesFromHtml(assembledHtml);
+          const dups = findDuplicateTitles(h2Titles, h3Titles);
+          if (dups.length) {
+            dups.forEach(d => {
+              if (d.type === "h2") {
+                extraViolations.push({ section: "Structure", issue: `Repeated H2 title "${d.title}" appears ${d.count} times`, fix_hint: "Ensure each H2 (section title) appears once and sections are not duplicated" });
+              } else {
+                extraViolations.push({ section: "Structure", issue: `Repeated H3 title "${d.title}" appears ${d.count} times`, fix_hint: "Avoid repeating identical H3 group titles across the description" });
+              }
+            });
+          }
+          // Specific duplication pattern: Product Specifications twice or H2 "Features and Benefits" followed by H3 "Key Features" (redundant)
+          const productSpecH2Count = h2Titles.filter(t => String(t).toLowerCase().includes("product specifications")).length;
+          if (productSpecH2Count > 1) {
+            extraViolations.push({ section: "Structure", issue: `Multiple "Product Specifications" H2 headings detected (${productSpecH2Count})`, fix_hint: "Do not duplicate the Product Specifications H2; place specs under a single H2 with appropriate H3 groups" });
+          }
+          // Detect H2 "Features and Benefits" followed immediately by an H3 equal to "Key Features" as potential duplication pattern
+          if (assembledHtml && /<h2[^>]*>\s*Features and Benefits\s*<\/h2>\s*<h3[^>]*>\s*Key Features\s*<\/h3>/i.test(assembledHtml)) {
+            extraViolations.push({ section: "Structure", issue: `Redundant grouping: "Features and Benefits" followed by "Key Features"`, fix_hint: "Avoid redundant headings; use descriptive H3 group titles under 'Features and Benefits' rather than duplicative 'Key Features' grouping" });
+          }
+
+          if (extraViolations.length) lastViolations = lastViolations.concat(extraViolations);
         }
 
         // If no violations -> success
         if (!lastViolations.length) {
-          // Run server-side assembly, normalize specs formatting and bullets
-          if (!parsed.description_html) {
-            parsed.specs_html = parsed.specs_html ? fixSpecsFormattingInHtml(parsed.specs_html) : parsed.specs_html;
-            parsed.features_html = parsed.features_html ? fixBulletFormattingInHtml(parsed.features_html) : parsed.features_html;
-            parsed.why_choose_html = parsed.why_choose_html ? fixBulletFormattingInHtml(parsed.why_choose_html) : parsed.why_choose_html;
-            parsed.hook_html = parsed.hook_html ? fixBulletFormattingInHtml(parsed.hook_html) : parsed.hook_html;
-            parsed.description_html = assembleDescriptionFromStructured(parsed);
-            parsed.descriptionHtml = parsed.description_html;
+          // Server-side normalization and assembly
+          if (!lastParsed.description_html) {
+            lastParsed.specs_html = lastParsed.specs_html ? fixSpecsFormattingInHtml(lastParsed.specs_html) : lastParsed.specs_html;
+            lastParsed.features_html = lastParsed.features_html ? fixBulletFormattingInHtml(lastParsed.features_html) : lastParsed.features_html;
+            lastParsed.why_choose_html = lastParsed.why_choose_html ? fixBulletFormattingInHtml(lastParsed.why_choose_html) : lastParsed.why_choose_html;
+            lastParsed.hook_html = lastParsed.hook_html ? fixBulletFormattingInHtml(lastParsed.hook_html) : lastParsed.hook_html;
+            lastParsed.description_html = assembleDescriptionFromStructured(lastParsed);
+            lastParsed.descriptionHtml = lastParsed.description_html;
           }
-          // Attach debug and return
-          parsed._debug = parsed._debug || {};
-          parsed._debug.attempts = attempt;
-          parsed._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
-          return res.json(parsed);
+          lastParsed._debug = lastParsed._debug || {};
+          lastParsed._debug.attempts = attempt;
+          lastParsed._debug.lastModelTextPreview = String(lastModelText || "").slice(0, 1200);
+          return res.json(lastParsed);
         }
 
         // If violations and attempts remain, ask the model to repair with explicit violations list
@@ -411,7 +568,7 @@ export async function mountDescribeRoute(app, opts = {}) {
             JSON.stringify(modelInput, null, 2),
             "",
             "PreviousOutput:",
-            JSON.stringify(parsed, null, 2),
+            JSON.stringify(lastParsed || parsed, null, 2),
             "",
             "Return only JSON."
           ].join("\n\n");
