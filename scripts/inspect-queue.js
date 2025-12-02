@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// inspect-queue.js
-// Usage: REDIS_URL='redis://:pass@host:6379' node scripts/inspect-queue.js
+// inspect-queue.cjs
+// Usage: REDIS_URL='redis://:pass@host:6379' node scripts/inspect-queue.cjs
 // Prints counts and first few waiting/active jobs for queue "seo".
 
 const IORedis = require("ioredis");
