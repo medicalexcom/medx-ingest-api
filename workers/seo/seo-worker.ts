@@ -2,208 +2,243 @@
 // Place: medx-ingest-api/workers/seo/seo-worker.ts
 //
 // Behavior:
-//  - Listens on queue 'seo'
+//  - Listens on queue "seo"
 //  - Payload expected: { jobId, tenant_id, raw_payload, correlation_id }
-//  - Calls central GPT via central-gpt-client.ts
-//  - Validates output with zod (seo-schema.ts)
-//  - Writes module result to Supabase product_ingestions.normalized_payload (update existing row by id)
-//    and sets status/completed_at, diagnostics, attempts_count, etc.
+//  - Calls central GPT via CENTRAL_GPT_URL / CENTRAL_GPT_KEY (if set)
+//  - Writes module result to Supabase product_ingestions.normalized_payload (update by id)
+//    and sets status/completed_at and diagnostics.
 //
 // Env required:
 //  - REDIS_URL
-//  - CENTRAL_GPT_URL, CENTRAL_GPT_KEY (if used)
-//  - SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+//  - SUPABASE_URL
+//  - SUPABASE_SERVICE_ROLE_KEY
+//  - (optional) CENTRAL_GPT_URL, CENTRAL_GPT_KEY
 
-import { createClient } from "@supabase/supabase-js";
-import { getQueue, createWorker } from "../queue";
-import { callCentralGpt } from "../gpt/central-gpt-client";
-import { SeoSchema } from "../gpt/schemas/seo-schema";
+import IORedis from "ioredis";
+import { Worker, Job } from "bullmq";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-// Lazy make supabase client
-function getSupabase() {
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error("SUPABASE envs required");
-  return createClient(SUPABASE_URL, SUPABASE_KEY);
+const REDIS_URL = process.env.REDIS_URL || "";
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const CENTRAL_GPT_URL = process.env.CENTRAL_GPT_URL || "";
+const CENTRAL_GPT_KEY = process.env.CENTRAL_GPT_KEY || "";
+
+if (!REDIS_URL) {
+  throw new Error("REDIS_URL env var is required for seo-worker");
+}
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error(
+    "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY env vars are required for seo-worker"
+  );
 }
 
-// Processor fn for the worker
-async function processor(job) {
-  const supabase = getSupabase();
-  const payload = job.data || {};
-  const { jobId, tenant_id, raw_payload, correlation_id } = payload;
+const connection = new IORedis(REDIS_URL);
 
-  const now = new Date().toISOString();
+const supabase: SupabaseClient = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: { persistSession: false },
+  }
+);
 
-  console.info(`[seo-worker] start job=${jobId} correlation_id=${correlation_id}`);
+type SeoJobPayload = {
+  jobId: string;
+  tenant_id?: string | null;
+  raw_payload?: any;
+  correlation_id?: string;
+};
 
-  // defensive: ensure jobId exists
-  if (!jobId) {
-    throw new Error("Missing jobId in seo job payload");
+/**
+ * Call the central SEO model. If CENTRAL_GPT_URL / CENTRAL_GPT_KEY are not set,
+ * we simply echo raw_payload as the SEO output (for local/dev).
+ */
+async function callSeoModel(
+  rawPayload: any,
+  correlationId?: string
+): Promise<any> {
+  if (!CENTRAL_GPT_URL || !CENTRAL_GPT_KEY) {
+    console.warn(
+      "[seo-worker] CENTRAL_GPT_URL/CENTRAL_GPT_KEY not set; returning raw_payload as seo output"
+    );
+    return rawPayload;
   }
 
-  // Mark started_at and bump attempts_count (best-effort)
-  try {
-    await supabase
-      .from("product_ingestions")
-      .update({
-        started_at: now,
-        last_attempt_at: now,
-        attempts_count: (0), // we'll read+increment below to avoid race in some DBs, but set base here if missing
-      })
-      .eq("id", jobId);
-  } catch (e) {
-    // non-fatal, proceed
-    console.warn(`[seo-worker] could not mark started_at for job=${jobId}`, String(e));
-  }
+  const body = {
+    module: "seo",
+    payload: rawPayload,
+    correlation_id: correlationId || undefined,
+  };
 
-  // Read existing row (we need diagnostics and existing normalized payload)
-  const { data: existing, error: selectErr } = await supabase
-    .from("product_ingestions")
-    .select("normalized_payload, diagnostics, attempts_count, status")
-    .eq("id", jobId)
-    .single();
-
-  if (selectErr) {
-    console.warn(`[seo-worker] product_ingestions row not found for id=${jobId}`, selectErr.message || selectErr);
-    // Continue — we will still try to update by id (it will fail and surface error so operator can fix)
-  }
-
-  // Build a deterministic SEO prompt (central GPT backend will apply your prompt templates)
-  const prompt = JSON.stringify({
-    raw_title: raw_payload?.title || raw_payload?.name || "",
-    raw_description: raw_payload?.description || raw_payload?.long_description || raw_payload?.summary || "",
-    raw_bullets: raw_payload?.bullets || raw_payload?.features || [],
+  const res = await fetch(CENTRAL_GPT_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${CENTRAL_GPT_KEY}`,
+    },
+    body: JSON.stringify(body),
   });
 
-  const system = "You are an ecommerce SEO writer. Output JSON with keys: h1,title,meta_description,seo_short_description. Title <= 60 chars, meta <= 155 chars, h1 <= 110 chars. Return only valid JSON.";
-
-  // Call central GPT backend
-  let gptResp;
+  const text = await res.text();
+  let json: any = null;
   try {
-    gptResp = await callCentralGpt({ system, prompt, max_tokens: 500, metadata: { module: "seo", correlation_id } });
-  } catch (err) {
-    const errText = String(err);
-    console.error(`[seo-worker] central GPT call failed for job=${jobId}`, errText);
-    // persist diagnostic and increment attempts
-    try {
-      await supabase.from("product_ingestions").update({
-        diagnostics: { ...(existing?.diagnostics || {}), seo_call_error: errText },
-        last_attempt_at: now,
-        attempts_count: (existing?.attempts_count || 0) + 1,
-        last_error: errText
-      }).eq("id", jobId);
-    } catch (uErr) {
-      console.error(`[seo-worker] failed to write diagnostics for job=${jobId}`, String(uErr));
-    }
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    // ignore JSON parse errors below, we’ll surface the raw body
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      `central GPT seo error: ${res.status} ${
+        json ? JSON.stringify(json) : text
+      }`
+    );
+  }
+
+  // You can adjust this if your API returns seo under a different shape
+  const seo = json?.seo ?? json ?? rawPayload;
+  return seo;
+}
+
+async function updateDiagnostics(
+  jobId: string,
+  seoDiagnostics: Record<string, any>
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("product_ingestions")
+    .select("diagnostics")
+    .eq("id", jobId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(
+      `[seo-worker] failed to load diagnostics for job=${jobId}`,
+      error.message || error
+    );
+    return;
+  }
+
+  const existingDiagnostics = (data?.diagnostics as any) || {};
+  const newDiagnostics = {
+    ...existingDiagnostics,
+    seo_call: {
+      ...(existingDiagnostics.seo_call || {}),
+      ...seoDiagnostics,
+    },
+  };
+
+  const { error: updErr } = await supabase
+    .from("product_ingestions")
+    .update({
+      diagnostics: newDiagnostics,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", jobId);
+
+  if (updErr) {
+    console.warn(
+      `[seo-worker] failed to update diagnostics for job=${jobId}`,
+      updErr.message || updErr
+    );
+  }
+}
+
+/**
+ * Main BullMQ job processor for SEO.
+ */
+export async function processor(
+  job: Job<SeoJobPayload>
+): Promise<{ ok: boolean; seo: any }> {
+  const { jobId, tenant_id, raw_payload, correlation_id } = job.data || {};
+
+  if (!jobId) {
+    throw new Error("[seo-worker] jobId is required in job.data");
+  }
+
+  if (!raw_payload) {
+    throw new Error("[seo-worker] raw_payload is required in job.data");
+  }
+
+  console.log(
+    `[seo-worker] start job=${jobId} tenant=${tenant_id || "n/a"}`
+  );
+
+  let seo: any;
+  const startedAt = new Date().toISOString();
+
+  try {
+    seo = await callSeoModel(raw_payload, correlation_id);
+  } catch (err: any) {
+    console.error(
+      `[seo-worker] seo model call failed for job=${jobId}`,
+      err?.message || err
+    );
+
+    await updateDiagnostics(jobId, {
+      last_error: String(err?.message || err),
+      last_error_at: new Date().toISOString(),
+    });
+
     throw err;
   }
 
-  if (!gptResp || !gptResp.output) {
-    const errText = "Empty response from GPT";
-    console.error(`[seo-worker] ${errText} job=${jobId}`);
-    await supabase.from("product_ingestions").update({
-      diagnostics: { ...(existing?.diagnostics || {}), seo_raw_output: gptResp?.output ?? null },
-      last_attempt_at: now,
-      attempts_count: (existing?.attempts_count || 0) + 1,
-      last_error: errText
-    }).eq("id", jobId);
-    throw new Error(errText);
-  }
-
-  // Attempt to parse JSON output
-  let parsed;
+  // Persist SEO payload into product_ingestions.normalized_payload
   try {
-    parsed = typeof gptResp.output === "string" ? JSON.parse(gptResp.output) : gptResp.output;
-  } catch (err) {
-    const errText = String(err);
-    console.warn(`[seo-worker] Failed to parse GPT output for job=${jobId}`, errText);
-    // Save raw output and error
-    try {
-      await supabase.from("product_ingestions").update({
-        diagnostics: { ...(existing?.diagnostics || {}), seo_raw_output: gptResp.output, seo_error: errText },
-        last_attempt_at: now,
-        attempts_count: (existing?.attempts_count || 0) + 1,
-        last_error: errText
-      }).eq("id", jobId);
-    } catch (uErr) {
-      console.error(`[seo-worker] failed to persist parse error for job=${jobId}`, String(uErr));
-    }
-    throw new Error("Failed to parse GPT JSON output: " + errText);
-  }
-
-  // Validate with zod
-  const parseResult = SeoSchema.safeParse(parsed);
-  if (!parseResult.success) {
-    const validationText = JSON.stringify(parseResult.error.format());
-    console.warn(`[seo-worker] SEO schema validation failed for job=${jobId}`, validationText);
-    // Save validation errors and raw output for debugging, then fail this job
-    await supabase.from("product_ingestions").update({
-      diagnostics: { ...(existing?.diagnostics || {}), seo_validation: parseResult.error.format(), seo_raw_output: parsed },
-      last_attempt_at: now,
-      attempts_count: (existing?.attempts_count || 0) + 1,
-      last_error: "SEO schema validation failed"
-    }).eq("id", jobId);
-    throw new Error("SEO schema validation failed");
-  }
-
-  const seo: any = parseResult.data;
-
-  // Persist module into the normalized payload (merge) -- set seo field
-  try {
-    const normalized = (existing?.normalized_payload && typeof existing.normalized_payload === "object") ? existing.normalized_payload : {};
-    normalized.seo = seo;
-
-    // Build diagnostics merge
-    const newDiagnostics = { ...(existing?.diagnostics || {}), seo_tokens: gptResp.tokens || null };
-
-    // Prepare update payload with metadata and status
-    const updatePayload: any = {
-      normalized_payload: normalized,
-      diagnostics: newDiagnostics,
-      status: "completed",
-      completed_at: new Date().toISOString(),
-      last_attempt_at: now,
-      last_error: null,
-      attempts_count: (existing?.attempts_count || 0) + 1
-    };
-
-    const { error } = await supabase.from("product_ingestions").update(updatePayload).eq("id", jobId);
+    const { error } = await supabase
+      .from("product_ingestions")
+      .update({
+        normalized_payload: seo,
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
 
     if (error) {
-      console.error(`[seo-worker] Failed to write SEO result to DB for job=${jobId}`, error);
-      // try fallback by job_id (some installs use job_id column)
-      try {
-        const { error: error2 } = await supabase.from("product_ingestions").update(updatePayload).eq("job_id", jobId);
-        if (error2) {
-          throw new Error("Fallback update by job_id failed: " + JSON.stringify(error2));
-        }
-      } catch (fbErr) {
-        // persist diagnostics and throw
-        await supabase.from("product_ingestions").update({
-          diagnostics: { ...(existing?.diagnostics || {}), seo_write_error: JSON.stringify(error) },
-          last_attempt_at: now,
-          attempts_count: (existing?.attempts_count || 0) + 1,
-          last_error: String(error)
-        }).eq("id", jobId).catch(()=>null);
-        throw new Error("Failed to write SEO result to DB: " + JSON.stringify(error));
-      }
+      console.error(
+        `[seo-worker] error updating product_ingestions for job=${jobId}`,
+        error.message || error
+      );
+      throw error;
     }
 
-    console.info(`[seo-worker] completed job=${jobId} seo persisted`);
-  } catch (err) {
-    console.error(`[seo-worker] error persisting seo for job=${jobId}`, String(err));
+    await updateDiagnostics(jobId, {
+      last_success_at: new Date().toISOString(),
+      started_at: startedAt,
+    });
+
+    console.log(`[seo-worker] completed job=${jobId}`);
+  } catch (err: any) {
+    console.error(
+      `[seo-worker] error persisting seo for job=${jobId}`,
+      String(err)
+    );
     throw err;
   }
 
-  // Optionally emit a 'module:done' job or update status — depends on your orchestration
   return { ok: true, seo };
 }
 
-// Create the worker when this module is invoked directly
+// Spin up the worker when this module is run directly
 if (require.main === module) {
-  console.log("Starting SEO worker...");
-  createWorker("seo", processor, { concurrency: 1 });
+  console.log("[seo-worker] Starting SEO worker on queue 'seo' ...");
+  const worker = new Worker("seo", processor as any, {
+    connection,
+    concurrency: 1,
+  });
+
+  worker.on("completed", (job) => {
+    console.log(`[seo-worker] job completed id=${job.id}`);
+  });
+
+  worker.on("failed", (job, err) => {
+    console.error(
+      `[seo-worker] job failed id=${job?.id}`,
+      err?.message || err
+    );
+  });
 }
 
 export default processor;
