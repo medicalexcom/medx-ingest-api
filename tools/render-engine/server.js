@@ -9,9 +9,11 @@
 // Notes:
 // - Ensure RENDER_ENGINE_SECRET is set in Render and matches Vercel for /describe calls.
 // - Ensure INGEST_SECRET (or fallback RENDER_ENGINE_SECRET) matches Vercel INGEST_SECRET for /ingest calls.
-// - Start command on Render should be: node tools/render-engine/server.js
-//   (or node server.js with a root shim that requires this file).
+// - Start command on Render should be: node server.js  (root server.js just imports this file).
 // - This file logs module load status so you can confirm the running code in Render logs.
+
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
 
 const express = require("express");
 const bodyParser = require("body-parser");
@@ -31,21 +33,8 @@ const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || "dev-secret";
 const INGEST_SECRET = process.env.INGEST_SECRET || ENGINE_SECRET;
 const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
 
-// ---- helper: fetch compatible with Node < 18 (optional) ----
-let fetchFn = global.fetch;
-if (!fetchFn) {
-  try {
-    // If node-fetch is installed, use it as a fallback
-    // (if not, you'll see a clear error in logs).
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    fetchFn = require("node-fetch");
-  } catch (e) {
-    console.warn(
-      "No global fetch and node-fetch not available; callbacks will fail:",
-      e?.message || e
-    );
-  }
-}
+// ---- helper: fetch (Node 20 has global fetch) ----
+const fetchFn = globalThis.fetch;
 
 // ---- helper: verify HMAC signature (same as AvidiaTech ingest) ----
 function verifyIngestSignature(rawBody, signature, secret) {
@@ -64,7 +53,8 @@ function verifyIngestSignature(rawBody, signature, secret) {
 // Try to load request-logger (optional)
 try {
   // If you placed it in a subfolder adjust the path, e.g. './tools/render-engine/request-logger'
-  require("./request-logger")(app);
+  const reqLogger = require("./request-logger");
+  (reqLogger.default || reqLogger)(app);
   console.log("request-logger loaded");
 } catch (e) {
   console.warn(
