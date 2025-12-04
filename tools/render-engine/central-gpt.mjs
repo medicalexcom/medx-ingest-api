@@ -199,7 +199,6 @@ Task:
 
       const completion = await client.responses.create({
         model: "gpt-4.1-mini",
-        reasoning: { effort: "medium" },
         input: [
           {
             role: "system",
@@ -314,4 +313,3 @@ Task:
 
   console.log("[central-gpt] POST /central-gpt mounted");
 }
-
