@@ -9,7 +9,8 @@
 // Notes:
 // - Ensure RENDER_ENGINE_SECRET is set in Render and matches Vercel for /describe calls.
 // - Ensure INGEST_SECRET (or fallback RENDER_ENGINE_SECRET) matches Vercel INGEST_SECRET for /ingest calls.
-// - Start command on Render should be: node tools/render-engine/server.js (or use root server.js shim that requires this file).
+// - Start command on Render should be: node tools/render-engine/server.js
+//   (or node server.js with a root shim that requires this file).
 // - This file logs module load status so you can confirm the running code in Render logs.
 
 const express = require("express");
@@ -150,7 +151,8 @@ SEO must contain h1, pageTitle, metaDescription, seoShortDescription.
           messages: [
             {
               role: "system",
-              content: "You output machine-readable JSON according to instructions.",
+              content:
+                "You output machine-readable JSON according to instructions.",
             },
             { role: "user", content: prompt },
           ],
@@ -384,6 +386,29 @@ app.post("/ingest", async (req, res) => {
     return res.status(500).json({ error: "internal_error" });
   }
 });
+
+// -----------------------------------------------------------------------------
+// Mount gptInstructionsEnforcer.mjs (Describe route enforcer) onto the same app
+// -----------------------------------------------------------------------------
+
+(async () => {
+  try {
+    const mod = await import("./gptInstructionsEnforcer.mjs");
+    if (mod && typeof mod.mountDescribeRoute === "function") {
+      await mod.mountDescribeRoute(app);
+      console.log("render-engine: mountDescribeRoute completed successfully");
+    } else {
+      console.warn(
+        "render-engine: gptInstructionsEnforcer.mjs loaded but mountDescribeRoute not found"
+      );
+    }
+  } catch (err) {
+    console.error(
+      "render-engine: mountDescribeRoute failed during startup:",
+      err && err.stack ? err.stack : String(err)
+    );
+  }
+})();
 
 // Start listening - bind to 0.0.0.0 (Render requires this)
 app.listen(PORT, "0.0.0.0", () => {
