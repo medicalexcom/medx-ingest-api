@@ -40,18 +40,10 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
+
+
 require("./tools/render-engine/server.js");
 
-import { mountDescribeRoute } from "./tools/render-engine/gptInstructionsEnforcer.mjs";
-
-(async () => {
-  try {
-    await mountDescribeRoute(app);
-    console.log("server: mountDescribeRoute completed successfully");
-  } catch (err) {
-    console.error("server: mountDescribeRoute failed during startup:", err && err.stack ? err.stack : String(err));
-  }
-})();
 
 
 
