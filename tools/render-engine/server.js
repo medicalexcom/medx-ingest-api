@@ -3,15 +3,17 @@
 // - Prefer a local describe-handler (if present)
 // - Otherwise, prefer a describe-proxy (if present)
 // - Otherwise, expose an internal /describe implementation (calls OpenAI if OPENAI_API_KEY set, else returns a deterministic mock)
+// - Also exposes /ingest for AvidiaTech ingestion engine callbacks.
 // - Listens on process.env.PORT and binds to 0.0.0.0
 //
 // Notes:
-// - Ensure RENDER_ENGINE_SECRET is set in Render and matches Vercel.
+// - Ensure RENDER_ENGINE_SECRET is set in Render and matches Vercel INGEST_SECRET (or set INGEST_SECRET explicitly here).
 // - Start command on Render should be: node server.js (or node tools/render-engine/server.js if using a subfolder).
 // - This file is intentionally defensive and logs module load status so you can confirm the running code in Render logs.
 
 const express = require('express');
 const bodyParser = require('body-parser');
+const crypto = require('crypto');
 
 const { Configuration, OpenAIApi } = require('openai');
 
@@ -23,7 +25,37 @@ app.use(bodyParser.json({ limit: '2mb' }));
 
 const PORT = process.env.PORT || 8081;
 const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || 'dev-secret';
+// For ingest HMAC: prefer explicit INGEST_SECRET, fallback to ENGINE_SECRET so you
+// don't have to add a new env if you keep them the same.
+const INGEST_SECRET = process.env.INGEST_SECRET || ENGINE_SECRET;
 const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
+
+// ---- helper: fetch compatible with Node < 18 (optional) ----
+let fetchFn = global.fetch;
+if (!fetchFn) {
+  try {
+    // If node-fetch is installed, use it as a fallback
+    // (if not, you'll see a clear error in logs).
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    fetchFn = require('node-fetch');
+  } catch (e) {
+    console.warn('No global fetch and node-fetch not available; callbacks will fail:', e?.message || e);
+  }
+}
+
+// ---- helper: verify HMAC signature (same as AvidiaTech ingest) ----
+function verifyIngestSignature(rawBody, signature, secret) {
+  if (!secret || !signature) return false;
+  try {
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(rawBody, 'utf8');
+    const digest = hmac.digest('hex');
+    return digest === signature;
+  } catch (e) {
+    console.error('verifyIngestSignature error:', e);
+    return false;
+  }
+}
 
 // Try to load request-logger (optional)
 try {
@@ -109,7 +141,7 @@ SEO must contain h1, pageTitle, metaDescription, seoShortDescription.
         } catch (e) {
           console.warn('OpenAI returned non-JSON; falling back to deterministic shape', e?.message);
           response = {
-            descriptionHtml: `<p>${shortDescription}</p>`,
+            descriptionHtml: `<p>${shortDescription}</p>',
             sections: {
               overview: `${shortDescription}`,
               features: [`Feature A for ${name}`, `Feature B`],
@@ -165,7 +197,154 @@ SEO must contain h1, pageTitle, metaDescription, seoShortDescription.
   app.get('/healthz', (req, res) => res.json({ ok: true }));
 }
 
+// -----------------------------------------------------------------------------
+// New: /ingest endpoint for AvidiaTech ingestion engine
+// -----------------------------------------------------------------------------
+
+// Minimal ingest implementation. Replace this with real scraping/normalization
+// logic when ready.
+async function runIngest(url, options) {
+  // TODO: wire to real medx-ingest-api scraping logic if desired.
+  // For now we return a deterministic normalized payload that AvidiaSEO can use.
+  return {
+    source_url: url,
+    options: options || {},
+    seo: {
+      title: `SEO title for ${url}`,
+      meta_title: `SEO title for ${url}`,
+      meta_description: `SEO meta description for ${url}`,
+      h1: `Product for ${url}`,
+    },
+    description_html: `<p>Sample description generated for ${url}. Replace runIngest() with real scraper output.</p>`,
+    features: [`Key feature for ${url}`, 'Secondary feature'],
+    // You can shape this to whatever your Avidia pipeline expects as normalized_payload
+    normalizedPayload: {
+      name: `Product for ${url}`,
+      brand: null,
+      specs: {},
+      format: 'avidia_standard',
+    },
+  };
+}
+
+app.post('/ingest', async (req, res) => {
+  try {
+    if (!INGEST_SECRET) {
+      console.error('INGEST_SECRET/RENDER_ENGINE_SECRET not configured on render-engine');
+      return res.status(500).json({ error: 'server_misconfigured' });
+    }
+
+    // Reconstruct raw JSON body for HMAC verification
+    const rawBody = JSON.stringify(req.body || {});
+    const signature = req.header('x-avidiatech-signature') || '';
+
+    if (!verifyIngestSignature(rawBody, signature, INGEST_SECRET)) {
+      console.warn('medx-ingest-api: invalid signature on /ingest');
+      return res.status(401).json({ error: 'invalid_signature' });
+    }
+
+    const { job_id, url, options, callback_url, correlation_id } = req.body || {};
+
+    if (!job_id || !url || !callback_url) {
+      console.warn('medx-ingest-api: missing required fields on /ingest', {
+        job_id: !!job_id,
+        url: !!url,
+        callback_url: !!callback_url,
+      });
+      return res.status(400).json({ error: 'missing_required_fields' });
+    }
+
+    console.log(
+      '[medx-ingest-api] received ingest job',
+      job_id,
+      'url=',
+      url,
+      'callback_url=',
+      callback_url
+    );
+
+    // Run your real ingestion/scraping/normalization here:
+    const normalized = await runIngest(url, options);
+
+    // Build callback payload for AvidiaTech app
+    const callbackPayload = {
+      job_id,
+      status: 'completed',
+      normalized_payload: normalized,
+      diagnostics: {
+        engine: 'medx-ingest-api',
+        correlation_id: correlation_id || null,
+        finished_at: new Date().toISOString(),
+      },
+    };
+
+    const callbackBody = JSON.stringify(callbackPayload);
+
+    if (!fetchFn) {
+      console.error('No fetch available in this Node environment; cannot send callback');
+      return res.status(500).json({ error: 'callback_unavailable' });
+    }
+
+    // Sign callback body with same secret so /api/v1/ingest/callback accepts it
+    const hmac = crypto.createHmac('sha256', INGEST_SECRET);
+    hmac.update(callbackBody, 'utf8');
+    const callbackSig = hmac.digest('hex');
+
+    console.log(
+      '[medx-ingest-api] posting callback to',
+      callback_url,
+      'for job',
+      job_id
+    );
+
+    const callbackRes = await fetchFn(callback_url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-avidiatech-signature': callbackSig,
+      },
+      body: callbackBody,
+    });
+
+    const callbackText = await callbackRes.text();
+    if (!callbackRes.ok) {
+      console.error(
+        '[medx-ingest-api] callback failed:',
+        callbackRes.status,
+        callbackText
+      );
+      // Still respond 202 to indicate we *accepted* the job, but log the failure
+      return res.status(202).json({
+        ok: false,
+        message: 'callback_failed',
+        statusCode: callbackRes.status,
+      });
+    }
+
+    console.log(
+      '[medx-ingest-api] callback success for job',
+      job_id,
+      'response:',
+      callbackText
+    );
+
+    // Tell AvidiaTech app we accepted/processed the job.
+    return res.status(202).json({
+      ok: true,
+      job_id,
+      message: 'ingest_completed_and_callback_sent',
+    });
+  } catch (err) {
+    console.error('[medx-ingest-api] /ingest error:', err);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
 // Start listening - bind to 0.0.0.0 (Render requires this)
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Render engine listening on :${PORT}, expects RENDER_ENGINE_SECRET=${ENGINE_SECRET ? 'set' : 'not-set'}`);
+  console.log(
+    `Render engine listening on :${PORT}, expects RENDER_ENGINE_SECRET=${
+      ENGINE_SECRET ? 'set' : 'not-set'
+    }, INGEST_SECRET=${INGEST_SECRET ? 'set' : 'not-set'}`
+  );
 });
