@@ -41,9 +41,9 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
+import { mountRenderEngine } from "./tools/render-engine/server.js";
 
-import "./tools/render-engine/server.js";
-
+mountRenderEngine(app);
 
 
 
