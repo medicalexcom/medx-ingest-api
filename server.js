@@ -42,8 +42,7 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
-require("./tools/render-engine/server.js");
-
+import "./tools/render-engine/server.js";
 
 
 
