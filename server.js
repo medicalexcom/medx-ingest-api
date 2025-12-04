@@ -40,7 +40,7 @@ app.use(express.json({ limit: "1mb" }));
 
 
 
-
+require("./tools/render-engine/server.js");
 
 import { mountDescribeRoute } from "./tools/render-engine/gptInstructionsEnforcer.mjs";
 
