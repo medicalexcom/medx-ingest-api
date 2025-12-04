@@ -1,244 +1,179 @@
-// seo-worker.ts - BullMQ worker that runs the GPT_SEO module
-// Place: medx-ingest-api/workers/seo/seo-worker.ts
+// workers/seo/seo-worker.ts
+// BullMQ worker that runs the GPT_SEO / AvidiaSEO module for a given ingestion.
 //
-// Behavior:
-//  - Listens on queue "seo"
-//  - Payload expected: { jobId, tenant_id, raw_payload, correlation_id }
-//  - Calls central GPT via CENTRAL_GPT_URL / CENTRAL_GPT_KEY (if set)
-//  - Writes module result to Supabase product_ingestions.normalized_payload (update by id)
-//    and sets status/completed_at and diagnostics.
+// Design:
+// - This worker is OPTIONAL. If REDIS_URL is not set, it logs a warning and no worker is started.
+// - When enabled, it consumes jobs from a BullMQ queue (default name: "seo").
+// - Each job payload is expected to contain { ingestionId, userId?, tenantId? }.
+// - For each job, the worker calls the AvidiaTech app's /api/v1/seo endpoint,
+//   which already knows how to:
+//     * load product_ingestions by ingestionId from Supabase
+//     * call CENTRAL_GPT_URL / CENTRAL_GPT_KEY (if configured) OR fall back to normalized_payload
+//     * write seo_payload, description_html, features, seo_generated_at back to Supabase.
 //
-// Env required:
-//  - REDIS_URL
-//  - SUPABASE_URL
-//  - SUPABASE_SERVICE_ROLE_KEY
-//  - (optional) CENTRAL_GPT_URL, CENTRAL_GPT_KEY
+// This keeps all the SEO shaping logic centralized in the AvidiaTech app, and the
+// ingest-api only needs to fire jobs when/if you decide to use background SEO.
 
-import IORedis from "ioredis";
-import { Worker, Job } from "bullmq";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { Job, WorkerOptions } from "bullmq";
+import { Worker } from "bullmq";
+
+// ----- Environment configuration -------------------------------------------------
 
 const REDIS_URL = process.env.REDIS_URL || "";
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_SERVICE_ROLE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const CENTRAL_GPT_URL = process.env.CENTRAL_GPT_URL || "";
-const CENTRAL_GPT_KEY = process.env.CENTRAL_GPT_KEY || "";
+// Base URL of the AvidiaTech app that exposes POST /api/v1/seo
+// You can override this in Render/Vercel if needed.
+const AVIDIA_APP_BASE_URL =
+  process.env.AVIDIA_APP_BASE_URL || "https://app.avidiatech.com";
 
-if (!REDIS_URL) {
-  throw new Error("REDIS_URL env var is required for seo-worker");
+// Optional internal key if your /api/v1/seo route checks for it
+const AVIDIA_INTERNAL_WORKER_KEY =
+  process.env.AVIDIA_INTERNAL_WORKER_KEY || "";
+
+// Queue name; keep this in sync with whatever enqueues SEO jobs.
+const SEO_QUEUE_NAME = process.env.SEO_QUEUE_NAME || "seo";
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+export interface SeoJobPayload {
+  ingestionId: string;
+  userId?: string | null;
+  tenantId?: string | null;
+  // You can add more fields later without breaking this worker,
+  // as long as ingestionId remains present.
 }
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error(
-    "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY env vars are required for seo-worker"
-  );
-}
 
-const connection = new IORedis(REDIS_URL);
+// -----------------------------------------------------------------------------
+// Core processor logic
+// -----------------------------------------------------------------------------
 
-const supabase: SupabaseClient = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: { persistSession: false },
-  }
-);
+async function runSeoForIngestion(job: Job<SeoJobPayload>) {
+  const { ingestionId, userId, tenantId } = job.data || {};
 
-type SeoJobPayload = {
-  jobId: string;
-  tenant_id?: string | null;
-  raw_payload?: any;
-  correlation_id?: string;
-};
-
-/**
- * Call the central SEO model. If CENTRAL_GPT_URL / CENTRAL_GPT_KEY are not set,
- * we simply echo raw_payload as the SEO output (for local/dev).
- */
-async function callSeoModel(
-  rawPayload: any,
-  correlationId?: string
-): Promise<any> {
-  if (!CENTRAL_GPT_URL || !CENTRAL_GPT_KEY) {
-    console.warn(
-      "[seo-worker] CENTRAL_GPT_URL/CENTRAL_GPT_KEY not set; returning raw_payload as seo output"
-    );
-    return rawPayload;
+  if (!ingestionId) {
+    const msg = "[seo-worker] job missing ingestionId; skipping";
+    console.warn(msg, { jobId: job.id, data: job.data });
+    await job.log(msg);
+    return { ok: false, error: "missing_ingestionId" };
   }
 
-  const body = {
-    module: "seo",
-    payload: rawPayload,
-    correlation_id: correlationId || undefined,
+  const url = `${AVIDIA_APP_BASE_URL.replace(/\/+$/, "")}/api/v1/seo`;
+
+  const payload: Record<string, unknown> = {
+    ingestionId,
+    // Optional context (the /api/v1/seo handler can ignore these if it wants)
+    userId: userId ?? undefined,
+    tenantId: tenantId ?? undefined,
+    trigger: "seo-worker",
   };
 
-  const res = await fetch(CENTRAL_GPT_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${CENTRAL_GPT_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  let bodyText = "";
 
-  const text = await res.text();
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(AVIDIA_INTERNAL_WORKER_KEY
+          ? { "x-internal-worker-key": AVIDIA_INTERNAL_WORKER_KEY }
+          : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+
+    bodyText = await res.text();
+  } catch (err: any) {
+    const msg = `[seo-worker] network error calling ${url}: ${
+      err?.message || String(err)
+    }`;
+    console.error(msg);
+    await job.log(msg);
+    throw err;
+  }
+
   let json: any = null;
   try {
-    json = text ? JSON.parse(text) : null;
+    json = bodyText ? JSON.parse(bodyText) : null;
   } catch {
-    // ignore JSON parse errors below, we’ll surface the raw body
+    // Not fatal; we still have bodyText for debugging.
   }
 
   if (!res.ok) {
-    throw new Error(
-      `central GPT seo error: ${res.status} ${
-        json ? JSON.stringify(json) : text
-      }`
-    );
+    const msg = `[seo-worker] /api/v1/seo returned ${res.status}: ${
+      json ? JSON.stringify(json) : bodyText
+    }`;
+    console.error(msg);
+    await job.log(msg);
+    // Re-throw so BullMQ marks job as failed.
+    throw new Error(msg);
   }
 
-  // You can adjust this if your API returns seo under a different shape
-  const seo = json?.seo ?? json ?? rawPayload;
-  return seo;
+  const msg = `[seo-worker] SEO generated for ingestion ${ingestionId}`;
+  console.log(msg);
+  await job.log(msg);
+
+  return {
+    ok: true,
+    status: res.status,
+    body: json ?? bodyText,
+  };
 }
 
-async function updateDiagnostics(
-  jobId: string,
-  seoDiagnostics: Record<string, any>
-): Promise<void> {
-  const { data, error } = await supabase
-    .from("product_ingestions")
-    .select("diagnostics")
-    .eq("id", jobId)
-    .maybeSingle();
-
-  if (error) {
-    console.warn(
-      `[seo-worker] failed to load diagnostics for job=${jobId}`,
-      error.message || error
+// This is the function BullMQ will use as the processor.
+export async function processSeoJob(job: Job<SeoJobPayload>) {
+  try {
+    return await runSeoForIngestion(job);
+  } catch (err: any) {
+    console.error(
+      "[seo-worker] processSeoJob error:",
+      err?.message || String(err)
     );
-    return;
+    throw err;
   }
+}
 
-  const existingDiagnostics = (data?.diagnostics as any) || {};
-  const newDiagnostics = {
-    ...existingDiagnostics,
-    seo_call: {
-      ...(existingDiagnostics.seo_call || {}),
-      ...seoDiagnostics,
-    },
+// -----------------------------------------------------------------------------
+// Worker bootstrap (side-effect on import)
+// -----------------------------------------------------------------------------
+
+// If REDIS_URL is not set, we do NOT start a worker.
+// This keeps the ingest-api deploy stable even if Redis is not configured yet.
+if (!REDIS_URL) {
+  console.warn(
+    "[seo-worker] REDIS_URL not set; SEO BullMQ worker will NOT be started. " +
+      "This is fine if you're running SEO synchronously via /api/v1/seo only."
+  );
+} else {
+  const workerOptions: WorkerOptions = {
+    connection: { url: REDIS_URL },
+    concurrency: 1,
   };
 
-  const { error: updErr } = await supabase
-    .from("product_ingestions")
-    .update({
-      diagnostics: newDiagnostics,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", jobId);
-
-  if (updErr) {
-    console.warn(
-      `[seo-worker] failed to update diagnostics for job=${jobId}`,
-      updErr.message || updErr
-    );
-  }
-}
-
-/**
- * Main BullMQ job processor for SEO.
- */
-export async function processor(
-  job: Job<SeoJobPayload>
-): Promise<{ ok: boolean; seo: any }> {
-  const { jobId, tenant_id, raw_payload, correlation_id } = job.data || {};
-
-  if (!jobId) {
-    throw new Error("[seo-worker] jobId is required in job.data");
-  }
-
-  if (!raw_payload) {
-    throw new Error("[seo-worker] raw_payload is required in job.data");
-  }
-
-  console.log(
-    `[seo-worker] start job=${jobId} tenant=${tenant_id || "n/a"}`
+  const worker = new Worker<SeoJobPayload>(
+    SEO_QUEUE_NAME,
+    processSeoJob,
+    workerOptions
   );
 
-  let seo: any;
-  const startedAt = new Date().toISOString();
-
-  try {
-    seo = await callSeoModel(raw_payload, correlation_id);
-  } catch (err: any) {
-    console.error(
-      `[seo-worker] seo model call failed for job=${jobId}`,
-      err?.message || err
+  worker.on("completed", (job, result) => {
+    console.log(
+      "[seo-worker] job completed",
+      { jobId: job.id, ingestionId: job.data?.ingestionId },
+      { result }
     );
-
-    await updateDiagnostics(jobId, {
-      last_error: String(err?.message || err),
-      last_error_at: new Date().toISOString(),
-    });
-
-    throw err;
-  }
-
-  // Persist SEO payload into product_ingestions.normalized_payload
-  try {
-    const { error } = await supabase
-      .from("product_ingestions")
-      .update({
-        normalized_payload: seo,
-        status: "completed",
-        completed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", jobId);
-
-    if (error) {
-      console.error(
-        `[seo-worker] error updating product_ingestions for job=${jobId}`,
-        error.message || error
-      );
-      throw error;
-    }
-
-    await updateDiagnostics(jobId, {
-      last_success_at: new Date().toISOString(),
-      started_at: startedAt,
-    });
-
-    console.log(`[seo-worker] completed job=${jobId}`);
-  } catch (err: any) {
-    console.error(
-      `[seo-worker] error persisting seo for job=${jobId}`,
-      String(err)
-    );
-    throw err;
-  }
-
-  return { ok: true, seo };
-}
-
-// Spin up the worker when this module is run directly
-if (require.main === module) {
-  console.log("[seo-worker] Starting SEO worker on queue 'seo' ...");
-  const worker = new Worker("seo", processor as any, {
-    connection,
-    concurrency: 1,
-  });
-
-  worker.on("completed", (job) => {
-    console.log(`[seo-worker] job completed id=${job.id}`);
   });
 
   worker.on("failed", (job, err) => {
     console.error(
-      `[seo-worker] job failed id=${job?.id}`,
-      err?.message || err
+      "[seo-worker] job failed",
+      { jobId: job?.id, ingestionId: job?.data?.ingestionId },
+      err
     );
   });
-}
 
-export default processor;
+  console.log(
+    `[seo-worker] BullMQ worker started on queue "${SEO_QUEUE_NAME}" with concurrency=1`
+  );
+}
