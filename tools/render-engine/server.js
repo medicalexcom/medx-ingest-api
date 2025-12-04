@@ -14,8 +14,8 @@ import { mountCentralGpt } from "./central-gpt.mjs";
 const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || "dev-secret";
 const INGEST_SECRET = process.env.INGEST_SECRET || ENGINE_SECRET;
 const INGEST_CALLBACK_TIMEOUT_MS = Number(
-  process.env.INGEST_CALLBACK_TIMEOUT_MS || 10000
-);
+  process.env.INGEST_CALLBACK_TIMEOUT_MS || "10000"
+) || 10000;
 
 /**
  * Best-effort HMAC verification for inbound /ingest calls from AvidiaTech.
@@ -94,9 +94,7 @@ export async function mountRenderEngine(app) {
       typeof maybeDescribe.mountDescribeHandler === "function"
     ) {
       maybeDescribe.mountDescribeHandler(app);
-      console.log(
-        "render-engine: describe-handler mounted via mountDescribeHandler (external)"
-      );
+      console.log("render-engine: mountDescribeHandler loaded (external)");
     }
   } catch (err) {
     console.warn(
@@ -105,20 +103,13 @@ export async function mountRenderEngine(app) {
     );
   }
 
-  // Mount central GPT orchestrator so the Next.js app can point CENTRAL_GPT_URL
-  // at this service, reusing the same custom_gpt_instructions.md prompts.
+  // Mount central GPT orchestrator for AvidiaTech (SEO, Describe, etc.)
   try {
-    if (typeof mountCentralGpt === "function") {
-      await mountCentralGpt(app);
-      console.log("render-engine: central GPT mounted at /central-gpt");
-    } else {
-      console.warn(
-        "render-engine: mountCentralGpt export not found; skipping central GPT mount"
-      );
-    }
+    await mountCentralGpt(app);
+    console.log("render-engine: central GPT orchestrator mounted at /central-gpt");
   } catch (err) {
     console.error(
-      "render-engine: mountCentralGpt failed during startup:",
+      "render-engine: failed to mount central GPT orchestrator:",
       err && err.stack ? err.stack : String(err)
     );
   }
@@ -158,25 +149,27 @@ export async function mountRenderEngine(app) {
       }
 
       console.log(
-        "[render-engine] received ingest job %s url= %s callback_url= %s",
+        "render-engine: received ingest job %s url=%s callback_url=%s",
         job_id,
         url,
         callback_url
       );
 
-      const startedAt = new Date().toISOString();
-
       let normalizedPayload = null;
       let error = null;
 
       try {
-        normalizedPayload = await runIngest(url, options || {});
+        // For now we still use the demo runIngest implementation.
+        // Later you will swap this for the real scraper/normalizer.
+        const result = await runIngest(url, options || {});
+        normalizedPayload = result && result.normalizedPayload ? result.normalizedPayload : result;
       } catch (innerErr) {
-        error = innerErr;
         console.error(
-          "render-engine: error during runIngest:",
+          "render-engine: error during runIngest for job %s:",
+          job_id,
           innerErr && innerErr.stack ? innerErr.stack : String(innerErr)
         );
+        error = innerErr;
       }
 
       const completedAt = new Date().toISOString();
@@ -194,13 +187,15 @@ export async function mountRenderEngine(app) {
         specs_payload: null,
         manuals_payload: null,
         variants_payload: null,
-        correlation_id: correlation_id || null,
-        tenant_id: tenant_id || null,
-        options: options || {},
-        export_type: export_type || "JSON",
-        action: action || "ingest",
-        started_at: startedAt,
-        completed_at: completedAt,
+        diagnostics: {
+          engine: "render-engine-demo",
+          engine_version: "2025-12-01",
+          correlation_id,
+          tenant_id,
+          export_type: export_type || "JSON",
+          action: action || "ingest",
+          completed_at: completedAt,
+        },
       };
 
       // Fire callback to the Next.js /api/v1/ingest/callback route
@@ -217,10 +212,23 @@ export async function mountRenderEngine(app) {
             INGEST_CALLBACK_TIMEOUT_MS
           );
 
+          const callbackJson = JSON.stringify(callbackBody);
+          const callbackSignature = INGEST_SECRET
+            ? crypto
+                .createHmac("sha256", INGEST_SECRET)
+                .update(callbackJson)
+                .digest("hex")
+            : "";
+
           const resp = await fetch(callback_url, {
             method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(callbackBody),
+            headers: {
+              "content-type": "application/json",
+              ...(callbackSignature
+                ? { "x-avidiatech-signature": callbackSignature }
+                : {}),
+            },
+            body: callbackJson,
             signal: controller.signal,
           });
 
@@ -234,9 +242,9 @@ export async function mountRenderEngine(app) {
           }
 
           console.log(
-            "[render-engine] callback success for job %s response: %s",
-            job_id,
-            callbackText || `status=${resp.status}`
+            "[render-engine] callback response status=%s body=%s",
+            resp.status,
+            callbackText
           );
         } catch (cbErr) {
           console.error(
@@ -247,64 +255,38 @@ export async function mountRenderEngine(app) {
         }
       }
 
-      // Respond 202 to the caller (Next.js) to indicate async processing.
       return res.status(202).json({
-        ok: !error,
+        ok: true,
         job_id,
-        message: error
-          ? "ingest_failed"
-          : "ingest_completed_and_callback_sent",
+        message: "ingest_completed_and_callback_sent",
       });
     } catch (err) {
       console.error(
-        "render-engine: unhandled error in POST /ingest:",
+        "render-engine: unexpected error in POST /ingest:",
         err && err.stack ? err.stack : String(err)
       );
-      if (!res.headersSent) {
-        return res
-          .status(500)
-          .json({ ok: false, error: "internal_error", message: String(err) });
-      }
+      return res
+        .status(500)
+        .json({ ok: false, error: "internal_error", message: String(err) });
     }
   });
-
-  // Mount /describe via gptInstructionsEnforcer (schema-enforced GPT endpoint)
-  (async () => {
-    try {
-      const gptModule = await import("./gptInstructionsEnforcer.mjs");
-      if (gptModule && typeof gptModule.mountDescribeRoute === "function") {
-        console.log("gptEnforcer: mounting /describe (structured schema enforcement)");
-        await gptModule.mountDescribeRoute(app);
-        console.log("gptEnforcer: /describe mounted (structured schema enforcement)");
-        console.log("render-engine: mountDescribeRoute completed successfully");
-      } else {
-        console.warn(
-          "render-engine: gptInstructionsEnforcer.mjs loaded but mountDescribeRoute not found"
-        );
-      }
-    } catch (err) {
-      console.error(
-        "render-engine: mountDescribeRoute failed during startup:",
-        err && err.stack ? err.stack : String(err)
-      );
-    }
-  })();
 }
 
-// ---------- Internal helper: simple ingest implementation ----------
-async function runIngest(url, options) {
-  // TODO: replace this with your real scraping / normalization logic.
-  // For now this returns a deterministic sample payload so the pipeline works end-to-end.
+/**
+ * Demo implementation of runIngest.
+ * This is still the hard-coded stub that you will eventually replace
+ * with the real scraper + normalizer.
+ */
+function runIngest(url, options = {}) {
+  console.log("render-engine: runIngest demo implementation", { url, options });
+
   return {
     source_url: url,
-    options: options || {},
+    options,
     seo: {
       h1: `Product for ${url}`,
       title: `SEO title for ${url}`,
-      metaTitle: `SEO title for ${url}`,
-      pageTitle: `SEO title for ${url}`,
-      metaDescription: `SEO meta description for ${url}`,
-      seoShortDescription: `Short SEO summary for ${url}`,
+      description: `Short description for ${url}`,
     },
     features: [
       `Key feature for ${url}`,
