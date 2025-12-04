@@ -7,6 +7,8 @@
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
+import { mountCentralGpt } from "./central-gpt.mjs";
+
 import crypto from "node:crypto";
 import OpenAI from "openai";
 
