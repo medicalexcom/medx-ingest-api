@@ -8,12 +8,14 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
 import crypto from "node:crypto";
-import { Configuration, OpenAIApi } from "openai";
+import OpenAI from "openai";
 
 const ENGINE_SECRET = process.env.RENDER_ENGINE_SECRET || "dev-secret";
 const INGEST_SECRET = process.env.INGEST_SECRET || ENGINE_SECRET;
 const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
 const fetchFn = globalThis.fetch;
+
+const openai = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
 
 // ---------- HMAC helper (must match AvidiaTech app side) ----------
 function verifyIngestSignature(rawBody, signature, secret) {
@@ -126,10 +128,8 @@ export function mountRenderEngine(app) {
 
       try {
         let response;
-        if (OPENAI_KEY) {
-          const configuration = new Configuration({ apiKey: OPENAI_KEY });
-          const client = new OpenAIApi(configuration);
-
+        if (openai) {
+          // OpenAI v4 client
           const prompt = `You are a normalization pipeline. Input:
 name: ${name}
 shortDescription: ${shortDescription}
@@ -142,7 +142,7 @@ Sections must contain overview, features (array), specsSummary, includedItems, m
 SEO must contain h1, pageTitle, metaDescription, seoShortDescription.
 `;
 
-          const completion = await client.createChatCompletion({
+          const completion = await openai.chat.completions.create({
             model: "gpt-4o-mini",
             messages: [
               {
@@ -156,7 +156,9 @@ SEO must contain h1, pageTitle, metaDescription, seoShortDescription.
             temperature: 0.2,
           });
 
-          const text = completion.data.choices?.[0]?.message?.content ?? "";
+          const text =
+            completion.choices?.[0]?.message?.content?.trim() ?? "";
+
           try {
             response = JSON.parse(text);
           } catch (e) {
@@ -228,7 +230,9 @@ SEO must contain h1, pageTitle, metaDescription, seoShortDescription.
   // ---------------------------------------------------------------------------
   // New: POST /ingest for AvidiaTech ingest pipeline
   // ---------------------------------------------------------------------------
-  console.log("render-engine: mounting POST /ingest handler for AvidiaTech ingest");
+  console.log(
+    "render-engine: mounting POST /ingest handler for AvidiaTech ingest"
+  );
 
   app.post("/ingest", async (req, res) => {
     try {
