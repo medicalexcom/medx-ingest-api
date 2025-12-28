@@ -1,6 +1,6 @@
 // tools-render-engine/server.js
 // Render-engine plugin for medx-ingest-api
-// - Attaches /ingest for the AvidiaTech ingest pipeline
+// - Attaches /ingest for the AvidiaTech ingest pipeline (async callback flow)
 // - Attaches /describe through gptInstructionsEnforcer
 // - Attaches /central-gpt via mountCentralGpt so AvidiaTech can call a single GPT orchestrator
 // - DOES NOT call app.listen; the root server.js owns the port.
@@ -16,6 +16,16 @@ const INGEST_SECRET = process.env.INGEST_SECRET || ENGINE_SECRET;
 const INGEST_CALLBACK_TIMEOUT_MS = Number(
   process.env.INGEST_CALLBACK_TIMEOUT_MS || "10000"
 ) || 10000;
+
+const INGEST_SELF_TIMEOUT_MS = Number(
+  process.env.INGEST_SELF_TIMEOUT_MS || "60000"
+) || 60000;
+
+// If your root server runs on a different port, set this.
+// In Render, this is usually the same process/port.
+const SELF_BASE_URL =
+  process.env.INGEST_SELF_BASE_URL ||
+  (process.env.PORT ? `http://127.0.0.1:${process.env.PORT}` : "http://127.0.0.1:3000");
 
 /**
  * Best-effort HMAC verification for inbound /ingest calls from AvidiaTech.
@@ -59,6 +69,166 @@ function verifyIngestSignature(bodyObj, headerValue) {
     // Fail-open so we don't accidentally brick the pipeline.
     return true;
   }
+}
+
+function toNonEmptyString(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+function looksUrlDerivedName(name) {
+  const s = String(name || "").toLowerCase();
+  return (
+    s.includes("http://") ||
+    s.includes("https://") ||
+    s.includes("www.") ||
+    s.includes("product for ")
+  );
+}
+
+function coerceSpecsObject(input) {
+  const out = {};
+  if (!input) return out;
+
+  if (typeof input === "object" && !Array.isArray(input)) {
+    for (const [k, v] of Object.entries(input)) {
+      const kk = toNonEmptyString(k);
+      const vv = toNonEmptyString(v);
+      if (kk && vv) out[kk] = vv;
+    }
+    return out;
+  }
+
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item || typeof item !== "object") continue;
+      const key = toNonEmptyString(item.key);
+      const val = toNonEmptyString(item.value);
+      if (key && val) {
+        out[key] = val;
+        continue;
+      }
+      const entries = Object.entries(item);
+      if (entries.length === 1) {
+        const [k, v] = entries[0];
+        const kk = toNonEmptyString(k);
+        const vv = toNonEmptyString(v);
+        if (kk && vv) out[kk] = vv;
+      }
+    }
+    return out;
+  }
+
+  return out;
+}
+
+/**
+ * Call the local "real" ingest logic (GET /ingest?url=...).
+ * This reuses the canonical scraper/normalizer pipeline already implemented in the main server.
+ */
+async function callLocalIngest(url, options = {}) {
+  const ingestUrl = new URL(`${SELF_BASE_URL.replace(/\/$/, "")}/ingest`);
+  ingestUrl.searchParams.set("url", url);
+
+  // Default flags for robust extraction (can be overridden by options)
+  // These match patterns used elsewhere in repo (e.g. queueRoutes.js).
+  ingestUrl.searchParams.set("harvest", "true");
+  ingestUrl.searchParams.set("sanitize", "true");
+
+  if (options.markdown === true) ingestUrl.searchParams.set("markdown", "true");
+  if (options.debug === true) ingestUrl.searchParams.set("debug", "true");
+  if (options.wait != null) ingestUrl.searchParams.set("wait", String(options.wait));
+  if (options.timeout != null) ingestUrl.searchParams.set("timeout", String(options.timeout));
+  if (options.mode != null) ingestUrl.searchParams.set("mode", String(options.mode));
+  if (options.mainonly != null) ingestUrl.searchParams.set("mainonly", String(options.mainonly));
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), INGEST_SELF_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(ingestUrl.toString(), {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+
+    const text = await resp.text().catch(() => "");
+    if (!resp.ok) {
+      const err = new Error(`local_ingest_failed status=${resp.status} body=${text.slice(0, 500)}`);
+      err.status = resp.status;
+      throw err;
+    }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`local_ingest_invalid_json body=${text.slice(0, 500)}`);
+    }
+
+    if (json && typeof json === "object" && json.error) {
+      throw new Error(`local_ingest_error ${String(json.error)}`);
+    }
+
+    return json;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Build a canonical Avidia Standard payload grounded from real scraped ingest output.
+ * We DO NOT allow placeholder names like "Product for <url>".
+ */
+function buildAvidiaStandardNormalizedPayloadFromIngestResult(ingestResult, sourceUrl) {
+  const nameRaw =
+    toNonEmptyString(ingestResult?.name_raw) ||
+    toNonEmptyString(ingestResult?.name_best) ||
+    toNonEmptyString(ingestResult?.name) ||
+    toNonEmptyString(ingestResult?.title) ||
+    null;
+
+  const name =
+    nameRaw && !looksUrlDerivedName(nameRaw) ? nameRaw : null;
+
+  const brand =
+    toNonEmptyString(ingestResult?.brand) ||
+    toNonEmptyString(ingestResult?.manufacturer) ||
+    null;
+
+  const specs =
+    coerceSpecsObject(ingestResult?.specs) ||
+    {};
+
+  const specsCount = Object.keys(specs).length;
+
+  if (!name) {
+    const err = new Error("missing_or_placeholder_name");
+    err.details = { nameRaw };
+    throw err;
+  }
+  if (!specsCount) {
+    const err = new Error("missing_specs");
+    err.details = { specsCount };
+    throw err;
+  }
+
+  return {
+    format: "avidia_standard",
+    name,
+    brand: brand || null,
+    specs,
+
+    // extra grounding fields that avidia app may store/use
+    name_raw: nameRaw,
+    description_raw: toNonEmptyString(ingestResult?.description_raw) || null,
+    features_raw: Array.isArray(ingestResult?.features_raw) ? ingestResult.features_raw : null,
+
+    sku: toNonEmptyString(ingestResult?.sku) || toNonEmptyString(ingestResult?.mpn) || null,
+    images: Array.isArray(ingestResult?.images) ? ingestResult.images : null,
+    pdf_manual_urls: Array.isArray(ingestResult?.pdf_manual_urls) ? ingestResult.pdf_manual_urls : null,
+  };
 }
 
 /**
@@ -114,7 +284,7 @@ export async function mountRenderEngine(app) {
     );
   }
 
-  // POST /ingest – main AvidiaTech ingest entrypoint
+  // POST /ingest – main AvidiaTech ingest entrypoint (async callback flow)
   console.log("render-engine: mounting POST /ingest handler for AvidiaTech ingest");
   app.post("/ingest", async (req, res) => {
     try {
@@ -155,17 +325,17 @@ export async function mountRenderEngine(app) {
         callback_url
       );
 
+      let ingestResult = null;
       let normalizedPayload = null;
       let error = null;
 
       try {
-        // For now we still use the demo runIngest implementation.
-        // Later you will swap this for the real scraper/normalizer.
-        const result = await runIngest(url, options || {});
-        normalizedPayload = result && result.normalizedPayload ? result.normalizedPayload : result;
+        // Reuse the real scraper/normalizer via local GET /ingest
+        ingestResult = await callLocalIngest(url, options || {});
+        normalizedPayload = buildAvidiaStandardNormalizedPayloadFromIngestResult(ingestResult, url);
       } catch (innerErr) {
         console.error(
-          "render-engine: error during runIngest for job %s:",
+          "render-engine: error during ingest for job %s:",
           job_id,
           innerErr && innerErr.stack ? innerErr.stack : String(innerErr)
         );
@@ -181,20 +351,24 @@ export async function mountRenderEngine(app) {
         ingestion_id: job_id, // We treat job_id === ingestionId in the dashboard.
         status,
         error: error ? String(error && error.message ? error.message : error) : null,
-        raw_payload: null,
+
+        // IMPORTANT: send real data (no null stubs)
+        raw_payload: ingestResult,
         normalized_payload: normalizedPayload,
-        seo_payload: null,
-        specs_payload: null,
-        manuals_payload: null,
-        variants_payload: null,
+        seo_payload: ingestResult?.seo || null,
+        specs_payload: ingestResult?.specs || null,
+        manuals_payload: ingestResult?.manuals || ingestResult?.pdf_manual_urls || null,
+        variants_payload: ingestResult?.variants || null,
+
         diagnostics: {
-          engine: "render-engine-demo",
-          engine_version: "2025-12-01",
+          engine: "render-engine",
+          engine_version: "2025-12-28",
           correlation_id,
           tenant_id,
           export_type: export_type || "JSON",
           action: action || "ingest",
           completed_at: completedAt,
+          self_base_url: SELF_BASE_URL,
         },
       };
 
@@ -270,36 +444,6 @@ export async function mountRenderEngine(app) {
         .json({ ok: false, error: "internal_error", message: String(err) });
     }
   });
-}
-
-/**
- * Demo implementation of runIngest.
- * This is still the hard-coded stub that you will eventually replace
- * with the real scraper + normalizer.
- */
-function runIngest(url, options = {}) {
-  console.log("render-engine: runIngest demo implementation", { url, options });
-
-  return {
-    source_url: url,
-    options,
-    seo: {
-      h1: `Product for ${url}`,
-      title: `SEO title for ${url}`,
-      description: `Short description for ${url}`,
-    },
-    features: [
-      `Key feature for ${url}`,
-      "Secondary feature",
-    ],
-    description_html: `<p>Sample description generated for ${url}. Replace runIngest() with real scraper output.</p>`,
-    normalizedPayload: {
-      name: `Product for ${url}`,
-      brand: null,
-      specs: {},
-      format: "avidia_standard",
-    },
-  };
 }
 
 // Also export default for convenience, in case the root uses a default import.
