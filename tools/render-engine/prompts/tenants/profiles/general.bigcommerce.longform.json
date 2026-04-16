@@ -1,0 +1,23 @@
+{
+  "key": "general.bigcommerce.longform",
+  "useCanonicalFile": false,
+  "promptParts": [
+    "core/grounding.md",
+    "core/compliance.md", 
+    "core/formatting.md",
+    "core/variants.md",
+    "channels/bigcommerce-longform.md",
+    "domains/general-ecommerce.md"
+  ],
+  "schemaKey": "describeSchema.json",
+  "linterKey": "generalBigcommerceSeo",
+  "metaTitleSuffix": "| {{STORE_NAME}}",
+  "h1Length": { "min": 60, "max": 110 },
+  "internalLinks": false,
+  "manualsSection": true,
+  "storeNameVar": "{{STORE_NAME}}",
+  "description": "General ecommerce store format for non-medical products with BigCommerce longform output",
+  "channels": ["bigcommerce"],
+  "domains": ["general"],
+  "tenants": []
+}
