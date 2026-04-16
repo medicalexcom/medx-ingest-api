@@ -35,6 +35,8 @@ printing a filler phrase. Record gaps only in desc_audit.data_gaps (machine fiel
 * Allow up to **2 revision passes**. If `name_len < 90` after the second pass, the name must be expanded automatically using additional grounded feature descriptors (materials, mechanisms, dimensions, capacities) until it reaches at least 90 characters. Do not emit a final name under 90 characters.
 * **Return** `name_len` and `name_length_ok` in the function output.
 * Also produce `short_name_60` (≤ 60 chars) for use outside H1.
+* **Short-name brand normalization (multi-word brands):** When generating `short_name_60`, if the brand contains 2 or more words, use only the **first brand word** in the short name. Example: brand = “Aspen Surgical” → short_name starts with “Aspen”, not “Aspen Surgical”.
+* Preserve the full brand in `name_best` (H1) unless another H1 sanitization rule requires removal of invalid tokens.
 
 ### 2.2 Draft → Audit → Auto-Revise (max 2 passes)
 
@@ -208,6 +210,10 @@ Perform up to **three full revision iterations** for the description package.
 * if the score cannot reach 9.8 due to missing factual inputs, return the highest-scoring version and include a `data_gaps` array.”
 * “Audit must re-run until `desc_audit.score === 9.8` or three passes max.”
 * “If blocked by missing data, include a `data_gaps` block.”
+* **H1 sanitization repair:** Remove GTIN labels/values, trailing commas, dangling prepositions, and incomplete packaging endings in `name_best`; then re-audit H1 length and formatting.
+* **H1 packaging simplification:** If H1 contains more than one packaging form/count phrase, keep only one buyer-relevant packaging expression and move remaining packaging detail to Product Specifications / variants (machine fields and customer-facing specs as applicable).
+* **Short-name normalization:** If `short_name_60` starts with a multi-word brand, rebuild it using only the first brand word (e.g., “Aspen Surgical” → “Aspen”).
+* **H1 de-duplication repair:** Remove duplicated opening tokens, repeated brand words, and repeated adjacent words/phrases in `name_best` (especially duplicates introduced by source title + brand concatenation), then re-check H1 length (90–110), punctuation, and grammar.
 
 #### 2.2.4 Result Emission (Tools Mode)
 * When the draft and audit are complete, return a single **function call** to `auditResult` with:
@@ -309,8 +315,13 @@ Warning codes:
 When these instructions run within Google Apps Script (`Code.gs`):
 * Treat missing or malformed GPT responses as recoverable warnings.  
 * Retry the same payload once automatically.  
-* If the retry fails, mark `QA Status = FAIL` and populate the `Error` column with the GPT response text for operator review.  
-This prevents silent failures in batch or wizard modes.
+* If the retry fails, mark `QA Status = FAIL` and populate the `Error` column with the GPT response text for operator review. 
+* If QA notes or sync feedback contain a directive equivalent to **“failed sync and fix”**, treat it as a recoverable auto-remediation request:
+  * Parse the failure reason / QA note.
+  * Apply targeted fixes to the affected fields only (do not rewrite unrelated sections).
+  * Re-run the audit once.
+  * Re-attempt sync once with the corrected payload.
+* If the second sync attempt fails, mark `QA Status = FAIL` and write the final failure reason to the `Error` column for operator review.
 
 --- 
 
@@ -404,6 +415,10 @@ Markdown is permitted **only in this instruction file** for clarity. The **final
 2. Starts with brand plus primary keyword.
 3. Includes one or two high-value specs.
 4. No SKUs, IDs, trademarks, or redundant words.
+5. Does not end with a comma or dangling preposition/incomplete phrase.
+6. Does not contain SKU OR GTIN values.
+7. Includes no more than one packaging form/count phrase.
+8. No duplicated words, repeated brand tokens, or duplicated opening phrase fragments.
 
 **Example template**
 `[brand & product] – [top spec], [secondary spec]`
@@ -416,10 +431,16 @@ Markdown is permitted **only in this instruction file** for clarity. The **final
 
 **Compliance Addendum — H1 Sanitization Rules**
 
-* Product Name (H1) **must not contain** any of the following:
+* Product Name (H1) **must not contain**:
   * SKUs, model numbers, part numbers, or product codes (e.g., “ST-630-B-2R”, “50-66160”, “SKU: 12345”).
+  * GTIN labels or GTIN values (e.g., “GTIN”, “GTIN: 12345678901234”, “GTIN Number 123…”).
   * Country of manufacture phrases such as “Made in USA” or “Manufactured in China”.
   * Trademark, service mark, or copyright symbols (“™”, “®”, “℠”, “©”).
+  * More than one packaging form/count phrase in the same H1 (e.g., “case of 100, box of 10”). If multiple packaging formats exist in inputs, keep only the most buyer-relevant single packaging expression in H1 and move full packaging detail to Product Specifications / variants.
+* Product Name (H1) **must not end with**:
+  * A comma.
+  * A dangling preposition or incomplete packaging phrase (e.g., endings like “of”, “for”, “with”, “case of”, “box of”).
+* If any invalid ending is detected, GPT must auto-trim or rewrite the trailing segment and re-check H1 length compliance (90–110).
 * When any of these elements appear in the source title or manufacturer data, GPT must remove them automatically.
 * H1 revisions must retain all meaningful descriptive parts while excluding regulatory or internal identifiers.
 * Example transformation:
