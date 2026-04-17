@@ -1,29 +1,46 @@
-# Core Grounding Rules
+# Core Grounding Rules (All Profiles)
 
-GPT must follow all steps and instructions exactly as written, no omissions, modifications, or restructuring.
-Any deviation from required structure or grounded content must be treated as an error and corrected. Variant detection gaps may surface as warnings and do not block sync or reduce score.
-Only describe information explicitly present in the input. **Customer-facing copy must never contain placeholders** (e.g., "information not disclosed", "warranty information not available", "info not available", "not available", "not provided", "unknown", "N/A", "NA", "tbd", "to be determined", "unspecified", "varies by manufacturer"). When any required value is missing or ambiguous, OMIT the entire line/bullet/FAQ instead of printing a filler phrase. Record gaps only in desc_audit.data_gaps (machine field).
+These rules are mandatory for every tenant, domain, and channel profile.
 
-**Grounding Contract.** All customer-facing claims must be explicitly grounded in the provided inputs (`dom`, `pdf_text`, `pdf_docs`, `browsed_text`). If a claim cannot be traced to one of these sources, omit it from the customer-facing description. Do not infer or generalize beyond the inputs.
+## 1) Allowed Evidence Sources
+Use only the provided packet inputs as evidence:
+- `dom`
+- `pdf_text`
+- `pdf_docs`
+- `browsed_text`
+- `variantOptions` / `variants` (when present)
 
-**No Guessing Policy.** Do not estimate values, ranges, materials, weights, capacities, compatible parts, or warranty terms. If a value is absent or ambiguous, omit it from the body and record the omission in `desc_audit.data_gaps` (machine field only).
+If a claim cannot be traced to these sources, omit it.
 
-**Source Priority (authoritative order).** `pdf_text` and `pdf_docs` > `dom` > `browsed_text`. When sources disagree, prefer the higher-authority source and note the conflict in `desc_audit.conflicts`.
+## 2) Source Priority
+When sources conflict, resolve in this order:
+1. `pdf_text` and `pdf_docs`
+2. `dom`
+3. `browsed_text`
 
-**Auto-Revision Mandate.** If the description audit finds any violation or a score below 9.8, GPT must revise the description and re-audit, up to three iterations, without changing `name_best`. Return only the final, highest-scoring version along with the `desc_audit` block summarizing the process.
+Record conflicts in machine fields (`desc_audit.conflicts`).
 
-**Scope note about Markdown.** Markdown and code blocks are allowed in this instruction file only for clarity. The **final product output** must not Markdown.
+## 3) No-Guessing Policy
+Never infer or estimate:
+- dimensions, weight, capacities, material composition
+- compatibility or fitment
+- warranty terms
+- certification/compliance details
+- package quantity or included accessories
 
----
+If absent, omit from customer-facing text and add to `desc_audit.data_gaps`.
 
-## DATA SOURCE INTEGRATION (for GPT use only — not to be output)
+## 4) Placeholder Prohibition
+Do not output placeholder language in customer-facing copy such as:
+- "not available", "not provided", "unknown", "N/A", "TBD"
 
-* Inputs: dom, browsed_text, pdf_text, pdf_docs, plus structured packet fields such as variant_matrix, category_path, internal_links, and warranty_text when present.
-* **Authority order**: `pdf_text` refers to text extracted from PDF manuals. Both `pdf_text` and `pdf_docs` have higher authority than `dom`, which is above `browsed_text`.
-* Use `dom` for base details such as name, brand, SKU, images. Merge additional features and specs from `pdf_text` and `browsed_text`.
-* Use `browsed_text` for extra bullets and descriptions not found elsewhere. Do not overwrite higher-priority sources.
-* When manuals are available or extracted manual text was used, the description **must** include the Manuals and Troubleshooting Guides section and surface the PDF links. Even if the model used `pdf_text` as the primary manual source, the corresponding PDF links (`pdf_docs`) should still appear in the final description.
-* For Manuals, derive link text from PDF titles (`pdf_docs`, `pdfs`, `manuals`, `pdf_manual_urls`, `manuals` or `anchors`)
-* Deduplicate overlapping details while preserving each unique fact. Do not combine or interpolate numbers.
-* **Evidence tags (machine-only):** For each spec and warranty term printed in the body, add a machine note under `desc_audit.evidence` listing `{field, value, source: (pdf_text|pdf_docs|dom|browsed_text), snippet_or_key}` to prove grounding.
-* **No fabrication:** Never infer materials, dimensions, capacities, or warranty coverage. If absent, omit from the body and record in `data_gaps`.
+If information is missing, omit the line/bullet instead.
+
+## 5) Deterministic Naming & Consistency
+- Keep product identity consistent across H1/title/body.
+- Avoid renaming product families between sections.
+- Keep URLs/slugs deterministic and clean.
+
+## 6) Repair Loop Contract
+If required fields are missing or blockers are detected, revise before final output.
+Return complete output, not partial patches.
