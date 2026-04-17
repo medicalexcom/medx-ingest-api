@@ -1,0 +1,22 @@
+{
+  "key": "general.amazon.listing",
+  "description": "General ecommerce Amazon listing profile",
+  "useCanonicalFile": false,
+  "promptParts": [
+    "core/grounding.md",
+    "core/compliance.md",
+    "core/formatting.md",
+    "core/variants.md",
+    "channels/amazon-listing.md",
+    "domains/general-ecommerce.md"
+  ],
+  "schemaKey": "describeSchema.json",
+  "linterKey": "generalAmazonListing",
+  "h1Length": { "min": 60, "max": 200 },
+  "metaTitleSuffix": "",
+  "internalLinks": false,
+  "manualsSection": false,
+  "storeNameVar": "{{STORE_NAME}}",
+  "channels": ["amazon"],
+  "domains": ["general"]
+}
