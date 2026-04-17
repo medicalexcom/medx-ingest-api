@@ -1,0 +1,22 @@
+{
+  "key": "general.facebook.catalog",
+  "description": "General ecommerce Facebook catalog/shop profile",
+  "useCanonicalFile": false,
+  "promptParts": [
+    "core/grounding.md",
+    "core/compliance.md",
+    "core/formatting.md",
+    "core/variants.md",
+    "channels/facebook-catalog.md",
+    "domains/general-ecommerce.md"
+  ],
+  "schemaKey": "describeSchema.json",
+  "linterKey": "generalFacebookCatalog",
+  "h1Length": { "min": 40, "max": 120 },
+  "metaTitleSuffix": "",
+  "internalLinks": false,
+  "manualsSection": false,
+  "storeNameVar": "{{STORE_NAME}}",
+  "channels": ["facebook"],
+  "domains": ["general"]
+}
