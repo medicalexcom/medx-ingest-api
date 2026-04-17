@@ -1,15 +1,15 @@
 {
   "key": "medicalex.bigcommerce.longform",
+  "description": "MedicalEx canonical longform profile (backward-compatible default)",
   "useCanonicalFile": true,
-  "canonicalFile": "custom_gpt_instructions.md",
+  "canonicalFile": "custom_gpt_instructions-33.md",
   "schemaKey": "describeSchema.json",
   "linterKey": "medicalexBigcommerceSeo",
-  "metaTitleSuffix": "| MedicalEx",
   "h1Length": { "min": 90, "max": 110 },
+  "metaTitleSuffix": "| MedicalEx",
   "internalLinks": true,
   "manualsSection": true,
   "storeNameVar": "MedicalEx",
-  "description": "Complete MedicalEx medical equipment store format with full compliance, manual sections, and BigCommerce longform output",
   "channels": ["bigcommerce"],
   "domains": ["medical"],
   "tenants": ["medicalex"]
