@@ -415,5 +415,5 @@ export function extractFeaturesAndSpecsFromBrowseTabs(tabsObj) {
       texts.push(val);
     }
   }
-  return parseSalesforceFeaturesAndSpecs(texts);
+  return parseSalesforceFeaturesAndSpecs(texts); } /** ADD-ONLY: Extract the manufacturer SKU/item number from a Salesforce Commerce Cloud (Demandware) product page, e.g. dukal.com, which renders it as <div class="item-number">Item UBC-8029</div> near the product title rather than via itemprop/data-attr/JSON-LD. Related/recommended product cards reuse the item-number class without the u-uppercase class or the "Item " text prefix, so this only matches the primary product label. Returns "" if not found so callers can safely fall back to other signals. */ export function extractSalesforceSku(html) { const $ = cheerioLoad(html || ''); let sku = ''; const grab = (selector) => { $(selector).each((_, el) => { if (sku) return; const t = norm($(el).text()); const m = /^item\s+([A-Za-z0-9][A-Za-z0-9._\-\/]{1,40})$/i.exec(t); if (m) sku = m[1]; }); }; grab('.item-number.u-uppercase, .u-uppercase.item-number'); if (!sku) grab('.item-number'); return sku;
 }
