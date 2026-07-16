@@ -12,6 +12,7 @@ import { createWorker } from 'tesseract.js';
 import { removeNoise } from './mergeRaw.js';
 import setupQueueRoutes from './queueRoutes.js';
 import { extractVariants } from './variantExtractor.js';
+import { extractSalesforceSku } from './harvesters/salesforce.js';
 
 
 // Removed GPT-ready helper: no longer needed
@@ -1260,6 +1261,7 @@ function extractNormalized(baseUrl, html, opts) {
       push(v, "dom:data-attr");
     });
   
+    try { const demandwareSku = extractSalesforceSku(html); if (demandwareSku) push(demandwareSku, "dom:demandware-item-number"); } catch {}
     // 4) Labeled key:value in tables/lists/paras (SKU:, Product ID:, Item #, Model No., Code, etc.)
     const labelRx = /\b(sku|product\s*id|productid|item\s*(?:number|no|#)?|model\s*(?:number|no|#)?|part\s*(?:number|no|#)?|product\s*code|code|id)\b/i;
     const kvRx    = /\b(?:sku|product\s*id|productid|item\s*(?:number|no|#)?|model\s*(?:number|no|#)?|part\s*(?:number|no|#)?|product\s*code|code|id)\b[:\s#-]*([A-Za-z0-9][A-Za-z0-9._\-\/]{1,60})/i;
@@ -1294,7 +1296,8 @@ function extractNormalized(baseUrl, html, opts) {
       let s = 0;
       if (c.how.startsWith("sd"))            s += 5;
       else if (c.how === "og-product")       s += 4;
-      else if (c.how === "dom:itemprop=sku") s += 4;
+      else if (c.how === "dom:itemprop=sku") s += 4; 
+      else if (c.how === "dom:demandware-item-number") s += 4;
       else if (c.how === "dom:data-attr")    s += 3;
       else if (c.how === "dom:labeled")      s += 3;
       else if (c.how === "url:param")        s += 1;
