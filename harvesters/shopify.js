@@ -1,4 +1,4 @@
-import { norm, extractHtmLandText } from './common.js';
+import { norm, extractHtmlAndText } from './common.js';
 
 /**
  * Extract tabs from Shopify pages.
@@ -19,7 +19,7 @@ export function extractShopifyTabs($) {
     const title = norm($a.text());
     const $pane = $('#' + id);
     if ($pane.length) {
-      const { rawHtml, html, text } = extractHtmLandText($, $pane);
+      const { rawHtml, html, text } = extractHtmlAndText($, $pane);
       if (html || text) {
         results.push({ title, html, rawHtml, text, source: 'shopify' });
       }
@@ -30,7 +30,7 @@ export function extractShopifyTabs($) {
     const $panel = $(panel);
     // Find the nearest preceding header or use first heading inside
     let title = norm($panel.prev('.accordion__header').text() || $panel.find('h2,h3,h4').first().text());
-    const { rawHtml, html, text } = extractHtmLandText($, panel);
+    const { rawHtml, html, text } = extractHtmlAndText($, panel);
     if ((html || text) && title) {
       results.push({ title, html, rawHtml, text, source: 'shopify' });
     }

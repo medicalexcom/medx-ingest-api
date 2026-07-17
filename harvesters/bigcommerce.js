@@ -1,4 +1,4 @@
-import { norm, extractHtmLandText } from './common.js';
+import { norm, extractHtmlAndText } from './common.js';
 
 /**
  * Extract tabs from BigCommerce product pages.
@@ -16,7 +16,7 @@ export function extractBigCommerceTabs($) {
     const $pane = $('#' + id);
     if ($pane.length) {
       const title = name.charAt(0).toUpperCase() + name.slice(1);
-      const { rawHtml, html, text } = extractHtmLandText($, $pane);
+      const { rawHtml, html, text } = extractHtmlAndText($, $pane);
       if (html || text) {
         results.push({ title, html, rawHtml, text, source: 'bigcommerce' });
       }
