@@ -13,6 +13,7 @@ import { removeNoise } from './mergeRaw.js';
 import setupQueueRoutes from './queueRoutes.js';
 import { extractVariants } from './variantExtractor.js';
 import { extractSalesforceSku } from './harvesters/salesforce.js';
+import sharp from "sharp";
 
 
 // Removed GPT-ready helper: no longer needed
@@ -289,8 +290,31 @@ function findMainProductScope($) {
   return $.root();
 }
 
-function scoreByContext($, node, { mainOnly=false } = {}) {
-  if (isRecoBlock($, node) || isFooterOrNav($, node)) return -999;
+
+function isLinkedToOtherProduct($, node, baseUrl){
+  if (!baseUrl) return false;
+  try {
+    const $node = $(node);
+    const $a = $node.closest ? $node.closest('a[href]') : null;
+    if (!$a || !$a.length) return false;
+    const href = String($a.attr('href') || '').trim();
+    if (!href) return false;
+    // Zoom/lightbox links that point straight at an image file are not "other product" links.
+    if (/\.(?:jpe?g|png|webp|gif|avif)(?:[?#].*)?$/i.test(href)) return false;
+    const absHref = abs(baseUrl, href);
+    if (!absHref) return false;
+    const a = new URL(absHref);
+    const b = new URL(baseUrl);
+    if (a.origin !== b.origin) return false; // cross-origin handled by same-site/CDN checks elsewhere
+    const pa = a.pathname.replace(/\/+$/, '');
+    const pb = b.pathname.replace(/\/+$/, '');
+    if (pa && pa !== pb) return true; // links to a different page on this site (e.g. a related/cross-sell product)
+    return false;
+  } catch { return false; }
+}
+
+function scoreByContext($, node, { mainOnly=false, baseUrl=null } = {}) {
+  if (isRecoBlock($, node) || isFooterOrNav($, node) || isLinkedToOtherProduct($, node, baseUrl)) return -999;
   const inMain = isMainProductNode($, node);
   if (mainOnly) return inMain ? 2 : -999;
   return inMain ? 2 : 0;
@@ -1088,6 +1112,43 @@ app.get("/ingest", async (req, res) => {
     console.error("INGEST ERROR:", e);
     const status = e && e.status && Number.isFinite(+e.status) ? Number(e.status) : 500;
     return res.status(status >= 400 && status <= 599 ? status : 500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+
+// GET /image-proxy?url=<IMG_URL>  (fetches an image and transcodes AVIF/WebP to JPEG,
+// since some downstream consumers -- e.g. BigCommerce's product image API -- reject those formats)
+app.get('/image-proxy', async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || "");
+    if (!rawUrl) return res.status(400).json({ error: "Missing url param" });
+    const targetUrl = safeDecodeOnce(rawUrl);
+    if (!isHttpUrl(targetUrl)) return res.status(400).json({ error: "Invalid url param" });
+    const host = safeHostname(targetUrl);
+    if (ENABLE_BASIC_SSRF_GUARD && isLikelyDangerousHost(host)) {
+      return res.status(400).json({ error: "Blocked host" });
+    }
+
+    const upstream = await fetch(targetUrl, {
+      headers: { "Accept": "image/avif,image/webp,image/*,*/*;q=0.8" },
+      redirect: "follow"
+    });
+    if (!upstream.ok) {
+      return res.status(502).json({ error: "Upstream fetch failed", status: upstream.status });
+    }
+    const contentType = upstream.headers.get("content-type") || "";
+    const buf = Buffer.from(await upstream.arrayBuffer());
+
+    if (!/image\/avif|image\/webp/i.test(contentType)) {
+      res.set("Content-Type", contentType || "application/octet-stream");
+      return res.send(buf);
+    }
+
+    const jpegBuf = await sharp(buf).jpeg({ quality: 88 }).toBuffer();
+    res.set("Content-Type", "image/jpeg");
+    return res.send(jpegBuf);
+  } catch (e) {
+    return res.status(500).json({ error: "image-proxy failed", message: String((e && e.message) || e) });
   }
 });
 
@@ -2113,7 +2174,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     // prefer same site or known CDNs unless aggressive
     if (!aggressive && !isSameSiteOrCdn(baseUrl, absu) && !/\/media\/images\/items\//i.test(absu)) return;
 
-    const ctxScore = scoreByContext($, $el[0] || $el, { mainOnly });
+    const ctxScore = scoreByContext($, $el[0] || $el, { mainOnly, baseUrl });
     if (ctxScore <= -999) return;
 
     // quick size gate from attrs/styles (cheaper than URL parsing)
@@ -2323,7 +2384,7 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     const size = declaredSizeFor(s.url);
     const existing = seen.get(key);
     if (existing) {
-      if (size > existing.size) {
+      if (existing.size > 0 && size > existing.size) {
         existing.size = size;
         existing.entry.url = s.url;
       }
@@ -2405,7 +2466,7 @@ function extractImagesPlus($, structured, og, baseUrl, name, rawHtml, opts) {
     if (isBadImageUrl(u)) return;
     if (!isSameSiteOrCdn(baseUrl, u)) return;
 
-    const ctx = scoreByContext($, node, { mainOnly });
+    const ctx = scoreByContext($, node, { mainOnly, baseUrl });
     if (ctx <= -999) return;
 
     let score = baseScore + ctx;
@@ -2678,7 +2739,7 @@ function extractManualsPlus($, baseUrl, name, rawHtml, opts) {
     const u = decodeHtml(abs(baseUrl, url));
     if (!u) return;
     const L = u.toLowerCase();
-    const ctx = scoreByContext($, node, { mainOnly });
+    const ctx = scoreByContext($, node, { mainOnly, baseUrl });
     if (ctx <= -999) return;
         // If the URL does not look like a PDF or a known proxy (document, view,
         // download, asset, file) then skip it unless the baseScore is high.
