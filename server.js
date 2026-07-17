@@ -21,7 +21,7 @@ import { extractSalesforceSku } from './harvesters/salesforce.js';
 /* ================== Config via env ================== */
 const RENDER_API_URL   = (process.env.RENDER_API_URL || "").trim(); // e.g. https://medx-render-api.onrender.com
 const RENDER_API_TOKEN = (process.env.RENDER_API_TOKEN || "").trim(); // optional if renderer enforces auth
-const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "200", 10);
+const MIN_IMG_PX_ENV   = parseInt(process.env.MIN_IMG_PX || "550", 10);
 const EXCLUDE_PNG_ENV  = String(process.env.EXCLUDE_PNG || "false").toLowerCase() === "true";
 
 // Hardening & performance knobs
@@ -2273,15 +2273,65 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (ctx.inMain) score += 3;
     return { url: decodeHtml(u), score };
   }).sort((a,b) => b.score - a.score);
-  const seen = new Set();
-  const out  = [];
+  const seen = new Map(); // key -> { entry, size }
+
+  // Some CDNs (e.g. dynamic image-resize endpoints like GetImage.ashx?Width=..&Image=..)
+  // encode the real image identity inside a query-string value rather than the URL
+  // path, so a plain path-basename dedupe collapses every size of every photo on the
+  // page down to the same key (the endpoint name), silently dropping real photos and
+  // sometimes keeping a blurry thumbnail instead of the hero shot. Prefer a query
+  // value that itself looks like an image file path/name as the true identity key.
+  const identityKeyFor = (u) => {
+    try {
+      const parsed = new URL(u);
+      for (const v of parsed.searchParams.values()) {
+        if (/\.(?:jpe?g|png|webp|gif)(?:$|[?#])/i.test(v)) {
+          const inner = v.split('/').pop().split('?')[0].split('#')[0];
+          try { return decodeURIComponent(inner).toLowerCase(); } catch { return inner.toLowerCase(); }
+        }
+      }
+    } catch {}
+    const baseRaw = u.split('/').pop().split('?')[0];
+    try { return decodeURIComponent(baseRaw).toLowerCase(); } catch { return baseRaw.toLowerCase(); }
+  };
+
+  // Declared pixel size from width/height-style query params or a WxH pattern in the
+  // URL, so that when two candidates really are the same underlying image at
+  // different sizes, we keep the largest instead of whichever came first.
+  const declaredSizeFor = (u) => {
+    try {
+      const parsed = new URL(u);
+      let w = 0, h = 0;
+      for (const [k, v] of parsed.searchParams.entries()) {
+        const kl = k.toLowerCase();
+        const n = parseInt(v, 10);
+        if (!Number.isFinite(n)) continue;
+        if (kl === 'width' || kl === 'w') w = Math.max(w, n);
+        if (kl === 'height' || kl === 'h') h = Math.max(h, n);
+        if (kl === 'size') { w = Math.max(w, n); h = Math.max(h, n); }
+      }
+      if (w || h) return Math.max(w, h);
+    } catch {}
+    const m = /(\d{2,5})\s*x\s*(\d{2,5})/i.exec(u);
+    if (m) return Math.max(parseInt(m[1], 10), parseInt(m[2], 10));
+    return 0;
+  };
+
+  const out = [];
   for (const s of scored) {
-    const baseRaw = s.url.split("/").pop().split("?")[0];
-    let baseKey = baseRaw.toLowerCase();
-    try { baseKey = decodeURIComponent(baseRaw).toLowerCase(); } catch {}
-    if (seen.has(baseKey)) continue;
-    seen.add(baseKey);
-    out.push({ url: s.url });
+    const key = identityKeyFor(s.url);
+    const size = declaredSizeFor(s.url);
+    const existing = seen.get(key);
+    if (existing) {
+      if (size > existing.size) {
+        existing.size = size;
+        existing.entry.url = s.url;
+      }
+      continue;
+    }
+    const entry = { url: s.url };
+    seen.set(key, { size, entry });
+    out.push(entry);
     if (out.length >= 12) break;
   }
   return out;
