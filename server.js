@@ -321,20 +321,66 @@ function scoreByContext($, node, { mainOnly=false, baseUrl=null } = {}) {
 }
 
 function keyForImageDedup(url) {
-  const u = String(url||"");
+  const u = String(url || "");
+  // Prefer a real image filename/identity embedded in a query-string value
+  // (dynamic resize/CDN endpoints like GetImage.ashx?...&Image=foo.jpg encode
+  // the true photo identity in a query value, not the URL path/basename,
+  // which otherwise collapses every size of every photo to the same key).
+  try {
+    const parsed = new URL(u);
+    for (const v of parsed.searchParams.values()) {
+      if (/\.(?:jpe?g|png|webp|gif)(?:$|[?#])/i.test(v)) {
+        const inner = v.split("/").pop().split("?")[0].split("#")[0];
+        try { return decodeURIComponent(inner).toLowerCase(); } catch { return inner.toLowerCase(); }
+      }
+    }
+  } catch {}
   const base = u.split("/").pop().split("?")[0];
-  const size = (u.match(/(\d{2,5})x(\d{2,5})/) || []).slice(1).join("x");
-  return size ? `${base}#${size}` : base;
+  try { return decodeURIComponent(base).toLowerCase(); } catch { return base.toLowerCase(); }
+}
+
+function declaredSizeForDedup(url) {
+  const u = String(url || "");
+  try {
+    const parsed = new URL(u);
+    let w = 0, h = 0;
+    for (const [k, v] of parsed.searchParams.entries()) {
+      const kl = k.toLowerCase();
+      const n = parseInt(v, 10);
+      if (!Number.isFinite(n)) continue;
+      if (kl === "width" || kl === "w" || kl === "wid") w = Math.max(w, n);
+      if (kl === "height" || kl === "h" || kl === "hei") h = Math.max(h, n);
+      if (kl === "size") { w = Math.max(w, n); h = Math.max(h, n); }
+    }
+    if (w || h) return Math.max(w, h);
+  } catch {}
+  const m = /(\d{2,5})\s*x\s*(\d{2,5})/i.exec(u);
+  if (m) return Math.max(parseInt(m[1], 10), parseInt(m[2], 10));
+  return 0;
 }
 
 function dedupeImageObjs(cands, limit = 12) {
-  const seen = new Set();
+  // Dedupe by true photo identity, preferring the largest declared size per
+  // identity. Never let a candidate with a known (smaller) declared size
+  // displace an already-kept candidate whose size is unknown, since unsized
+  // URLs (no resize-service query params) are usually the raw full-res
+  // original rather than a thumbnail.
+  const seen = new Map(); // key -> { size, entry }
   const out = [];
   for (const c of cands) {
-    const k = keyForImageDedup(c.url);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push({ url: c.url });
+    const key = keyForImageDedup(c.url);
+    const size = declaredSizeForDedup(c.url);
+    const existing = seen.get(key);
+    if (existing) {
+      if (existing.size > 0 && size > existing.size) {
+        existing.size = size;
+        existing.entry.url = c.url;
+      }
+      continue;
+    }
+    const entry = { url: c.url };
+    seen.set(key, { size, entry });
+    out.push(entry);
     if (out.length >= limit) break;
   }
   return out;
@@ -1384,11 +1430,16 @@ function extractNormalized(baseUrl, html, opts) {
   try {
     const extraImgs = extractImagesPlus($, mergedSD, og, baseUrl, name, html, opts);
     if (extraImgs && extraImgs.length) {
+      // Preserve the primary pass's order (it already accounts for context
+      // and resolution via extractImages' size-aware dedupe); just append
+      // any genuinely new candidates the secondary pass found, then dedupe
+      // by real image identity + declared size so a low-res thumbnail can
+      // never displace an already-selected higher-res image. (Previously
+      // this re-scored everything by a crude keyword match and deduped by
+      // raw URL basename only, which could silently swap in blurry
+      // thumbnails for dynamic resize-service CDNs.)
       const combined = [...(images||[]).map(i => ({ url: i.url })), ...extraImgs];
-      const ranked = combined
-        .map(x => ({ url: x.url, score: /cdn|cloudfront|akamai|uploads|product|gallery/i.test(x.url) ? 2 : 0 }))
-        .sort((a,b)=> b.score - a.score);
-      const deduped = dedupeImageObjs(ranked, 12);
+      const deduped = dedupeImageObjs(combined, 12);
       images.length = 0; deduped.forEach(x => images.push(x));
     }
   } catch {}
