@@ -5297,8 +5297,8 @@ function sanitizeIngestPayload(p) {
   ].join('|'), 'i');
   out.images = (out.images || [])
     .map((o) => {
-      if (o && o.url && /imgcdn\.mckesson\.com\/CumulusWeb\/Images\/Item_Detail\//i.test(o.url)) {
-        return { ...o, url: o.url.replace(/\/Item_Detail\//i, '/High_Res/') };
+      if (o && o.url && /imgcdn\.mckesson\.com\/CumulusWeb\/Images\/(Item_Detail|High_Res)\//i.test(o.url)) {
+        return { ...o, url: o.url.replace(/\/(Item_Detail|High_Res)\//i, '/Original_Image/') };
       }
       return o;
     })
