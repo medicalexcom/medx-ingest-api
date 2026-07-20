@@ -361,25 +361,25 @@ function declaredSizeForDedup(url) {
 
 function dedupeImageObjs(cands, limit = 12) {
   // Dedupe by true photo identity, preferring the largest declared size per
-  // identity. Never let a candidate with a known (smaller) declared size
-  // displace an already-kept candidate whose size is unknown, since unsized
-  // URLs (no resize-service query params) are usually the raw full-res
-  // original rather than a thumbnail.
-  const seen = new Map(); // key -> { size, entry }
+  // identity. An unknown/undeclared size is treated as "assume original"
+  // (effectively larger than any explicitly-sized candidate) rather than as
+  // zero, so resolution -- not arrival order -- decides the winner.
+  const seen = new Map(); // key -> { effSize, entry }
   const out = [];
   for (const c of cands) {
     const key = keyForImageDedup(c.url);
-    const size = declaredSizeForDedup(c.url);
+    const rawSize = declaredSizeForDedup(c.url);
+    const effSize = rawSize > 0 ? rawSize : Infinity;
     const existing = seen.get(key);
     if (existing) {
-      if (existing.size > 0 && size > existing.size) {
-        existing.size = size;
+      if (effSize > existing.effSize) {
+        existing.effSize = effSize;
         existing.entry.url = c.url;
       }
       continue;
     }
     const entry = { url: c.url };
-    seen.set(key, { size, entry });
+    seen.set(key, { effSize, entry });
     out.push(entry);
     if (out.length >= limit) break;
   }
@@ -2440,17 +2440,25 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
   const out = [];
   for (const s of scored) {
     const key = identityKeyFor(s.url);
-    const size = declaredSizeFor(s.url);
+    const rawSize = declaredSizeFor(s.url);
+    // Treat an unknown/undeclared size as "assume original" (effectively
+    // larger than any explicitly-sized candidate) rather than as zero.
+    // Context/relevance score alone previously decided which candidate was
+    // tried first, which could rank a frequently-referenced small thumbnail
+    // (e.g. one hit by multiple extraction rules) above the true full-res
+    // original or an explicitly larger sized variant. Resolution now always
+    // wins within an identity group; score only matters between different photos.
+    const effSize = rawSize > 0 ? rawSize : Infinity;
     const existing = seen.get(key);
     if (existing) {
-      if (existing.size > 0 && size > existing.size) {
-        existing.size = size;
+      if (effSize > existing.effSize) {
+        existing.effSize = effSize;
         existing.entry.url = s.url;
       }
       continue;
     }
     const entry = { url: s.url };
-    seen.set(key, { size, entry });
+    seen.set(key, { effSize, entry });
     out.push(entry);
     if (out.length >= 12) break;
   }
