@@ -1164,6 +1164,12 @@ app.get("/ingest", async (req, res) => {
 
 // GET /image-proxy?url=<IMG_URL>  (fetches an image and transcodes AVIF/WebP to JPEG,
 // since some downstream consumers -- e.g. BigCommerce's product image API -- reject those formats)
+app.get('/debug/last-image-scores', (req, res) => {
+  if (req.query.enable === 'on') globalThis.__CAPTURE_IMG_DEBUG = true;
+  if (req.query.enable === 'off') globalThis.__CAPTURE_IMG_DEBUG = false;
+  res.json({ capturing: !!globalThis.__CAPTURE_IMG_DEBUG, data: globalThis.__lastImgDebug || null });
+});
+
 app.get('/image-proxy', async (req, res) => {
   try {
     const rawUrl = String(req.query.url || "");
@@ -2385,6 +2391,8 @@ function extractImages($, structured, og, baseUrl, name, rawHtml, opts){
     if (ctx.inMain) score += 3;
     return { url: decodeHtml(u), score };
   }).sort((a,b) => b.score - a.score);
+  try { if (globalThis.__CAPTURE_IMG_DEBUG) { globalThis.__lastImgDebug = scored.slice(0, 40).map(x => ({ url: x.url, score: x.score })); } } catch {}
+
   const seen = new Map(); // key -> { entry, size }
 
   // Some CDNs (e.g. dynamic image-resize endpoints like GetImage.ashx?Width=..&Image=..)
