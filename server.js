@@ -5296,6 +5296,12 @@ function sanitizeIngestPayload(p) {
     'compasshealthbrands\\.com\\/media\\/images\\/items\\/noimage'
   ].join('|'), 'i');
   out.images = (out.images || [])
+    .map((o) => {
+      if (o && o.url && /imgcdn\.mckesson\.com\/CumulusWeb\/Images\/Item_Detail\//i.test(o.url)) {
+        return { ...o, url: o.url.replace(/\/Item_Detail\//i, '/High_Res/') };
+      }
+      return o;
+    })
     .filter((o) => o && o.url && !badImg.test(o.url))
     .slice();
 
